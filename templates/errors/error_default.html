@@ -1,0 +1,25 @@
+{% extends "public/layout.html" %}
+
+{% block meta_title %}{{ $txt($status_code . '_meta_title', 'errors', 'citomni/http') }}{% endblock %}
+{% block meta_description %}{{ $txt($status_code . '_meta_description', 'errors', 'citomni/http') }}{% endblock %}
+{% block meta_keywords %}{{ $txt($status_code . '_meta_keywords', 'errors', 'citomni/http') }}{% endblock %}
+
+
+{% block main_content %}
+		<h1>{{ $txt($status_code . '_header', 'errors', 'citomni/http', 'Oops! Something went wrong.') }}</h1>
+		<p class="brodtekst">{{{ $txt($status_code . '_bodytext', 'errors', 'citomni/http', 'We’re sorry, but an unexpected error has occurred.<br>Please try again in a few minutes. If the problem persists, contact the site administrator or support team.<br>Thank you for your patience.') }}}</p>	
+		{% if (!empty($errors) && CITOMNI_ENVIRONMENT == 'dev') %}
+
+				{% foreach ($errors as $error) %}				
+					<div class="mt-4">
+						<P style="margin-top: 25px; line-height: 1.7rem;">
+							<strong>{{ $error["type_desc"] }}</strong><br>
+							{{ $error["message"] }}<br>							
+							{{ $error["file"] }}:{{ $error["line"] }}<br>
+							{{ $error["timestamp"] }}
+						</p>
+					</div>
+				{% endforeach %}						
+		{% endif %}
+		
+{% endblock %}

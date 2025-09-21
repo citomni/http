@@ -1,0 +1,446 @@
+<?php
+declare(strict_types=1);
+/*
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ * Copyright (C) 2012-2025 Lars Grove Mortensen
+ *
+ * CitOmni HTTP - High-performance HTTP runtime for CitOmni applications.
+ * Source:  https://github.com/citomni/http
+ * License: See the LICENSE file for full terms.
+ */
+
+namespace CitOmni\Http\Service;
+
+use CitOmni\Kernel\Service\BaseService;
+use LiteView\LiteView;
+
+/**
+ * View: Deterministic template rendering with lean global helpers for HTTP UI.
+ *
+ * Responsibilities:
+ * - Render a template file from the application "templates/" root (layer = 'app')
+ *   or from a vendor "layer" (e.g., "citomni/auth").
+ * - Provide a minimal, fast set of template globals and closures:
+ *   1) Identity & locale values (app_name, base_url, language, charset).
+ *   2) Environment flags (env.name, env.dev).
+ *   3) View passthroughs (marketing_scripts, view_vars).
+ *   4) Helpers: $txt, $url, $asset, $hasService, $hasPackage, $csrfField, $currentPath.
+ * - Keep logic lean and deterministic; avoid heavy abstractions or magic.
+ *
+ * Collaborators:
+ * - \LiteView\LiteView        (render engine).
+ * - $this->app->cfg           (read-only config wrapper; http/identity/locale/view/security).
+ * - $this->app->txt           (i18n lookups for $txt()).
+ * - $this->app->security      (optional: CSRF input via $csrfField()).
+ * - $this->app->hasService()  (feature probing inside templates).
+ * - $this->app->hasPackage()  (layer/package probing inside templates).
+ *
+ * Configuration keys read:
+ * - http.base_url                  (string) Absolute base URL used by $url() and $asset().
+ * - identity.app_name              (string) App display name.
+ * - locale.language                (string) Language code (e.g., "da", "en").
+ * - locale.charset                 (string) Charset (default "UTF-8").
+ * - view.asset_version             (string) Optional cache-busting value appended by $asset().
+ * - view.marketing_scripts         (string) Optional HTML snippet exposed as "marketing_scripts".
+ * - view.view_vars                 (array)  Arbitrary read-only vars exposed as "view_vars".
+ * - view.cache_enabled             (bool)   Enable LiteView caching (cache dir: <APP>/var/cache).
+ * - view.trim_whitespace           (bool)   Trim whitespace in rendered output.
+ * - view.remove_html_comments      (bool)   Remove HTML comments in output.
+ * - view.allow_php_tags            (bool)   Allow PHP tags in templates for LiteView.
+ * - security.csrf_protection       (bool)   Informational flag for templates.
+ * - security.honeypot_protection   (bool)   Informational flag for templates.
+ * - security.form_action_switching (bool)   Informational flag for templates.
+ * - security.captcha_protection    (bool)   Informational flag for templates.
+ *
+ * Behavior:
+ * - Path resolution:
+ *   1) When layer === 'app', render from the application templates root.
+ *   2) When a layer is provided (e.g., "citomni/auth"), resolve vendor root as
+ *      CITOMNI_APP_PATH . "/vendor/{layer}/templates".
+ *   3) The layer slug must match "vendor/package" (letters, digits, dot, dash, underscore).
+ * - URL derivation:
+ *   1) base_url = $this->app->cfg->http->base_url (must be absolute).
+ *   2) public_root_url = CITOMNI_PUBLIC_ROOT_URL if defined, else base_url.
+ * - Globals construction:
+ *   1) Built once per request (memoized) and reused for subsequent render() calls.
+ *   2) Provide closures that close over $this->app and config (no global state).
+ *   3) Caller-provided $data overrides any pre-defined globals by key.
+ * - Rendering engine:
+ *   - Uses LiteView::render($file, $root, cache_enabled, <APP>/var/cache,
+ *     trim_whitespace, remove_html_comments, $finalVars, allow_php_tags).
+ *
+ * Helpers exposed to templates (examples assume LiteView syntax):
+ * - {{ $txt('key', 'file', 'layer', 'Default', ['NAME' => 'Alice']) }}
+ *   Localized string with optional default and vars; layer is optional.
+ *
+ * - {{ $url('/path', ['q' => 'x']) }}
+ *   Joins base_url with a path and optional query map.
+ *
+ * - {{ $asset('/assets/app.css', '1.2.3') }}
+ *   Returns base_url + path and appends ?v=version if provided or if
+ *   view.asset_version is set; preserves existing query correctly.
+ *
+ * - {% if $hasService('auth') %} ... {% endif %}
+ *   Checks for a service id in the service map.
+ *
+ * - {% if $hasPackage('citomni/auth') %} ... {% endif %}
+ *   Checks presence of a vendor/package in the app (by your package probing).
+ *
+ * - {{{ $csrfField() }}}
+ *   Returns a prebuilt hidden input with the CSRF token if the Security
+ *   service is present and exposes csrfHiddenInput(); otherwise returns "".
+ *   Triple braces to avoid HTML escaping in the engine.
+ *
+ * Method contracts:
+ * - render(string $file, string $layer = 'app', array $data = []): void
+ *   Render $file from app templates (layer 'app') or a vendor layer; merges
+ *   globals with $data (caller overrides). Prints output; returns void.
+ *
+ * - buildGlobals(): array<string,mixed>
+ *   Construct the globals and closures for templates; memoized per request.
+ *
+ * - resolveVendorTemplateRoot(string $layer): string
+ *   Validate "vendor/package" slug and return the absolute "templates" dir.
+ *
+ * Error handling:
+ * - Invalid layer slugs throw \InvalidArgumentException.
+ * - Underlying renderer exceptions (missing template, syntax errors) bubble up
+ *   to the global error handler (fail fast); this class does not catch them.
+ *
+ * Performance & determinism:
+ * - No template discovery scans or autoload magic: call render() with explicit
+ *   relative paths like "public/login.html".
+ * - Globals are constructed per render call; closures do O(1) work and defer
+ *   service calls until used in the template.
+ * - Asset/version logic is branchless in the common case (no version set).
+ *
+ * Typical usage:
+ *   // Vendor layer template (CitOmni/Http)
+ *   $this->app->view->render('public/home.html', 'citomni/http', [
+ *   	'title' => 'Welcome'
+ *   ]);
+ *
+ *   // Provider layer template (e.g., CitOmni/Auth)
+ *   $this->app->view->render('public/login.html', 'citomni/auth', [
+ *   	'title' => 'Sign in'
+ *   ]);
+ *
+ * Examples (template side):
+ *   <!-- Absolute URL from base_url -->
+ *   <a href="{{ $url('/member/home.html') }}">Home</a>
+ *
+ *   <!-- Versioned static asset -->
+ *   <link rel="stylesheet" href="{{ $asset('/assets/app.css') }}">
+ *
+ *   <!-- Conditional menu item if Auth is installed -->
+ *   {% if $hasPackage('citomni/auth') %}
+ *   	<a href="{{ $url('/member/profile.html') }}">Profile</a>
+ *   {% endif %}
+ *
+ *   <!-- CSRF field inside a POST form -->
+ *   <form method="post" action="{{ $url('/login-handler.json') }}">
+ *   	{{{ $csrfField() }}}
+ *   	<!-- fields -->
+ *   </form>
+ *
+ * Template globals quick reference:
+ *  {{ $app_name }}                         				{# "My CitOmni App" #}
+ *  {{ $url('/path') }}                     				{# "https://host/base/path" #}
+ *  {{ $asset('/assets/app.css') }}         				{# "https://host/base/assets/app.css?v=..." (optional) #}
+ *  {% if $hasService('auth') %}...{% endif %}
+ *  {% if $hasPackage('citomni/auth') %}...{% endif %}
+ *  {{{ $csrfField() }}}
+ *  {{ $currentPath() }}
+ *  {{ $txt('key', 'file', 'vendor/package') }}
+ *
+ *
+ * Notes:
+ * - Ensure http.base_url is absolute and stable across environments.
+ * - If CITOMNI_PUBLIC_ROOT_URL is defined (recommended for stage/prod), it is
+ *   exposed as public_root_url for templates that need absolute canonical links.
+ * - Keep templates ASCII-only when possible; apply the configured charset when
+ *   escaping values you embed manually (the engine typically handles escaping).
+ *
+ * @throws \InvalidArgumentException If $templateLayer is not a valid "vendor/package" slug.
+ */
+class View extends BaseService {
+	
+	/** @var array<string,mixed>|null Cached globals for this request (built once). */
+	private ?array $globals = null;
+	
+	
+	/**
+	 * Service bootstrap hook.
+	 *
+	 * Behavior:
+	 * - Keep initialization minimal for cold-start performance.
+	 *
+	 * Notes:
+	 * - This service does not keep internal state; no warm-up required.
+	 *
+	 * Typical usage:
+	 *   // Nothing to call explicitly; the app constructs the service as needed.
+	 *
+	 * @return void
+	 */
+	/* 
+	protected function init(): void {
+		// Intentionally empty (lean boot).
+	}
+	*/
+	
+
+	/**
+	 * Render a template with merged globals and caller-provided data.
+	 *
+	 * The following globals are always available to LiteView templates:
+	 * - string  app_name
+	 * - string  base_url
+	 * - string  public_root_url
+	 * - string  language
+	 * - string  charset
+	 * - string  marketing_scripts
+	 * - array   view_vars
+	 * - bool    csrf_protection
+	 * - bool    honeypot_protection
+	 * - bool    form_action_switching
+	 * - bool    captcha_protection
+	 * - array   env { name: string, dev: bool }
+	 * - callable txt(string $key, string $file, ?string $layer = app, string $default = '', array $vars = []): string
+	 * - callable url(string $path = '', array $query = []): string
+	 * - callable asset(string $path, ?string $version = null): string
+	 * - callable hasService(string $id): bool
+	 * - callable hasPackage(string $slug): bool
+	 * - callable csrfField(): string   // returns '<input type="hidden" ...>' or '' if disabled
+	 * - callable currentPath(): string
+	 *
+	 * Caller-provided $data overrides globals on key collision.
+	 *
+	 * @param string $file   Relative template path (e.g. "public/login.html").
+	 * @param string $layer  "app" or "vendor/package" (e.g. "citomni/auth").
+	 * @param array<string,mixed> $data Template variables (caller wins over globals).
+	 * @return void
+	 *
+	 * @example Controller: render an app template
+	 *  $this->app->view->render('public/login.html');
+	 *
+	 * @example Controller: render a vendor-layer template with extra data
+	 *  $this->app->view->render('public/register.html', 'citomni/auth', [
+	 *  	'title' => 'Create account'
+	 *  ]);
+	 *
+	 * @example Template usage (LiteView)
+	 *  {# Build an absolute URL from base_url #}
+	 *  <a href="{{ $url('/member/home.html') }}">Home</a>
+	 *
+	 *  {# Static asset with optional versioning #}
+	 *  <link rel="stylesheet" href="{{ $asset('/assets/app.css') }}">
+	 *
+	 *  {# Conditional UI based on installed package #}
+	 *  {% if $hasPackage('citomni/auth') %}
+	 *  	<a href="{{ $url('/member/profile.html') }}">Profile</a>
+	 *  {% endif %}
+	 *
+	 *  {# i18n helper #}
+	 *  <h1>{{ $txt('login.title', 'auth', 'citomni/auth') }}</h1>
+	 *
+	 *  {# CSRF field (raw HTML → triple braces) #}
+	 *  <form method="post" action="{{ $url('/login-handler.json') }}">
+	 *  	{{{ $csrfField() }}}
+	 *  	<!-- fields -->
+	 *  </form>
+	 */
+	public function render(string $file, string $layer = 'app', array $data = []): void {
+		$templateRoot = ($layer === 'app')
+			? \CITOMNI_APP_PATH . '/templates'
+			: $this->resolveVendorTemplateRoot($layer);
+
+		// Build globals once per request; caller $data wins on key collisions.
+		$vars  = $this->globals ??= $this->buildGlobals();
+		$final = $data + $vars;
+
+		$cacheDir = \CITOMNI_APP_PATH . '/var/cache'; // keep using your existing cache dir
+
+		LiteView::render(
+			$file,
+			$templateRoot,
+			(bool)$this->app->cfg->view->cache_enabled,
+			$cacheDir,
+			(bool)$this->app->cfg->view->trim_whitespace,
+			(bool)$this->app->cfg->view->remove_html_comments,
+			$final,
+			(bool)$this->app->cfg->view->allow_php_tags
+		);
+	}
+
+	/**
+	 * Build a minimal, deterministic set of globals for templates.
+	 * Notes:
+	 * - Keep logic lean; use closures for anything that might touch services.
+	 * - Caller-provided $data can override any of these keys in render().
+	 *
+	 * @return array<string,mixed>
+	 */
+	private function buildGlobals(): array {
+		$cfg = $this->app->cfg; // read-only wrapper
+
+		// Resolve base/public URLs (prefer constant when defined)
+		$baseUrl = (string)($cfg->http->base_url ?? (\defined('CITOMNI_PUBLIC_ROOT_URL') ? \CITOMNI_PUBLIC_ROOT_URL : ''));
+		$publicUrl = \defined('CITOMNI_PUBLIC_ROOT_URL') ? (string)\CITOMNI_PUBLIC_ROOT_URL : $baseUrl;
+
+		return [
+			// --- Core identity & locale
+			'app_name'         => (string)$cfg->identity->app_name,
+			'base_url'         => $baseUrl,
+			'public_root_url'  => $publicUrl,
+			'language'         => (string)$cfg->locale->language,
+			'charset'          => (string)$cfg->locale->charset,
+
+			// --- View config passthroughs (kept small)
+			'marketing_scripts'=> (string)$cfg->view->marketing_scripts,
+			'view_vars'        => (array)$cfg->view->view_vars,
+
+			// --- Security toggles (informational for templates)
+			'csrf_protection'       => (bool)$cfg->security->csrf_protection,
+			'honeypot_protection'   => (bool)$cfg->security->honeypot_protection,
+			'form_action_switching' => (bool)$cfg->security->form_action_switching,
+			'captcha_protection'    => (bool)$cfg->security->captcha_protection,
+
+			// --- Environment flags
+			'env' => [
+				'name' => \defined('CITOMNI_ENVIRONMENT') ? (string)\CITOMNI_ENVIRONMENT : 'prod',
+				'dev'  => \defined('CITOMNI_ENVIRONMENT') ? (\CITOMNI_ENVIRONMENT === 'dev') : false,
+			],
+
+			// --- Lightweight helpers (closures are lazy, only run if used in templates)
+
+			/**
+			 * Language helper (layer-aware).
+			 * Usage in template: {{ $txt('login.title', 'auth', 'citomni/auth') }}
+			 */
+			'txt' => function (string $key, string $file, ?string $layer = null, string $default = '', array $vars = []) {				
+				if (!$this->app->hasService('txt') || !$this->app->hasPackage('citomni/infrastructure')) {
+					throw new \RuntimeException(
+						"Text service not available. Install 'citomni/infrastructure' and ensure the 'txt' service provider is registered in /config/providers.php."
+					);
+				}				
+				return $this->app->txt->get($key, $file, $layer, $default, $vars);
+			},
+
+			/**
+			 * URL helper (joins base_url + path + optional query).
+			 * Usage: {{ $url('/member/home.html') }} or {{ url('path', {'a': 1}) }}
+			 */
+			'url' => function (string $path = '', array $query = [] ) use ($baseUrl): string {
+				$p = '/' . \ltrim($path, '/');
+				if ($query !== []) {
+					$p .= '?' . \http_build_query($query);
+				}
+				return \rtrim($baseUrl, '/') . $p;
+			},
+
+			/**
+			 * Asset helper with optional cache-busting.
+			 * Keep it cheap: default is static version (from cfg) or none.
+			 * Usage: {{ $asset('/assets/app.css') }}
+			 */
+			'asset' => function (string $path, ?string $version = null) use ($baseUrl, $cfg): string {
+				if (\preg_match('~^https?://~i', $path)) {
+					return $path; // allerede absolut
+				}
+				$url = \rtrim($baseUrl, '/') . '/' . \ltrim($path, '/');
+				$ver = $version ?? (string)($cfg->view->asset_version ?? '');
+				return $ver !== '' ? $url . (str_contains($url, '?') ? '&' : '?') . 'v=' . \rawurlencode($ver) : $url;
+			},
+
+			/**
+			 * Does a service id exist?
+			 * Usage (logic blocks): {% if $hasService('auth') %} ... {% endif %}
+			 */
+			'hasService' => function (string $id): bool {
+				return $this->app->hasService($id);
+			},
+
+			/**
+			 * Is a vendor/package effectively present (from services/routes)?
+			 * Usage: {% if $hasPackage('citomni/auth') %} ... {% endif %}
+			 */
+			'hasPackage' => function (string $slug): bool {
+				return $this->app->hasPackage($slug);
+			},
+
+			/**
+			 * CSRF hidden input field (safe no-op if security service is absent).
+			 * Usage: {{{ $csrfField() }}}  (triple braces → no HTML escaping)
+			 */
+			'csrfField' => function (): string {
+				$svc = \method_exists($this->app, 'hasService') ? 'hasService' : 'has';
+				if ($this->app->{$svc}('security') && \method_exists($this->app->security, 'csrfHiddenInput')) {
+					return (string)$this->app->security->csrfHiddenInput();
+				}
+				return '';
+			},
+
+			/**
+			 * Current request path (lazy: only resolves if template asks).
+			 * Usage: {{ $currentPath() }}
+			 */
+			'currentPath' => function (): string {
+				// Only instantiate request service if called
+				return $this->app->request->path();
+			},
+
+
+			/**
+			 * Role helper (property-style and labels).
+			 * Supports role checks and label lookups via RoleGate.
+			 *
+			 * Usage in template:
+			 *   {{ $role('is', 'admin') }}         // true if current user is admin
+			 *   {{ $role('any', 'manager','op') }} // true if current role matches any
+			 *   {{ $role('label') }}               // localized label for current user
+			 *   {{ $role('labelOf', 9) }}          // label for specific id
+			 *   {{ $role('labels') }}              // map of id => label
+			 */
+			'role' => function (string $fn, mixed ...$args) {
+				$gate = $this->app->role;
+				switch ($fn) {
+					case 'label':   return $gate->label(...$args);           // $role('label')
+					case 'labelOf': return $gate->labelOf(...$args);         // $role('labelOf', 9)
+					case 'labels':  return $gate->labels(...$args);          // $role('labels')
+					case 'is':      return $gate->__get((string)$args[0]);   // $role('is','admin')
+					case 'any':     return $gate->any(...$args);             // $role('any','manager','operator')
+					default:
+						if (\defined('CITOMNI_ENVIRONMENT') && \CITOMNI_ENVIRONMENT === 'dev') {
+							throw new \InvalidArgumentException("Unknown role helper '{$fn}'.");
+						}
+						return false;
+				}
+			},
+
+		];
+	}
+
+	/**
+	 * Resolve the absolute templates root for a given vendor/package layer.
+	 *
+	 * Validates the slug strictly (guards against traversal), then builds:
+	 *   <APP_ROOT>/vendor/{vendor}/{package}/templates
+	 *
+	 * @param string $layer Slug "vendor/package" (e.g., "citomni/auth").
+	 * @return string Absolute filesystem path to the templates directory.
+	 *
+	 * @example Resolve and render
+	 *  $root = $this->resolveVendorTemplateRoot('citomni/auth');
+	 *  // LiteView::render('public/login.html', $root, ...);
+	 */
+	private function resolveVendorTemplateRoot(string $layer): string {
+		$slug = \trim($layer, '/');
+		if (!\preg_match('~^[a-z0-9._-]+/[a-z0-9._-]+$~i', $slug)) {
+			throw new \InvalidArgumentException(
+				"Invalid template layer '{$layer}'. Expected 'vendor/package', e.g. 'citomni/auth'."
+			);
+		}
+		return \CITOMNI_APP_PATH . '/vendor/' . $slug . '/templates';
+	}
+}

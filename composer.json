@@ -1,0 +1,69 @@
+{
+	"name": "citomni/http",
+	"description": "High-performance HTTP runtime for CitOmni apps: kernel boot glue, request/response, router, view, security (CSRF), maintenance mode, webhooks HMAC, and nonce ledger.",
+	"type": "library",
+	"license": "GPL-3.0-or-later",
+	"homepage": "https://github.com/citomni/http",
+	"keywords": [
+		"citomni", "http", "router", "request", "response", "csrf",
+		"maintenance", "webhooks", "hmac", "nonce", "view", "php8",
+		"framework", "psr-4", "performance", "high-performance"
+	],
+	"require": {
+		"php": "^8.2",
+		"citomni/kernel": "^1.0",
+		"liteview/liteview": "^1.0"
+	},
+	"autoload": {
+		"psr-4": {
+			"CitOmni\\Http\\": "src/"
+		}
+	},
+	"autoload-dev": {
+		"psr-4": {
+			"CitOmni\\Http\\Tests\\": "tests/"
+		}
+	},
+	"require-dev": {
+		"phpunit/phpunit": "^11.0",
+		"phpstan/phpstan": "^1.11"
+	},
+	"suggest": {
+		"ext-json": "Faster JSON handling for Response/ErrorHandler",
+		"ext-fileinfo": "Accurate MIME detection for Response::download()",
+		"ext-opcache": "Better performance and cache invalidation",
+		"citomni/infrastructure": "Optional services used when present (log, txt/mail/db)"
+	},
+	"support": {
+		"issues": "https://github.com/citomni/http/issues",
+		"source": "https://github.com/citomni/http",
+		"docs": "https://github.com/citomni/http#readme"
+	},
+	"authors": [
+		{
+			"name": "Lars Grove Mortensen",
+			"homepage": "https://www.citomni.com"
+		}
+	],
+	"config": {
+		"sort-packages": true,
+		"optimize-autoloader": true
+	},
+	"archive": {
+		"exclude": [
+			"/.github",
+			"/docs",
+			"/tests",
+			"/dev",
+			"/examples",
+			"/vendor",
+			"/.editorconfig",
+			"/.gitattributes",
+			"/.gitignore",
+			"/phpunit.xml*",
+			"/.idea",
+			"/.vscode",
+			"/Makefile"
+		]
+	}
+}

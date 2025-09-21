@@ -1,0 +1,17 @@
+<?php
+declare(strict_types=1);
+
+namespace CitOmni\Http\Controller;
+
+use CitOmni\Kernel\App;
+
+abstract class BaseController {
+	protected App $app;
+	/** @var array<string,mixed> */
+	protected array $ctx;
+
+	public function __construct(App $app, array $ctx = []) {
+		$this->app = $app;
+		$this->ctx = $ctx;
+	}
+}
