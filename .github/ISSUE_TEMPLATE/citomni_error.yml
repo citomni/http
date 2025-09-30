@@ -1,0 +1,166 @@
+name: "CitOmni Runtime Error"
+description: "Report a runtime error with stack trace (no secrets, no personal data)."
+title: "[bug] <short summary>"
+labels:
+  - bug
+  - needs-triage
+  - auto
+assignees: ["LarsGMortensen"] # e.g. ["LarsGMortensen"]
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting an issue with CitOmni.
+        Please do NOT include secrets, tokens, or personal data.
+
+  # --- Problem description first (UX) ---
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1) Go to ...
+        2) Click ...
+        3) Observe error ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: exp
+    attributes:
+      label: Expected behavior
+      placeholder: "What you expected to happen."
+    validations:
+      required: true
+
+  - type: textarea
+    id: act
+    attributes:
+      label: Actual behavior
+      placeholder: "What actually happened."
+    validations:
+      required: true
+
+  - type: dropdown
+    id: sev
+    attributes:
+      label: Severity
+      options:
+        - "S1 - Production down"
+        - "S2 - Major functionality broken"
+        - "S3 - Minor bug"
+        - "S4 - Trivial"
+    validations:
+      required: true
+
+  # --- Context / system fields (short IDs, prefillable) ---
+  - type: input
+    id: env
+    attributes:
+      label: Environment
+      placeholder: "prod | stage | dev"
+    validations:
+      required: true
+
+  - type: input
+    id: host
+    attributes:
+      label: Hostname / domain
+      placeholder: "example.com"
+    validations:
+      required: true
+
+  - type: input
+    id: url
+    attributes:
+      label: Full URL (if public/meaningful)
+      placeholder: "https://example.com/path"
+    validations:
+      required: false
+
+  - type: input
+    id: ts
+    attributes:
+      label: Timestamp (server local time)
+      placeholder: "YYYY-MM-DD HH:MM:SS"
+    validations:
+      required: true
+
+  # --- Error details ---
+  - type: textarea
+    id: msg
+    attributes:
+      label: Error message
+      placeholder: "syntax error, unexpected variable '$details'"
+    validations:
+      required: true
+
+  - type: input
+    id: file
+    attributes:
+      label: File
+      placeholder: "src/Http/Controller/PublicController.php"
+    validations:
+      required: true
+
+  - type: input
+    id: line
+    attributes:
+      label: Line
+      placeholder: "67"
+    validations:
+      required: true
+
+  - type: textarea
+    id: trace
+    attributes:
+      label: Stack trace (safe, bounded)
+      description: "Paste the truncated trace from the error page."
+      placeholder: "#0 /path/file.php(123): Foo->bar()..."
+    validations:
+      required: true
+
+  # --- Ecosystem metadata ---
+  - type: dropdown
+    id: pkg
+    attributes:
+      label: Affected package
+      description: "Select the primary CitOmni package involved."
+      multiple: true
+      options:
+        - citomni/http
+        - citomni/kernel
+        - citomni/cli
+        - citomni/auth
+        - citomni/infrastructure
+        - citomni/testing
+        - citomni/admin
+        - other/unknown
+    validations:
+      required: true
+
+  - type: input
+    id: vers
+    attributes:
+      label: Versions
+      description: "citomni/* packages and PHP version"
+      placeholder: "citomni/http 1.0.x; citomni/kernel 1.0.x; PHP 8.2.x"
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Data and privacy
+      options:
+        - label: "I confirm this report contains no secrets, tokens, or personal data."
+          required: true
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Additional context
+      placeholder: "Screenshots, sanitized logs, or config snippets."
+    validations:
+      required: false

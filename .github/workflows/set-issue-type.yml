@@ -1,0 +1,11 @@
+name: Set issue type
+on:
+  issues:
+    types: [opened, labeled]
+
+permissions:
+  issues: write
+
+jobs:
+  apply:
+    uses: citomni/.github/.github/workflows/set-issue-type.yml@main
