@@ -132,16 +132,23 @@ final class Kernel {
 		$app->router->run();
 
 		if (isset($_GET['_perf'])) {
-			// Performance-monitor in footer (harmless in HTML)
-			$start = \defined('CITOMNI_START_TIME') ? (float)\CITOMNI_START_TIME : \microtime(true);
-			$elapsed = \round((\microtime(true) - $start), 3);		
-			echo PHP_EOL;
-			echo '<!-- Execution time: ' . $elapsed . ' sec. Current memory: ' . \memory_get_usage() . ' bytes. Peak memory: ' . \memory_get_peak_usage() . ' bytes. Included files: ' . count(get_included_files()) . ' -->';
-			echo PHP_EOL;
+			// Performance monitor in footer (harmless in HTML)
+			// CITOMNI_START_NS now holds hrtime(true) in nanoseconds.
+			// $startNs    = \defined('CITOMNI_START_NS') ? (int)\CITOMNI_START_NS : \hrtime(true);
+			// $elapsedNs  = \hrtime(true) - $startNs;
+			// $elapsedSec = $elapsedNs / 1_000_000_000;
+			// $elapsedStr = \number_format($elapsedSec, 3, '.', ''); // e.g. "0.123"
+			$elapsedStr = \sprintf('%.3f', ((($nowNs=\hrtime(true))) - (\defined('CITOMNI_START_NS') ? (int)\CITOMNI_START_NS : $nowNs)) / 1_000_000_000);
+
+
+			echo \PHP_EOL;
+			echo '<!-- Execution time: ' . $elapsedStr . ' s. Current memory: ' . \memory_get_usage() . ' bytes. Peak memory: ' . \memory_get_peak_usage() . ' bytes. Included files: ' . \count(\get_included_files()) . ' -->';
+			echo \PHP_EOL;
 			echo '<!--';
-			var_dump(get_included_files());
+			var_dump(\get_included_files());
 			echo '-->';
 		}
+
 	}
 	
 	

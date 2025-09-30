@@ -240,7 +240,7 @@ final class Config {
 				'controller' => \CitOmni\Http\Controller\PublicController::class,
 				'action' => 'index',
 				'methods' => ['GET'],
-				'template_file' => 'public/index.html',
+				'template_file' => 'public/status.html',
 				'template_layer' => 'citomni/http'
 			],
 
@@ -249,7 +249,7 @@ final class Config {
 				'controller' => \CitOmni\Http\Controller\PublicController::class,
 				'action' => 'errorPage',
 				'methods' => ['GET'],
-				'template_file' => 'errors/error_default.html',
+				'template_file' => 'public/status.html',
 				'template_layer' => 'citomni/http',
 				'params' => [403]
 			],
@@ -257,7 +257,7 @@ final class Config {
 				'controller' => \CitOmni\Http\Controller\PublicController::class,
 				'action' => 'errorPage',
 				'methods' => ['GET'],
-				'template_file' => 'errors/error_default.html',
+				'template_file' => 'public/status.html',
 				'template_layer' => 'citomni/http',
 				'params' => [404]
 			],
@@ -265,7 +265,7 @@ final class Config {
 				'controller' => \CitOmni\Http\Controller\PublicController::class,
 				'action' => 'errorPage',
 				'methods' => ['GET'],
-				'template_file' => 'errors/error_default.html',
+				'template_file' => 'public/status.html',
 				'template_layer' => 'citomni/http',
 				'params' => [405]
 			],
@@ -273,7 +273,7 @@ final class Config {
 				'controller' => \CitOmni\Http\Controller\PublicController::class,
 				'action' => 'errorPage',
 				'methods' => ['GET'],
-				'template_file' => 'errors/error_default.html',
+				'template_file' => 'public/status.html',
 				'template_layer' => 'citomni/http',
 				'params' => [500]
 			],
