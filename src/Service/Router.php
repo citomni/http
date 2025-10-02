@@ -30,9 +30,10 @@ use CitOmni\Kernel\Service\BaseService;
  *   1) HEAD is auto-allowed when GET is allowed.
  *   2) OPTIONS always allowed for matched resources (sends 204 + Allow).
  *   3) 405 for disallowed methods (sends Allow).
- * - Provide robust error routing with a reentrancy guard:
- *   1) First error attempts configured error route or framework default.
- *   2) Nested errors fall back to a minimal plain-text renderer.
+ * - Provide robust error dispatching via the HTTP ErrorHandler:
+ *   1) Router delegates all 404/405/5xx conditions to \CitOmni\Http\Service\ErrorHandler::httpError() 
+ *   (logging + rendering, no-blank guarantee; for 405 the mandatory 'Allow' header is set before delegation).
+ *   2) Router never renders itself; re-entrancy and nested failures are handled inside the ErrorHandler.
  *
  * Collaborators:
  * - $this->app->cfg     (read): Provides the merged routes array and toggles.
@@ -72,8 +73,8 @@ use CitOmni\Kernel\Service\BaseService;
  * - 404: No route matched (exact or regex).
  * - 405: Route matched but the method is not allowed (sends Allow header).
  * - 500: Missing controller class or missing action method.
- * - Error dispatch uses a reentrancy guard; on nested failure a minimal plain
- *   response is emitted with the original status code.
+ * - Router delegates all error rendering/logging to Http\Service\ErrorHandler 
+ *   to guarantee no-blank responses.
  *
  * Performance & determinism:
  * - Exact-match fast path before regex evaluation.
@@ -174,8 +175,11 @@ class Router extends BaseService {
 
 		// 1a) ASCII-only guard (defense-in-depth)
 		if (\preg_match('/[^\x00-\x7F]/', $uri)) {
-			\http_response_code(404);
-			$this->dispatchError(404);
+			$this->app->errorHandler->httpError(404, [
+				'path'   => $uri,
+				'method' => $method,
+				'reason' => 'invalid_uri_non_ascii',
+			]);
 			return;
 		}
 
@@ -215,8 +219,12 @@ class Router extends BaseService {
 		}
 
 		// 5) 404 when no routes matched
-		\http_response_code(404);
-		$this->dispatchError(404);
+		$this->app->errorHandler->httpError(404, [
+			'path'   => $uri,
+			'method' => $method,
+			'reason' => 'route_not_found',
+		]);
+		return;
 	}
 
 
@@ -323,9 +331,17 @@ class Router extends BaseService {
 
 		// Guard disallowed methods (405 + Allow)
 		if ($allowed && !\in_array($method, $allowed, true)) {
-			\http_response_code(405);
+			
+			// RFC 9110 (HTTP Semantics): A 405 response MUST include an 'Allow' header listing the methods
+			// permitted for the target resource. Keep this header in place.
 			\header('Allow: ' . \implode(', ', $allowed), true);
-			$this->dispatchError(405);
+
+			$this->app->errorHandler->httpError(405, [
+				'method'  => $method,
+				'allowed' => $allowed,
+				'route'   => $route, // The matched route configuration that did not allow the current HTTP method (for logging/diagnostics).
+				'reason'  => 'method_not_allowed',
+			]);
 			return;
 		}
 
@@ -335,8 +351,12 @@ class Router extends BaseService {
 
 		// Controller must exist (FQCN); otherwise treat as server error
 		if ($controller === null || !\class_exists($controller)) {
-			\http_response_code(500);
-			$this->dispatchError(500);
+			$this->app->errorHandler->httpError(500, [
+				'reason'     => 'controller_missing',
+				'controller' => (string)$controller,
+				'action'     => $action,
+				'route'      => $route,
+			]);
 			return;
 		}
 
@@ -348,9 +368,12 @@ class Router extends BaseService {
 
 		// Action must exist; warn for developers and route to 500
 		if (!\method_exists($controllerInstance, $action)) {
-			\trigger_error("Action '{$action}' not found in controller '{$controller}'.", \E_USER_WARNING);
-			\http_response_code(500);
-			$this->dispatchError(500);
+			$this->app->errorHandler->httpError(500, [
+				'reason'     => 'action_missing',
+				'controller' => $controller,
+				'action'     => $action,
+				'route'      => $route,
+			]);
 			return;
 		}
 
@@ -359,80 +382,4 @@ class Router extends BaseService {
 
 	}
 	
-
-	/**
-	 * Dispatch an error route safely.
-	 *
-	 * Uses a simple reentrancy guard so that if the error route throws,
-	 * we fall back to a plain-text minimal error for the original code.
-	 *
-	 * @param int $code   HTTP status code to render
-	 * @param list<mixed> $params Optional params for the error action
-	 * @return void
-	 */
-	private function dispatchError(int $code, array $params = []): void {
-		static $errorDepth = 0;   // int
-		static $firstCode = null; // int|null
-
-		if ($errorDepth === 0) {
-			$firstCode = $code; // remember the original code
-		}
-		$errorDepth++;
-
-		// If we are already handling an error, do a minimal plain fallback
-		if ($errorDepth > 1) {
-			$this->renderPlainError($firstCode ?? $code);
-			$errorDepth = 0;
-			$firstCode = null;
-			return;
-		}
-
-		$route = $this->errorRoute($code);
-		$this->dispatch($route, 'GET', $route['params'] ?? $params);
-
-		// Reset guard state after a single attempt
-		$errorDepth = 0;
-		$firstCode = null;
-	}
-
-
-	/**
-	 * Resolve error route from configuration or use a framework default.
-	 *
-	 * @param int $code HTTP status code (e.g., 404, 500)
-	 * @return array<string,mixed> A route array suitable for dispatch()
-	 */
-	private function errorRoute(int $code): array {
-		// $cfgArr = $this->app->cfg->toArray();
-		// if (isset($cfgArr['routes'][$code]) && \is_array($cfgArr['routes'][$code])) {
-			// return $cfgArr['routes'][$code];
-		// }
-		$routes = $this->app->cfg->routes ?? null;
-		if (\is_array($routes) && isset($routes[$code]) && \is_array($routes[$code])) {
-			return $routes[$code];
-		}
-
-		// Framework default error page (adjust to your public controller if needed)
-		return [
-			'controller'     => \CitOmni\Http\Controller\PublicController::class,
-			'action'         => 'errorPage',
-			'methods'        => ['GET'],
-			'template_file'  => 'errors/error_default.html',
-			'template_layer' => 'citomni/http',
-			'params'         => [$code]
-		];
-	}
-
-
-	/**
-	 * Minimal last-resort error output (no templating, no controllers).
-	 *
-	 * @param int $code HTTP status code to render
-	 * @return void
-	 */
-	private function renderPlainError(int $code): void {
-		\http_response_code($code);
-		\header('Content-Type: text/plain; charset=UTF-8');
-		echo "HTTP {$code}\n";
-	}
 }

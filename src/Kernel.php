@@ -19,55 +19,72 @@ use CitOmni\Kernel\Mode;
  * Kernel: High-performance HTTP bootstrapper and dispatcher for CitOmni apps.
  *
  * Responsibilities:
- * - Boot the application in HTTP mode.
+ * - Boot the application in HTTP mode with deterministic config/service merges.
  *   1) Resolve [appRoot, configDir, publicPath] from a flexible $entryPath.
- *   2) Instantiate App($configDir, Mode::HTTP) with deterministic config/service merges
- *      (vendor baseline -> providers -> app base -> env overlay). Precompiled caches under
- *      /var/cache are used when present.
- *   3) Do not catch exceptions; let the global error handler log them. No surprises.
- * - Apply environment defaults and wire services.
+ *   2) Instantiate App($configDir, Mode::HTTP). Vendor baseline is merged with providers, app base,
+ *      and environment overlays; precompiled caches under /var/cache are used when present.
+ *   3) Never catch exceptions in Kernel; downstream failures are handled by the ErrorHandler service.
+ *
+ * - Apply environment defaults and wire services required early in the request lifecycle.
  *   1) Set timezone (cfg.locale.timezone, default "UTC") and charset (cfg.locale.charset, default "UTF-8").
  *   2) Define CITOMNI_PUBLIC_ROOT_URL (DEV allows auto-detect; non-DEV requires absolute cfg.http.base_url).
- *   3) Pass cfg.http.trusted_proxies to Request (proxy-aware IP/URL resolution when configured).
- *   4) Install the HTTP ErrorHandler if present, using cfg.error_handler.
+ *   3) Apply cfg.http.trusted_proxies to the Request service (enables proxy-aware IP/URL resolution).
+ *   4) Install the HTTP ErrorHandler service early ... (reads cfg.error_handler once via its 
+ *      constructor/options; no other service resolution).
+ *
  * - Dispatch the HTTP request lifecycle.
- *   1) Enforce maintenance via $app->maintenance->guard() (argument-free, flag-first).
- *   2) Route and dispatch via $app->router->run().
+ *   1) Start a single, top-level output buffer as early as possible to prevent partial output. This allows
+ *      the ErrorHandler to fully replace the response on failures (status line + headers + body).
+ *   2) Enforce maintenance via $app->maintenance->guard() (flag-first, deterministic behavior).
+ *   3) Route and dispatch via $app->router->run() (404/405/5xx are delegated to ErrorHandler::httpError()).
+ *   4) Optionally emit a DEV-friendly performance footer when ?_perf is present.
+ *
+ * Request lifecycle (order of operations):
+ *   - Output buffer start -> boot() -> ErrorHandler install -> timezone & charset -> public root URL
+ *     -> trusted proxies -> maintenance guard -> router run -> optional perf footer.
  *
  * Collaborators:
- * - \CitOmni\Kernel\App (container; read-only cfg; resolves services)
- * - request (reads cfg.http.trusted_proxies; proxy-aware IP/host handling)
- * - maintenance (reads maintenance flag; denies when active)
- * - router (resolves route and invokes controllers)
- * - \CitOmni\Http\Exception\ErrorHandler (optional; installed via ::install(array $cfg))
+ * - \CitOmni\Kernel\App - Container exposing read-only cfg and resolving services (service map may be cached under /var/cache).
+ * - request (HTTP Request service) - Reads cfg.http.trusted_proxies; made proxy-aware by Kernel during boot.
+ * - maintenance (Maintenance service) - Enforces maintenance mode based on a flag file and service policy. Kernel does not pass arguments.
+ * - router (Router service) - Resolves the route (exact or regex with placeholders) and invokes controllers. On errors, delegates to ErrorHandler::httpError($status, $context) for guaranteed responses (404/405/500).
+ * - \CitOmni\Http\Service\ErrorHandler - Guarantees "no blank page" for: Uncaught exceptions, Shutdown fatals (E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR, E_USER_ERROR), Router HTTP errors (404/405/5xx). Non-fatal PHP errors (warnings/notices/etc.) may optionally render in DEV via cfg.
  *
- * Configuration keys:
- * - cfg.locale.timezone (string) - Default "UTC"; invalid values throw at boot.
- * - cfg.locale.charset (string) - Default "UTF-8"; failure to set throws at boot.
- * - cfg.http.base_url (string, absolute URL, no trailing slash) - Required in non-DEV; in DEV optional
- *   (auto-detect used when absent). Example: "https://www.example.com".
- * - cfg.http.trust_proxy (bool) - Honor X-Forwarded-* only when true (auto-detect path/host).
- * - cfg.http.trusted_proxies (string[] of IPs/CIDRs) - List of trusted proxies for Request.
- * - cfg.error_handler.log_file (string) - Default: <appRoot>/var/logs/system_error_log.json.
- * - cfg.error_handler.recipient (string) - E-mail recipient for error digests; empty disables mail.
- * - cfg.error_handler.sender (string) - Sender; defaults to cfg.mail.from.email when not set.
- * - cfg.error_handler.max_log_size (int, bytes) - Default 10,485,760.
- * - cfg.error_handler.template (string) - Optional branded HTML error page template.
- * - cfg.error_handler.display_errors (bool) - Default true in DEV; false otherwise.
+ * Configuration keys (relevant excerpts):
+ * - cfg.locale.timezone (string) - Default: "UTC". Invalid values throw at boot.
+ * - cfg.locale.charset (string) - Default: "UTF-8". If ini_set('default_charset', ...) fails, Kernel throws at boot.
+ * - cfg.http.base_url (string; absolute URL, no trailing slash) - Required in non-DEV. In DEV, if missing/relative, Kernel auto-detects (optionally proxy-aware). Example: "https://www.example.com".
+ * - cfg.http.trust_proxy (bool) - When true, auto-detection of CITOMNI_PUBLIC_ROOT_URL may honor X-Forwarded-* headers.
+ * - cfg.http.trusted_proxies (string[] of IPs/CIDRs) - List of trusted proxies for the Request service (e.g., ["10.0.0.0/8"]).
+ * - cfg.error_handler.render.trigger (int; PHP error bitmask) - Controls which non-fatal PHP errors trigger rendering (DEV convenience). Fatals are always rendered and are sanitized out of this mask even if misconfigured.
+ * - cfg.error_handler.render.detail.level (int) - 0 = minimal client message (prod/stage), 1 = developer details (only active in 'dev').
+ * - cfg.error_handler.render.detail.trace.{max_frames, max_arg_strlen, max_array_items, max_depth, ellipsis} - Bounded trace formatting when detail.level = 1 (and CITOMNI_ENVIRONMENT === 'dev').
+ * - cfg.error_handler.render.force_error_reporting (int, optional) - Hard override of error_reporting() at handler install time (e.g., E_ALL in dev).
+ * - cfg.error_handler.log.trigger (int; PHP error bitmask), cfg.error_handler.log.path (string),
+ *   cfg.error_handler.log.max_bytes (int), cfg.error_handler.log.max_files (int) - Robust JSONL logs with size-based rotation and pruning. Router 404/405/5xx are always logged to dedicated files: http_router_404.jsonl, http_router_405.jsonl, http_router_5xx.jsonl.
+ * - cfg.error_handler.templates.html (string), cfg.error_handler.templates.html_failsafe (string|null) - Optional plain-PHP templates for error pages. The handler falls back to a built-in minimal HTML if missing.
+ * - cfg.error_handler.status_defaults.{exception, shutdown, php_error, http_error} (int) - Default HTTP status codes used by the handler when a specific mapping is not present.
  *
  * Error handling:
- * - Fail fast:
- *   - Invalid timezone or charset -> \RuntimeException.
- *   - Unresolvable entry path / missing config dir -> \RuntimeException.
- *   - Non-DEV without absolute cfg.http.base_url -> \RuntimeException.
- * - Kernel does not swallow exceptions from downstream services/controllers. They bubble to the
- *   global error handler (which is exactly where we want them).
+ * - Fail fast in Kernel:
+ *     - Invalid timezone -> \RuntimeException.
+ *     - Failed default charset -> \RuntimeException.
+ *     - Unresolvable entry path / missing config dir -> \RuntimeException.
+ *     - Non-DEV without absolute cfg.http.base_url -> \RuntimeException.
+ * - No try/catch in Kernel. The ErrorHandler service is installed early and is responsible for:
+ *     - Uncaught exceptions,
+ *     - Shutdown fatals,
+ *     - Router HTTP errors (404/405/5xx),
+ *     ensuring a complete client response (HTML or JSON) and structured logs (JSONL).
+ * - Output buffering:
+ *     - Kernel starts one top-level output buffer before booting the App. This prevents accidental
+ *       partial responses and enables the handler to clear buffers and fully replace the response.
  *
  * Typical usage:
  *
  *   // public/index.php
  *   declare(strict_types=1);
- *   define('CITOMNI_START_TIME', microtime(true));
+ *   define('CITOMNI_START_NS', hrtime(true));
  *   define('CITOMNI_ENVIRONMENT', 'dev');               // or 'prod' in production
  *   define('CITOMNI_PUBLIC_PATH', __DIR__);
  *   define('CITOMNI_APP_PATH', \dirname(__DIR__));
@@ -85,19 +102,48 @@ use CitOmni\Kernel\Mode;
  *     'http' => ['base_url' => 'https://www.example.com', 'trust_proxy' => false],
  *   ];
  *
- *   // C) DEV auto-detect base URL (behind a proxy)
+ *   // C) DEV auto-detect base URL behind a proxy
  *   // In /config/citomni_http_cfg.dev.php:
  *   return [
  *     'http' => ['trust_proxy' => true, 'trusted_proxies' => ['10.0.0.0/8']],
+ *   ];
+ *
+ *   // D) ErrorHandler DEV overlay (render non-fatals + show details)
+ *   // In /config/citomni_http_cfg.dev.php:
+ *   return [
+ *     'error_handler' => [
+ *       'render' => [
+ *         'trigger' => E_WARNING | E_NOTICE | E_CORE_WARNING | E_COMPILE_WARNING
+ *                    | E_USER_WARNING | E_USER_NOTICE | E_RECOVERABLE_ERROR
+ *                    | E_DEPRECATED | E_USER_DEPRECATED,
+ *         'detail'  => ['level' => 1],
+ *         'force_error_reporting' => E_ALL,
+ *       ],
+ *     ],
  *   ];
  *
  * Failure:
  *
  *   // Non-DEV without absolute base_url:
  *   define('CITOMNI_ENVIRONMENT', 'prod');
- *   // Missing cfg.http.base_url -> \CitOmni\Http\Kernel::run(...) will throw \RuntimeException.
- *   // Intended: PROD must be explicit about its public root; auto-detect is DEV-only.
+ *   // Missing cfg.http.base_url -> \CitOmni\Http\Kernel::boot(...) throws \RuntimeException.
  *
+ *   // Invalid timezone (cfg.locale.timezone):
+ *   // date_default_timezone_set() fails -> \RuntimeException.
+ *
+ *   // Invalid charset (cfg.locale.charset):
+ *   // ini_set('default_charset', ...) fails or mismatch -> \RuntimeException.
+ *
+ * Notes:
+ * - CITOMNI_PUBLIC_ROOT_URL:
+ *     - If pre-defined by the entrypoint or deploy tooling, Kernel respects it.
+ *     - In 'dev': if cfg.http.base_url is absolute, it is used; else Kernel auto-detects (optionally
+ *       honoring X-Forwarded-* when cfg.http.trust_proxy is true).
+ *     - In non-dev: cfg.http.base_url MUST be an absolute URL, otherwise Kernel throws.
+ *
+ * - Performance footer:
+ *     - When the query parameter ?_perf is present, Kernel emits a harmless HTML comment footer with timing,
+ *       memory, and included file counts-useful for local diagnostics.
  */
 final class Kernel {	
 	
@@ -117,6 +163,12 @@ final class Kernel {
 	 */
 	public static function run(string $entryPath, array $opts = []): void {
 
+		// Start a single, top-level output buffer as early as possible.
+		// Goal: prevent partial/fragmented output so ErrorHandler can clear buffers and emit a full response
+		// (status line + headers + body) atomically. Disable implicit flush so nothing is sent prematurely.
+		\ob_start();
+		\ob_implicit_flush(false);
+
         // Accept either public/, config/, or app-root
 		$app = self::boot($entryPath, $opts);
 
@@ -132,6 +184,7 @@ final class Kernel {
 		$app->router->run();
 
 		if (isset($_GET['_perf'])) {
+			
 			// Performance monitor in footer (harmless in HTML)
 			// CITOMNI_START_NS now holds hrtime(true) in nanoseconds.
 			// $startNs    = \defined('CITOMNI_START_NS') ? (int)\CITOMNI_START_NS : \hrtime(true);
@@ -139,7 +192,6 @@ final class Kernel {
 			// $elapsedSec = $elapsedNs / 1_000_000_000;
 			// $elapsedStr = \number_format($elapsedSec, 3, '.', ''); // e.g. "0.123"
 			$elapsedStr = \sprintf('%.3f', ((($nowNs=\hrtime(true))) - (\defined('CITOMNI_START_NS') ? (int)\CITOMNI_START_NS : $nowNs)) / 1_000_000_000);
-
 
 			echo \PHP_EOL;
 			echo '<!-- Execution time: ' . $elapsedStr . ' s. Current memory: ' . \memory_get_usage() . ' bytes. Peak memory: ' . \memory_get_peak_usage() . ' bytes. Included files: ' . \count(\get_included_files()) . ' -->';
@@ -177,65 +229,36 @@ final class Kernel {
 		// Resolve paths (app root, config dir, public path)
 		[$appRoot, $configDir, $publicPath] = self::resolvePaths($entryPath);
 
-		// Construct the App container for HTTP mode
+		// 1) Construct the App container for HTTP mode
 		$app = new App($configDir, Mode::HTTP);
 
-		/*
-		// Back-compat constants for legacy code (define once)
-		if (!\defined('CITOMNI_APP_PATH')) {
-			\define('CITOMNI_APP_PATH', $appRoot);
-		}
-		if (!\defined('CITOMNI_PUBLIC_PATH')) {
-			\define('CITOMNI_PUBLIC_PATH', $publicPath);
-		}
-		*/
+		// 2) Error handler (optional)
+		// If you ship a handler, expose a static ::install(array $cfg) method.
+		// Reads exclusively from cfg.error_handler
+		$app->errorHandler->install();
 
-		// 1) Timezone
+		// 3) Timezone
 		$tz = (string)($app->cfg->locale->timezone ?? 'UTC');
 		if (!@date_default_timezone_set((string)$tz)) {
 			throw new \RuntimeException('Invalid timezone: ' . (string)$tz);
 		}
 
-		// 2) Charset
+		// 4) Charset
 		$charset = (string)($app->cfg->locale->charset ?? 'UTF-8');
 		if (!@ini_set('default_charset', $charset) || \ini_get('default_charset') !== $charset) {
 			throw new \RuntimeException('Failed to set default charset to ' . $charset);
 		}
 
-		// 3) Define CITOMNI_PUBLIC_ROOT_URL (env-aware)
+		// 5) Define CITOMNI_PUBLIC_ROOT_URL (env-aware)
 		self::definePublicRootUrl($app);
 
-		// Wire http.trusted_proxies into Request service
+		// 6) Wire http.trusted_proxies into Request service
 		// If http.trusted_proxies is defined in the configuration, inject it into
 		// the Request service. This way we make sure that client IP resolution becomes proxy-aware
 		// (i.e. behind load balancers or reverse proxies).
 		$tp = $app->cfg->http->trusted_proxies ?? null; // null|array
 		if (\is_array($tp)) {
 			$app->request->setTrustedProxies($tp);
-		}
-
-
-		// 4) Error handler (optional)
-		// If you ship a handler, expose a static ::install(array $cfg) method.
-		// Reads exclusively from cfg.error_handler
-		if (\class_exists('\\CitOmni\\Http\\Exception\\ErrorHandler')) {
-			$ehNode = $app->cfg->error_handler; // wrapper-node (read-only)
-
-			// Build a clean, flat array for ErrorHandler::install()
-			$ehCfg = [
-				'log_file'       => (string)($ehNode->log_file ?? ($appRoot . '/var/logs/system_error_log.json')),
-				'recipient'      => (string)($ehNode->recipient ?? ''), // '' disables mail
-				// Sender: If cfg->error_handler->sender is null, derive from cfg->mail->from->email
-				'sender'         => (string)(
-					(($ehNode->sender ?? null) !== null)
-						? $ehNode->sender
-						: ($app->cfg->mail->from->email ?? '')
-				),
-				'max_log_size'   => (int)   ($ehNode->max_log_size ?? 10_485_760),
-				'template'       => (string)($ehNode->template ?? ''), // handler has own fallback
-				'display_errors' => (bool)  ($ehNode->display_errors ?? (\defined('CITOMNI_ENVIRONMENT') && \CITOMNI_ENVIRONMENT === 'dev')),
-			];
-			\CitOmni\Http\Exception\ErrorHandler::install($ehCfg);
 		}
 	
 		return $app;

@@ -28,6 +28,7 @@ namespace CitOmni\Http\Boot;
  */
 final class Services {
 	public const MAP = [
+		'errorHandler' => \CitOmni\Http\Service\ErrorHandler::class,
 		'request'      => \CitOmni\Http\Service\Request::class,
 		'response'     => \CitOmni\Http\Service\Response::class,
 		'router'       => \CitOmni\Http\Service\Router::class,

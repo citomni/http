@@ -64,6 +64,13 @@ class PublicController extends BaseController {
 	 */
 	public function index(): void {
 
+// $this->app->errorHandler->httpError(404, [
+    // 'title'   => 'Siden blev ikke fundet',
+    // 'message' => 'Kontrollér adressen eller gå til forsiden.',
+// ]);
+
+
+
 		$details = \json_encode([
 				'citomni' => [
 					'mode' => 'http',
@@ -103,7 +110,6 @@ class PublicController extends BaseController {
 			'status_text'      		=> 'OK',
 		    'http_method'           => $_SERVER['REQUEST_METHOD'] ?? 'GET',
 		    'request_path'          => $_SERVER['REQUEST_URI'] ?? '/',
-		    'request_id'            => $requestId ?? '-',
 		    'details_preformatted'  => $details ?? 'Hello, CitOmni. Let’s build something fast.',
 		    'primary_href'          => 'https://github.com/citomni/http#readme',
 		    'primary_target'		=> '_blank',
@@ -462,6 +468,9 @@ class PublicController extends BaseController {
 			);
 		}
 		
+		// Prepare errors for template in dev-mode
+		if (CITOMNI_ENVIRONMENT === "dev" && is_array($errors)) 
+			$prettyErrors = \json_encode($errors, \JSON_PRETTY_PRINT | \JSON_UNESCAPED_SLASHES);
 		
 		// Render the error page
 		$this->app->view->render($this->routeConfig["template_file"], $this->routeConfig["template_layer"], [
@@ -481,8 +490,7 @@ class PublicController extends BaseController {
 			'status_text'      		=> $status_text,
 		    'http_method'           => $_SERVER['REQUEST_METHOD'] ?? 'GET',
 		    'request_path'          => $_SERVER['REQUEST_URI'] ?? '/',
-		    'request_id'            => $requestId ?? '-',
-		    'details_preformatted'  => $errors ?? '',
+		    'details_preformatted'  => $prettyErrors ?? '',
 		    'primary_href'          => $primary_href,
 		    'primary_target'		=> $primary_target,
 		    'primary_label'         => $primary_label,
@@ -494,7 +502,7 @@ class PublicController extends BaseController {
 		    'tertiary_label'		=> $tertiary_label,
 		    'year'                  => date('Y'),
 		    'owner'                 => 'CitOmni.com',
-			
+				
 			
 			// User login status (left commented to avoid hard deps)
 			// 'is_loggedin' => is_object($this->user_account) && $this->user_account->isLoggedin(),

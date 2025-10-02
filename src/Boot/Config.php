@@ -60,29 +60,162 @@ final class Config {
 
 		/*
 		 *------------------------------------------------------------------
-		 * HTTP-SETTINGS
+		 * HTTP-SETTINGS (bootstrap policy)
 		 *------------------------------------------------------------------
+		 *
+		 * CITOMNI_PUBLIC_ROOT_URL is defined by Kernel using this policy:
+		 *   - DEV:
+		 *       * If http.base_url is an absolute URL, use it.
+		 *       * Else auto-detect from server vars (optionally proxy-aware).
+		 *   - Non-DEV (stage/prod):
+		 *       * Require an absolute http.base_url (no trailing slash).
+		 *       * If missing/invalid -> RuntimeException (fail fast).
+		 *
+		 * trust_proxy:
+		 *   - When true, auto-detection may honor X-Forwarded-* headers.
+		 *   - Only enable when your reverse proxy / LB is trusted and listed
+		 *     under http.trusted_proxies at the application layer.
+		 *
+		 * trusted_proxies:
+		 *   - Consumed by the Request service (not by Kernel) to resolve
+		 *     client IP/host safely behind trusted proxies.
 		 */
 		'http' => [
-			// 'base_url'    => 'https://www.example.dk', // Never include a trailing slash!
+			// 'base_url'    => 'https://www.example.dk', // Never include a trailing slash! Non-DEV MUST override with an absolute URL (e.g., "https://www.example.com")
 			'trust_proxy'     => false, // true only when behind a trusted reverse proxy/LB; enables honoring Forwarded/X-Forwarded-* for scheme/host.
-			'trusted_proxies' => ['10.0.0.0/8', '192.168.0.0/16', '::1'], // Optional whitelist of proxy IPs/CIDRs allowed to supply those headers. Empty = trust any proxy (not recommended).
+			'trusted_proxies' => ['10.0.0.0/8', '192.168.0.0/16', '::1'], // Optional whitelist of proxy IPs/CIDRs allowed to supply those headers. Empty = trust any proxy (not recommended). e.g., ['10.0.0.0/8', '192.168.0.0/16']
 		],
 
 
 		/*
 		 *------------------------------------------------------------------
-		 * ERROR-HANDLER
+		 * ERROR HANDLER (HTTP)
 		 *------------------------------------------------------------------
+		 *
+		 * Guarantees:
+		 *   - Always logs (JSONL with size-based rotation).
+		 *   - Always renders for:
+		 *       * Uncaught exceptions,
+		 *       * Shutdown fatals (E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR, E_USER_ERROR),
+		 *       * Router HTTP errors (404/405/5xx via httpError(...)).
+		 *     These are NOT configurable (to prevent "blank pages").
+		 *
+		 * Rendering of non-fatal PHP errors (warnings/notices/etc.) is optional and generally
+		 * only desirable in DEV. Therefore the baseline keeps it OFF; enable in your dev overlay.
+		 *
+		 * Templates:
+		 *   - Optional: Plain-PHP files receiving $data with:
+		 *       status, status_text, error_id, title, message, details*null, request_id, year
+		 *   - If missing/unreadable, the handler falls back to a built-in minimal HTML page.
 		 */
 		'error_handler' => [
-			'log_file' 			=> CITOMNI_APP_PATH . '/var/logs/system_error_log.json',
-			'recipient' 		=> 'errors@citomni.com',
-			// 'sender' 			=> '', // Leave empty to use cfg->mail->from->email (which most servers require)
-			'max_log_size'		=> 10485760,
-			'template'			=> __DIR__ . '/../../templates/errors/failsafe_error.php',  // Branded template for generic error page
-			'display_errors'	=> false,
-		],		
+
+			'render' => [
+
+				/*
+				 * Which non-fatal PHP errors (bitmask) should trigger **rendering**?
+				 * - 0 (baseline): do not render non-fatal errors (prod/stage-friendly).
+				 * - DO NOT include fatal classes (E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR, E_USER_ERROR).
+				 *   The handler will sanitize those away even if misconfigured.
+				 *
+				 * Typical DEV overlay:
+				 *   E_WARNING | E_NOTICE | E_CORE_WARNING | E_COMPILE_WARNING
+				 * | E_USER_WARNING | E_USER_NOTICE | E_RECOVERABLE_ERROR
+				 * | E_DEPRECATED | E_USER_DEPRECATED
+				 */
+				'trigger' => 0,
+
+				'detail' => [
+
+					/*
+					 * How much detail to show to the client?
+					 * 0 = minimal client message (prod/stage).
+					 * 1 = developer details (stack traces, structured context) – ONLY active when
+					 *     CITOMNI_ENVIRONMENT === 'dev'. In non-dev envs this behaves as 0.
+					 *
+					 * Logs are always detailed regardless of this flag.
+					 */
+					'level' => 0,
+
+					/*
+					 * Trace formatting limits (apply only when detail.level = 1 AND we are in 'dev').
+					 * Keep bounded to avoid huge responses; logs still carry full structured info.
+					 */
+					'trace' => [
+						'max_frames'      => 120,   // Maximum number of frames included in traces.
+						'max_arg_strlen'  => 512,   // Maximum characters shown per string argument.
+						'max_array_items' => 20,    // Maximum array items per level.
+						'max_depth'       => 3,     // Maximum recursion depth when dumping arrays/objects.
+						'ellipsis'        => '...', // Ellipsis marker for truncated strings/arrays.
+					],
+				],
+
+				/*
+				 * Optional override of PHP error_reporting() at install time.
+				 * - Leave unset/null to respect current runtime settings.
+				 * - In dev overlay you typically set this to E_ALL.
+				 */
+				// 'force_error_reporting' => null,
+			],
+
+			'log' => [
+
+				/*
+				 * Which PHP errors (bitmask) should be **logged**?
+				 * - Baseline: log everything (E_ALL). Logs are for developers/ops, not end users.
+				 * - Router 404/405/5xx are always logged into separate files:
+				 *   http_router_404.jsonl, http_router_405.jsonl, http_router_5xx.jsonl
+				 */
+				'trigger'   => E_ALL,
+
+				/*
+				 * Log directory (absolute). Files are JSONL with size-guarded rotation.
+				 * Rotation strategy: sidecar lock + copy+truncate; rotated files are timestamped.
+				 * Retention: see 'max_files' below (live file is never deleted by prune()).
+				 */
+				'path'      => \CITOMNI_APP_PATH . '/var/logs',
+
+				/*
+				 * Rotate before the next write would exceed this many bytes.
+				 * Keep conservative to protect disk on shared hosts.
+				 */
+				'max_bytes' => 2_000_000, // ~2 MB
+
+				/*
+				 * Maximum number of rotated files to keep per base (live file excluded).
+				 * Example: Keep last 10 rotations of http_err_exception.jsonl.*.jsonl
+				 */
+				'max_files' => 10,
+			],
+
+			'templates' => [
+
+				/*
+				 * Optional primary HTML template for error pages (plain PHP).
+				 * If missing/unreadable, the handler tries 'html_failsafe', then falls back inline.
+				 */
+				'html'          => __DIR__ . '/../../templates/errors/error.php',
+
+				/*
+				 * Optional failsafe HTML template (plain PHP). Leave null to skip.
+				 */
+				'html_failsafe' => __DIR__ . '/../../templates/errors/error_failsafe.php',
+			],
+
+			'status_defaults' => [
+
+				/*
+				 * Default HTTP status codes used by the handler when a specific mapping is not set.
+				 * - 'exception' and 'shutdown' are almost always 500.
+				 * - 'php_error' applies when rendering non-fatal PHP errors (usually only in dev).
+				 * - 'http_error' is a fallback; router typically passes explicit status (404/405/5xx).
+				 */
+				'exception' => 500,
+				'shutdown'  => 500,
+				'php_error' => 500,
+				'http_error'=> 500,
+			],
+		],
 
 
 		/*
@@ -228,13 +361,31 @@ final class Config {
 
 		/*
 		 *------------------------------------------------------------------
-		 * ROUTES
+		 * ROUTES (deterministic map)
 		 *------------------------------------------------------------------
 		 * Define the routes for the URIs that should be met with a response
 		 * The defined routes will be parsed by the dispatcher later on.
 		 *
+		 * Shape:
+		 * - Exact: $routes['/path'] = [controller, action?, methods?, template_file?, template_layer?]
+		 * - Regex: $routes['regex']['/user/{id}'] = [...]
+		 *
+		 * Placeholder rules (built-ins; unknown => [^/]+):
+		 * {id} => [0-9]+
+		 * {email} => [a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+
+		 * {slug} => [a-zA-Z0-9-_]+
+		 * {code} => [a-zA-Z0-9]+
+		 *
+		 * Methods policy:
+		 * - If omitted -> defaults to GET/HEAD/OPTIONS.
+		 * - GET implies HEAD; OPTIONS is always allowed for negotiation (204 + Allow).
+		 *
+		 * Templates:
+		 * - 'template_file' / 'template_layer' are passed to the controller (if it uses them).
+		 * 
+		 * Apps can point to their own routes and branded templates in their own config.
+		 *
 		 */
-
 		'routes' => [
 			'/' => [
 				'controller' => \CitOmni\Http\Controller\PublicController::class,
@@ -242,40 +393,6 @@ final class Config {
 				'methods' => ['GET'],
 				'template_file' => 'public/status.html',
 				'template_layer' => 'citomni/http'
-			],
-
-
-			403 => [
-				'controller' => \CitOmni\Http\Controller\PublicController::class,
-				'action' => 'errorPage',
-				'methods' => ['GET'],
-				'template_file' => 'public/status.html',
-				'template_layer' => 'citomni/http',
-				'params' => [403]
-			],
-			404 => [
-				'controller' => \CitOmni\Http\Controller\PublicController::class,
-				'action' => 'errorPage',
-				'methods' => ['GET'],
-				'template_file' => 'public/status.html',
-				'template_layer' => 'citomni/http',
-				'params' => [404]
-			],
-			405 => [
-				'controller' => \CitOmni\Http\Controller\PublicController::class,
-				'action' => 'errorPage',
-				'methods' => ['GET'],
-				'template_file' => 'public/status.html',
-				'template_layer' => 'citomni/http',
-				'params' => [405]
-			],
-			500 => [
-				'controller' => \CitOmni\Http\Controller\PublicController::class,
-				'action' => 'errorPage',
-				'methods' => ['GET'],
-				'template_file' => 'public/status.html',
-				'template_layer' => 'citomni/http',
-				'params' => [500]
 			],
 			
 			// --- Regex routes (matches BEFORE top-level placeholders) ---

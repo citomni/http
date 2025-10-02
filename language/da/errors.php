@@ -11,125 +11,430 @@
 
 
 
-// Errors language settings
+/**
+ * CitOmni – Danish error texts per HTTP status code.
+ *
+ * Notes:
+ * - Content text is Danish by design; inline comments are in English (project rule).
+ * - Badge variants: warning for 4xx, danger for 5xx.
+ * - Keep messages user-focused and actionable; always reference Fejl ID in help_text.
+ */
 return [
 
-	// 400 Bad Request
-	'400_meta_title' => '400 | Ugyldig forespørgsel | CitOmni',
-	'400_meta_description' => 'Forespørgslen kunne ikke forstås eller var ugyldig.',
-	'400_meta_keywords' => '400, ugyldig forespørgsel, fejl, bad request',
-	'400_header' => '400: Ugyldig forespørgsel',
-	'400_bodytext' => 'Ups! Din forespørgsel kunne ikke behandles, fordi den var ugyldig.<br>
-						Tjek venligst linket eller prøv igen.<br>
-						<a href="' . CITOMNI_PUBLIC_ROOT_URL. '" class="btn">Gå til forsiden</a>',
+	'page_txt' => [
+		'timestamp'			=> "Tidspunkt",
+		'error_id'			=> "Fejl ID",
+		'message'			=> "Fejlbesked",		
+		'primary_label'		=> "Forsiden",		
+		'secondary_label'	=> "Tilbage",
+		'tertiary_label'	=> "Kontakt CitOmni",
+		'quaternary_label'	=> "Opret issue på GitHub",
+	],
+	
+	
+	
 
-	// 401 Unauthorized
-	'401_meta_title' => '401 | Ikke autoriseret | CitOmni',
-	'401_meta_description' => 'Du skal være logget ind for at få adgang til denne side.',
-	'401_meta_keywords' => '401, ikke autoriseret, login påkrævet, adgang nægtet',
-	'401_header' => '401: Ikke autoriseret',
-	'401_bodytext' => 'Du skal logge ind for at se denne side.<br>
-						Log venligst ind og prøv igen.<br>
-						<a href="' . CITOMNI_PUBLIC_ROOT_URL. '/login.html" class="btn">Login</a>',
+	
 
-	// 403 Forbidden
-	'403_meta_title' => '403 | Adgang nægtet | CitOmni',
-	'403_meta_description' => 'Du har ikke tilladelse til at få adgang til denne side.',
-	'403_meta_keywords' => '403, adgang nægtet, forbidden, ingen adgang',
-	'403_header' => '403: Adgang nægtet',
-	'403_bodytext' => 'Beklager, du har ikke adgang til denne side.<br>
-						Hvis du mener, det er en fejl, kontakt venligst support.<br>
-						<a href="' . CITOMNI_PUBLIC_ROOT_URL. '" class="btn">Gå til forsiden</a>',
+	// --------------------
+	// 4xx — Client errors
+	// --------------------
 
-	// 404 Not Found
-	'404_meta_title' => '404 | Siden blev ikke fundet | CitOmni',
-	'404_meta_description' => 'Siden blev ikke fundet. Linket er måske forkert eller siden er flyttet. Gå tilbage eller besøg vores forside for at finde det, du søger.',
-	'404_meta_keywords' => '404, side ikke fundet, fejl, link virker ikke, dødt link, manglende side, forsvundet side, fejlmeddelelse, broken link',
-	'404_header' => '404: Siden blev ikke fundet',
-	'404_bodytext' => 'Ups! Den side, du leder efter, findes desværre ikke længere eller er blevet flyttet.<br>
-						Det ser ud til, at den side, du leder efter, ikke findes. Måske er linket forkert, eller siden er blevet flyttet.<br>
-						Hvis du skrev webadressen manuelt, så tjek venligst, om der er en tastefejl.<br>						
-						Har du fulgt et link på vores side og endt her ved en fejl? Så lad os gerne vide det, så vi kan rette det.<br>
-						<a href="' . CITOMNI_PUBLIC_ROOT_URL. '" class="btn">Gå til forsiden</a>',
-						
+	400 => [
+		'meta_title'    => '400 | Ugyldig forespørgsel',
+		'badge_variant' => 'badge--warning',
+		'title'         => 'Ugyldig forespørgsel',
+		'subtitle'      => 'Serveren kunne ikke forstå eller behandle din anmodning.',
+		'lead_text'     => 'Kontrollér URL, parametre eller formularfelter og prøv igen.',
+		'help_text'     => 'Hvis problemet fortsætter, kontakt support og oplys ovenstående Fejl ID.',
+	],
 
-	// 405 Method Not Allowed
-	'405_meta_title' => '405 | Metoden er ikke tilladt | CitOmni',
-	'405_meta_description' => 'Forespørgselsmetoden understøttes ikke for denne side.',
-	'405_meta_keywords' => '405, metode ikke tilladt, fejl',
-	'405_header' => '405: Metoden er ikke tilladt',
-	'405_bodytext' => 'Den metode, du har brugt til at tilgå siden, er ikke tilladt.<br>
-						<a href="' . CITOMNI_PUBLIC_ROOT_URL. '" class="btn">Gå til forsiden</a>',
+	401 => [
+		'meta_title'    => '401 | Login påkrævet',
+		'badge_variant' => 'badge--warning',
+		'title'         => 'Login påkrævet',
+		'subtitle'      => 'Denne ressource kræver godkendelse.',
+		'lead_text'     => 'Log ind, eller angiv gyldige legitimationsoplysninger, og prøv igen.',
+		'help_text'     => 'Mener du, at du burde have adgang? Kontakt support og oplys ovenstående Fejl ID.',
+	],
 
-	// 408 Request Timeout
-	'408_meta_title' => '408 | Timeout | CitOmni',
-	'408_meta_description' => 'Serveren ventede for længe på din forespørgsel.',
-	'408_meta_keywords' => '408, timeout, forespørgsel udløb, fejl',
-	'408_header' => '408: Timeout',
-	'408_bodytext' => 'Din forespørgsel tog for lang tid, og serveren afbrød.<br>
-						Prøv venligst igen.<br>
-						<a href="' . CITOMNI_PUBLIC_ROOT_URL. '" class="btn">Gå til forsiden</a>',
+	402 => [
+		'meta_title'    => '402 | Betaling påkrævet',
+		'badge_variant' => 'badge--warning',
+		'title'         => 'Betaling påkrævet',
+		'subtitle'      => 'Adgang til denne ressource kræver betaling.',
+		'lead_text'     => 'Fuldfør betaling og prøv igen.',
+		'help_text'     => 'Har du spørgsmål til betaling, kontakt support og oplys ovenstående Fejl ID.',
+	],
 
-	// 409 Conflict
-	'409_meta_title' => '409 | Konflikt | CitOmni',
-	'409_meta_description' => 'Der opstod en konflikt under behandlingen af din forespørgsel.',
-	'409_meta_keywords' => '409, konflikt, fejl',
-	'409_header' => '409: Konflikt',
-	'409_bodytext' => 'Din forespørgsel kunne ikke gennemføres pga. en konflikt.<br>
-						Prøv venligst at opdatere siden og prøve igen.<br>
-						<a href="' . CITOMNI_PUBLIC_ROOT_URL. '" class="btn">Gå til forsiden</a>',
+	403 => [
+		'meta_title'    => '403 | Adgang nægtet',
+		'badge_variant' => 'badge--warning',
+		'title'         => 'Adgang nægtet',
+		'subtitle'      => 'Du har ikke tilladelse til at få adgang til denne ressource.',
+		'lead_text'     => 'Bed en administrator om adgang, eller brug en anden konto.',
+		'help_text'     => 'Hvis du mener, dette er en fejl, kontakt support og oplys ovenstående Fejl ID.',
+	],
 
-	// 410 Gone
-	'410_meta_title' => '410 | Siden er fjernet | CitOmni',
-	'410_meta_description' => 'Den ønskede ressource er ikke længere tilgængelig.',
-	'410_meta_keywords' => '410, fjernet, mangler, ressource slettet',
-	'410_header' => '410: Siden er fjernet',
-	'410_bodytext' => 'Siden, du prøver at tilgå, er permanent fjernet.<br>
-						<a href="' . CITOMNI_PUBLIC_ROOT_URL. '" class="btn">Gå til forsiden</a>',
+	// 404 => [
+		// 'meta_title'    => '404 | Siden blev ikke fundet',
+		// 'badge_variant' => 'badge--warning',
+		// 'title'         => 'Siden blev ikke fundet',
+		// 'subtitle'      => 'Systemet kunne desværre ikke finde den side, du leder efter.',
+		// 'lead_text'     => 'Kontrollér adressen, brug et andet link, eller gå til forsiden.',
+		// 'help_text'     => 'Fortsætter problemet, kontakt support og oplys ovenstående Fejl ID.',
+	// ],
+	
+	404 => [
+		"meta_title"	=> "404 | Siden blev ikke fundet",
+		"badge_variant"	=> "badge--warning",
+		"title"			=> "Siden blev ikke fundet",
+		"subtitle"		=> "Systemet kunne desværre ikke finde den side, du leder efter.",
+		"lead_text"		=> "Fejlen kan skyldes, at siden er flyttet/slettet, at linket er forkert, eller at du har indtastet adressen forkert.",
+		"help_text"		=> "Prøv kontrollere at adressen er korrekt, prøv et andet link, eller gå til forsiden. Hvis problemet fortsætter, må du meget gerne kontakte vores support og oplys ovenstående Fejl ID.",
+	],
 
-	// 429 Too Many Requests
-	'429_meta_title' => '429 | For mange forespørgsler | CitOmni',
-	'429_meta_description' => 'Du har sendt for mange forespørgsler på kort tid.',
-	'429_meta_keywords' => '429, for mange forespørgsler, rate limit, fejl',
-	'429_header' => '429: For mange forespørgsler',
-	'429_bodytext' => 'Du har lavet for mange forespørgsler på kort tid.<br>
-						Vent venligst lidt og prøv igen.<br>
-						<a href="' . CITOMNI_PUBLIC_ROOT_URL. '" class="btn">Gå til forsiden</a>',
+	405 => [
+		'meta_title'    => '405 | Metode ikke tilladt',
+		'badge_variant' => 'badge--warning',
+		'title'         => 'Metode ikke tilladt',
+		'subtitle'      => 'HTTP-metoden er ikke tilladt for den ønskede ressource.',
+		'lead_text'     => 'Skift metode (f.eks. GET/POST) eller brug et andet endpoint.',
+		'help_text'     => 'I tvivl om korrekt metode? Kontakt support og oplys ovenstående Fejl ID.',
+	],
 
-	// 500 Internal Server Error
-	'500_meta_title' => '500 | Intern serverfejl | CitOmni',
-	'500_meta_description' => 'Serveren stødte på en uventet fejl.',
-	'500_meta_keywords' => '500, intern serverfejl, fejl',
-	'500_header' => '500: Intern serverfejl',
-	'500_bodytext' => 'Ups! Noget gik galt på vores side.<br>
-						Prøv igen senere.<br>
-						<a href="' . CITOMNI_PUBLIC_ROOT_URL. '" class="btn">Gå til forsiden</a>',
+	406 => [
+		'meta_title'    => '406 | Ikke acceptabelt',
+		'badge_variant' => 'badge--warning',
+		'title'         => 'Ikke acceptabelt',
+		'subtitle'      => 'Serveren kan ikke levere indhold i et format, der matcher Accept-kravene.',
+		'lead_text'     => 'Juster Accept-header eller anmod om et andet format.',
+		'help_text'     => 'Hvis du ikke kan ændre klienten, kontakt support og oplys ovenstående Fejl ID.',
+	],
 
-	// 502 Bad Gateway
-	'502_meta_title' => '502 | Ugyldigt svar fra server | CitOmni',
-	'502_meta_description' => 'Serveren modtog et ugyldigt svar fra en anden server.',
-	'502_meta_keywords' => '502, bad gateway, fejl',
-	'502_header' => '502: Ugyldigt svar fra server',
-	'502_bodytext' => 'Serveren modtog et ugyldigt svar.<br>
-						Prøv igen senere.<br>
-						<a href="' . CITOMNI_PUBLIC_ROOT_URL. '" class="btn">Gå til forsiden</a>',
+	407 => [
+		'meta_title'    => '407 | Proxy-godkendelse påkrævet',
+		'badge_variant' => 'badge--warning',
+		'title'         => 'Proxy-godkendelse påkrævet',
+		'subtitle'      => 'Din anmodning skal godkendes af en proxy, før den kan fortsætte.',
+		'lead_text'     => 'Godkend via proxyen og prøv igen.',
+		'help_text'     => 'Hvis du ikke forventer en proxy, kontakt support og oplys ovenstående Fejl ID.',
+	],
 
-	// 503 Service Unavailable
-	'503_meta_title' => '503 | Tjenesten er utilgængelig | CitOmni',
-	'503_meta_description' => 'Serveren kan midlertidigt ikke håndtere forespørgslen.',
-	'503_meta_keywords' => '503, tjeneste utilgængelig, vedligeholdelse, fejl',
-	'503_header' => '503: Tjenesten er utilgængelig',
-	'503_bodytext' => 'Vores tjeneste er midlertidigt utilgængelig.<br>
-						Prøv venligst igen senere.<br>
-						<a href="' . CITOMNI_PUBLIC_ROOT_URL. '" class="btn">Gå til forsiden</a>',
+	408 => [
+		'meta_title'    => '408 | Timeout for anmodning',
+		'badge_variant' => 'badge--warning',
+		'title'         => 'Anmodningen tog for lang tid',
+		'subtitle'      => 'Forbindelsen blev lukket, fordi klienten var inaktiv for længe.',
+		'lead_text'     => 'Prøv igen. Sørg for stabil netværksforbindelse.',
+		'help_text'     => 'Ved gentagne timeouts, kontakt support og oplys ovenstående Fejl ID.',
+	],
 
-	// 504 Gateway Timeout
-	'504_meta_title' => '504 | Timeout fra server | CitOmni',
-	'504_meta_description' => 'Serveren modtog ikke svar i tide fra en anden server.',
-	'504_meta_keywords' => '504, gateway timeout, fejl',
-	'504_header' => '504: Timeout fra server',
-	'504_bodytext' => 'Serveren svarede ikke i tide.<br>
-						Prøv venligst igen senere.<br>
-						<a href="' . CITOMNI_PUBLIC_ROOT_URL. '" class="btn">Gå til forsiden</a>',
+	409 => [
+		'meta_title'    => '409 | Konflikt',
+		'badge_variant' => 'badge--warning',
+		'title'         => 'Konflikt',
+		'subtitle'      => 'Handlingen kan ikke gennemføres på grund af en konflikt.',
+		'lead_text'     => 'Opdater data og forsøg igen (undgå dobbelt indsendelse/konflikt).',
+		'help_text'     => 'Hvis konflikten ikke kan løses, kontakt support og oplys ovenstående Fejl ID.',
+	],
+
+	410 => [
+		'meta_title'    => '410 | Siden er fjernet',
+		'badge_variant' => 'badge--warning',
+		'title'         => 'Siden er fjernet',
+		'subtitle'      => 'Ressourcen findes ikke længere på serveren.',
+		'lead_text'     => 'Gå til forsiden eller brug søgefunktionen.',
+		'help_text'     => 'Har du brug for den tidligere side, kontakt support og oplys ovenstående Fejl ID.',
+	],
+
+	411 => [
+		'meta_title'    => '411 | Content-Length påkrævet',
+		'badge_variant' => 'badge--warning',
+		'title'         => 'Content-Length påkrævet',
+		'subtitle'      => 'Anmodningen mangler påkrævet Content-Length-header.',
+		'lead_text'     => 'Tilføj Content-Length og prøv igen.',
+		'help_text'     => 'Har du spørgsmål til headers, kontakt support og oplys ovenstående Fejl ID.',
+	],
+
+	412 => [
+		'meta_title'    => '412 | Forudsætning fejlede',
+		'badge_variant' => 'badge--warning',
+		'title'         => 'Forudsætning fejlede',
+		'subtitle'      => 'En påkrævet forudsætning i anmodningen blev ikke opfyldt.',
+		'lead_text'     => 'Juster If-* headers (fx If-Match) og prøv igen.',
+		'help_text'     => 'I tvivl om forudsætninger? Kontakt support og oplys ovenstående Fejl ID.',
+	],
+
+	413 => [
+		'meta_title'    => '413 | Indholdet er for stort',
+		'badge_variant' => 'badge--warning',
+		'title'         => 'Indholdet er for stort',
+		'subtitle'      => 'Serveren afviser anmodningen, fordi nyttelasten er for stor.',
+		'lead_text'     => 'Reducer filstørrelse eller volumen og prøv igen.',
+		'help_text'     => 'Kontakt support, hvis grænsen skal hæves – oplys ovenstående Fejl ID.',
+	],
+
+	414 => [
+		'meta_title'    => '414 | URL er for lang',
+		'badge_variant' => 'badge--warning',
+		'title'         => 'URL er for lang',
+		'subtitle'      => 'Den anmodede adresse overskrider den tilladte længde.',
+		'lead_text'     => 'Brug kortere URL eller flyt data til request body.',
+		'help_text'     => 'Har du brug for længere grænser, kontakt support og oplys ovenstående Fejl ID.',
+	],
+
+	415 => [
+		'meta_title'    => '415 | Medietype ikke understøttet',
+		'badge_variant' => 'badge--warning',
+		'title'         => 'Medietype ikke understøttet',
+		'subtitle'      => 'Serveren kan ikke håndtere Content-Type for denne anmodning.',
+		'lead_text'     => 'Skift til en understøttet medietype og prøv igen.',
+		'help_text'     => 'Usikker på understøttede typer? Kontakt support og oplys ovenstående Fejl ID.',
+	],
+
+	416 => [
+		'meta_title'    => '416 | Ugyldigt Range-interval',
+		'badge_variant' => 'badge--warning',
+		'title'         => 'Ugyldigt Range-interval',
+		'subtitle'      => 'Anmodet byteområde er uden for ressourcens størrelse.',
+		'lead_text'     => 'Ret Range-header eller hent hele ressourcen.',
+		'help_text'     => 'Kontakt support ved fortsatte problemer og oplys ovenstående Fejl ID.',
+	],
+
+	417 => [
+		'meta_title'    => '417 | Expectation fejlede',
+		'badge_variant' => 'badge--warning',
+		'title'         => 'Expectation fejlede',
+		'subtitle'      => 'Serveren kunne ikke opfylde Expect-headerens krav.',
+		'lead_text'     => 'Fjern/ændr Expect-header og prøv igen.',
+		'help_text'     => 'Kontakt support hvis du er i tvivl – oplys ovenstående Fejl ID.',
+	],
+
+	421 => [
+		'meta_title'    => '421 | Forkert adresseret anmodning',
+		'badge_variant' => 'badge--warning',
+		'title'         => 'Forkert adresseret anmodning',
+		'subtitle'      => 'Anmodningen blev sendt til en server, som ikke kan svare for denne authority/host.',
+		'lead_text'     => 'Kontrollér Host/Authority og prøv igen.',
+		'help_text'     => 'Fortsætter problemet, kontakt support og oplys ovenstående Fejl ID.',
+	],
+
+	422 => [
+		'meta_title'    => '422 | Ugyldigt indhold',
+		'badge_variant' => 'badge--warning',
+		'title'         => 'Ugyldigt indhold',
+		'subtitle'      => 'Serveren kunne ikke behandle indholdet (valideringsfejl).',
+		'lead_text'     => 'Ret de markerede felter/parametre og prøv igen.',
+		'help_text'     => 'Behøver du hjælp til valideringsreglerne, kontakt support og oplys ovenstående Fejl ID.',
+	],
+
+	423 => [
+		'meta_title'    => '423 | Låst',
+		'badge_variant' => 'badge--warning',
+		'title'         => 'Ressourcen er låst',
+		'subtitle'      => 'Ressourcen kan ikke ændres i øjeblikket.',
+		'lead_text'     => 'Prøv igen senere eller frigør låsen.',
+		'help_text'     => 'Kontakt support, hvis låsen virker fejlagtig – oplys ovenstående Fejl ID.',
+	],
+
+	424 => [
+		'meta_title'    => '424 | Afhængighed fejlede',
+		'badge_variant' => 'badge--warning',
+		'title'         => 'Afhængighed fejlede',
+		'subtitle'      => 'Anmodningen kunne ikke fuldføres pga. en mislykket afhængighed.',
+		'lead_text'     => 'Løs afhængighedsfejlen og prøv igen.',
+		'help_text'     => 'Kontakt support ved vedvarende fejl og oplys ovenstående Fejl ID.',
+	],
+
+	425 => [
+		'meta_title'    => '425 | For tidligt',
+		'badge_variant' => 'badge--warning',
+		'title'         => 'For tidligt',
+		'subtitle'      => 'Serveren afviser at behandle anmodningen endnu.',
+		'lead_text'     => 'Vent et øjeblik og prøv igen (især ved gentagelser/tidlig transmission).',
+		'help_text'     => 'Kontakt support ved fortsatte afvisninger og oplys ovenstående Fejl ID.',
+	],
+
+	426 => [
+		'meta_title'    => '426 | Opgradering påkrævet',
+		'badge_variant' => 'badge--warning',
+		'title'         => 'Opgradering påkrævet',
+		'subtitle'      => 'Klient/protokol skal opgraderes for at fortsætte.',
+		'lead_text'     => 'Skift til den krævede protokol/klient og prøv igen.',
+		'help_text'     => 'Kontakt support for krav til opgradering og oplys ovenstående Fejl ID.',
+	],
+
+	428 => [
+		'meta_title'    => '428 | Forudsætning påkrævet',
+		'badge_variant' => 'badge--warning',
+		'title'         => 'Forudsætning påkrævet',
+		'subtitle'      => 'Denne anmodning kræver en forudsætning (fx If-Match).',
+		'lead_text'     => 'Tilføj relevante If-* headers og prøv igen.',
+		'help_text'     => 'Kontakt support hvis du er i tvivl – oplys ovenstående Fejl ID.',
+	],
+
+	429 => [
+		'meta_title'    => '429 | For mange forespørgsler',
+		'badge_variant' => 'badge--warning',
+		'title'         => 'For mange forespørgsler',
+		'subtitle'      => 'Du har sendt for mange forespørgsler på kort tid.',
+		'lead_text'     => 'Vent et øjeblik og prøv igen. Undgå hurtige gentagne forsøg.',
+		'help_text'     => 'Har du brug for højere grænser? Kontakt support og oplys ovenstående Fejl ID.',
+	],
+
+	431 => [
+		'meta_title'    => '431 | Header-felter er for store',
+		'badge_variant' => 'badge--warning',
+		'title'         => 'Header-felter er for store',
+		'subtitle'      => 'En eller flere request headers er for store.',
+		'lead_text'     => 'Reducer antal/størrelse af headers og prøv igen.',
+		'help_text'     => 'Kontakt support for header-grænser og oplys ovenstående Fejl ID.',
+	],
+
+	451 => [
+		'meta_title'    => '451 | Utilgængelig af juridiske årsager',
+		'badge_variant' => 'badge--warning',
+		'title'         => 'Utilgængelig af juridiske årsager',
+		'subtitle'      => 'Indholdet kan ikke vises pga. juridiske begrænsninger.',
+		'lead_text'     => 'Kontakt indholdsudbyderen eller prøv igen senere.',
+		'help_text'     => 'Spørgsmål? Kontakt support og oplys ovenstående Fejl ID.',
+	],
+
+
+	// --------------------
+	// 5xx — Server errors
+	// --------------------
+
+	500 => [
+		'meta_title'    => '500 | Intern serverfejl',
+		'badge_variant' => 'badge--danger',
+		'title'         => 'Intern serverfejl',
+		'subtitle'      => 'Der opstod en uventet fejl i systemet.',
+		'lead_text'     => 'Det er ikke dig – det er os. Prøv igen om lidt.',
+		'help_text'     => 'Fortsætter problemet, kontakt support og oplys ovenstående Fejl ID.',
+	],
+
+	501 => [
+		'meta_title'    => '501 | Ikke implementeret',
+		'badge_variant' => 'badge--danger',
+		'title'         => 'Ikke implementeret',
+		'subtitle'      => 'Serveren understøtter ikke den ønskede funktion.',
+		'lead_text'     => 'Brug et andet endpoint eller metode.',
+		'help_text'     => 'Kontakt support om roadmap/alternativer og oplys ovenstående Fejl ID.',
+	],
+
+	502 => [
+		'meta_title'    => '502 | Forkert gateway',
+		'badge_variant' => 'badge--danger',
+		'title'         => 'Forkert gateway',
+		'subtitle'      => 'En upstream-tjeneste returnerede et ugyldigt svar.',
+		'lead_text'     => 'Problemet er ofte midlertidigt. Prøv igen om lidt.',
+		'help_text'     => 'Fortsætter problemet, kontakt support og oplys ovenstående Fejl ID.',
+	],
+
+	503 => [
+		'meta_title'    => '503 | Tjenesten er midlertidigt utilgængelig',
+		'badge_variant' => 'badge--danger',
+		'title'         => 'Tjenesten er midlertidigt utilgængelig',
+		'subtitle'      => 'Typisk pga. vedligeholdelse eller høj belastning.',
+		'lead_text'     => 'Prøv igen senere. Vi arbejder på at genskabe normal drift.',
+		'help_text'     => 'Ved langvarig nedetid, kontakt support og oplys ovenstående Fejl ID.',
+	],
+
+	504 => [
+		'meta_title'    => '504 | Gateway-timeout',
+		'badge_variant' => 'badge--danger',
+		'title'         => 'Gateway-timeout',
+		'subtitle'      => 'En upstream-tjeneste svarede ikke i tide.',
+		'lead_text'     => 'Opdater siden eller prøv igen senere.',
+		'help_text'     => 'Fortsætter fejlen, kontakt support og oplys ovenstående Fejl ID.',
+	],
+
+	505 => [
+		'meta_title'    => '505 | HTTP-version ikke understøttet',
+		'badge_variant' => 'badge--danger',
+		'title'         => 'HTTP-version ikke understøttet',
+		'subtitle'      => 'Serveren understøtter ikke den brugte HTTP-version.',
+		'lead_text'     => 'Opgrader din klient/HTTP-stack og prøv igen.',
+		'help_text'     => 'Kontakt support for krav til versioner og oplys ovenstående Fejl ID.',
+	],
+
+	506 => [
+		'meta_title'    => '506 | Variant forhandler selv',
+		'badge_variant' => 'badge--danger',
+		'title'         => 'Variant forhandler selv',
+		'subtitle'      => 'Konfigurationsfejl ved indholdsforhandling.',
+		'lead_text'     => 'Prøv igen senere.',
+		'help_text'     => 'Kontakt support – oplys ovenstående Fejl ID.',
+	],
+
+	507 => [
+		'meta_title'    => '507 | Utilstrækkelig lagerplads',
+		'badge_variant' => 'badge--danger',
+		'title'         => 'Utilstrækkelig lagerplads',
+		'subtitle'      => 'Serveren kan ikke fuldføre anmodningen pga. pladsmangel.',
+		'lead_text'     => 'Prøv igen senere.',
+		'help_text'     => 'Kontakt support hvis fejlen fortsætter og oplys ovenstående Fejl ID.',
+	],
+
+	508 => [
+		'meta_title'    => '508 | Loop opdaget',
+		'badge_variant' => 'badge--danger',
+		'title'         => 'Loop opdaget',
+		'subtitle'      => 'Serveren detekterede et uendeligt loop i behandlingen.',
+		'lead_text'     => 'Prøv igen senere.',
+		'help_text'     => 'Kontakt support og oplys ovenstående Fejl ID.',
+	],
+
+	510 => [
+		'meta_title'    => '510 | Ikke udvidet',
+		'badge_variant' => 'badge--danger',
+		'title'         => 'Ikke udvidet',
+		'subtitle'      => 'Anmodningen kræver yderligere udvidelser.',
+		'lead_text'     => 'Tilføj påkrævede udvidelser og prøv igen.',
+		'help_text'     => 'Kontakt support for detaljer og oplys ovenstående Fejl ID.',
+	],
+
+	511 => [
+		'meta_title'    => '511 | Netværksgodkendelse påkrævet',
+		'badge_variant' => 'badge--danger',
+		'title'         => 'Netværksgodkendelse påkrævet',
+		'subtitle'      => 'Adgang til netværket kræver godkendelse (fx captive portal).',
+		'lead_text'     => 'Godkend på netværket og prøv igen.',
+		'help_text'     => 'Hvis du ikke forventer dette, kontakt support og oplys ovenstående Fejl ID.',
+	],
+
+
+	// ---------------------------------------
+	// De facto / non-standard (optional)
+	// ---------------------------------------
+
+	418 => [ // "I'm a teapot" (RFC 2324/7168 joke; often disabled in prod)
+		'meta_title'    => '418 | Jeg er en tekande',
+		'badge_variant' => 'badge--warning',
+		'title'         => 'Jeg er en tekande',
+		'subtitle'      => 'Serveren kan ikke brygge kaffe, fordi den er en tekande.',
+		'lead_text'     => 'Prøv med en anden ressource.',
+		'help_text'     => 'Kontakt support hvis dette ikke var med vilje – oplys ovenstående Fejl ID.',
+	],
+
+	509 => [ // Bandwidth Limit Exceeded (commonly seen on some stacks; not IANA standard)
+		'meta_title'    => '509 | Båndbreddegrænse overskredet',
+		'badge_variant' => 'badge--danger',
+		'title'         => 'Båndbreddegrænse overskredet',
+		'subtitle'      => 'Ressourcens båndbreddekvote er brugt op.',
+		'lead_text'     => 'Prøv igen senere.',
+		'help_text'     => 'Kontakt support for status og oplys ovenstående Fejl ID.',
+	],
+
+	599 => [ // Network Connect Timeout Error (de facto; some proxies)
+		'meta_title'    => '599 | Netværkstimeout',
+		'badge_variant' => 'badge--danger',
+		'title'         => 'Netværkstimeout',
+		'subtitle'      => 'En mellemled/proxy rapporterede timeout ved opkobling.',
+		'lead_text'     => 'Prøv igen senere.',
+		'help_text'     => 'Fortsætter problemet, kontakt support og oplys ovenstående Fejl ID.',
+	],
 
 ];
