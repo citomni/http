@@ -16,6 +16,18 @@ Zero "magic", PSR-4 all the way, PHP 8.2+, tiny boot, predictable overrides.
 * **Maintenance 503** with `Retry-After` and allow-list
 * **Security foundations** -> CSRF token helper, cookie/session CSP/Samesite defaults
 * **Webhook HMAC** (`WebhooksAuth`) with TTL, clock skew tolerance, nonce/replay protection
+* ♻️ **Green by design** - lower memory use and CPU cycles -> less server load, more requests per watt, better scalability, smaller carbon footprint.
+
+---
+
+### Green by design
+
+CitOmni's "Green by design" claim is empirically validated at the framework level.
+
+The core runtime achieves near-floor CPU and memory costs per request on commodity shared infrastructure, sustaining hundreds of RPS per worker with extremely low footprint.
+
+See the full test report here:
+https://github.com/citomni/.github/blob/main/docs/CitOmni_Framework_-Capacity_and_Green_by_Design_Test_Report-2025-10-02.md
 
 ---
 
