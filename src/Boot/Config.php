@@ -37,11 +37,37 @@ final class Config {
 		 */
 		
 		'identity' => [
-			'app_name'	=> 'My CitOmni App',
-			
-			// Support contact (public-facing) NOTE: Additional contact-info is found in the language-file contact.php
-			'email' 	=> 'support@citomni.com',
-			'phone' 	=> '(+45) 12 34 56 77',
+
+			// Human-readable application name.
+			// - Shown in HTML titles, error pages, or fallback legal pages.
+			// - Keep it short and brand-like, e.g. "My CitOmni App".
+			'app_name' => 'My CitOmni App',
+
+			// Legal owner of the application and its content.
+			// - Use the full legal entity name (company, org, or person).
+			// - Displayed on legal pages like /legal/website-license.
+			'owner_name' => 'ACME Ltd',
+
+			// Contact address for legal/permissions requests.
+			// - Typically a compliance, legal, or admin mailbox.
+			// - Shown on the website-license page.
+			'owner_email'=> 'legal@acme.com',
+
+			// Public homepage of the legal owner.
+			// - Used for attribution links in license/terms pages.
+			// - Should be a stable corporate URL, not a product subpage.
+			'owner_url'  => 'https://www.acme.com',
+
+			// Public-facing support contact (user questions, helpdesk).
+			// - This is what end-users see on "Contact us" pages or footers.
+			// - Localized labels (see language/contact.php) decide if shown as
+			//   "Support", "Helpdesk", "Customer Service", etc.
+			'contact_email' => 'support@mycitomniapp.com',
+
+			// Public phone number for end-user support.
+			// - Only include if you actually staff the line.
+			// - Format: international + local, human-readable.
+			'contact_phone' => '(+45) 12 34 56 78',
 		],
 
 
@@ -292,13 +318,13 @@ final class Config {
 		'view' => [
 		
 			// Cache		
-			'cache_enabled'			=> false,   // Cache enabled
+			'cache_enabled'			=> true,   // Cache enabled
 
 			// Optimize HTML-output
 			'trim_whitespace'		=> false, // Removes linebreaks and tabs
 			'remove_html_comments'	=> false, // Removes HTML-comments from HTML-output
 			
-			'allow_php_tags'		=> false,
+			'allow_php_tags'		=> true,
 
 			// Marketing scripts (to be inserted in <HEAD> of templates)
 			'marketing_scripts' 	=>	'',
@@ -391,7 +417,29 @@ final class Config {
 				'controller' => \CitOmni\Http\Controller\PublicController::class,
 				'action' => 'index',
 				'methods' => ['GET'],
-				'template_file' => 'public/status.html',
+				'template_file' => 'public/index.html',
+				'template_layer' => 'citomni/http'
+			],
+			'/legal/website-license' => [
+				'controller' => \CitOmni\Http\Controller\PublicController::class,
+				'action' => 'websiteLicense',
+				'methods' => ['GET']
+			],
+			// '/legal/website-license' => [
+				// 'controller' => \CitOmni\Http\Controller\PublicController::class,
+				// 'action' => 'redirectWebsiteLicense',
+				// 'methods' => ['GET']
+			// ],
+			'/legal/website-license/index.html' => [
+				'controller' => \CitOmni\Http\Controller\PublicController::class,
+				'action' => 'redirectWebsiteLicense',
+				'methods' => ['GET']
+			],
+			'/appinfo.html' => [
+				'controller' => \CitOmni\Http\Controller\PublicController::class,
+				'action' => 'appinfo',
+				'methods' => ['GET'],
+				'template_file' => 'public/appinfo.html',
 				'template_layer' => 'citomni/http'
 			],
 			
