@@ -827,14 +827,19 @@ All CitOmni projects follow the shared conventions documented here:
 
 ## License
 
-CitOmni HTTP is released under the **GNU General Public License v3.0 or later**.
-See [LICENSE](LICENSE) for details.
+**CitOmni HTTP** is open-source under the **MIT License**.  
+See: [LICENSE](LICENSE).
+
+**Trademark notice:** "CitOmni" and the CitOmni logo are trademarks of **Lars Grove Mortensen**.  
+You may not use the CitOmni name or logo to imply endorsement or affiliation without prior written permission.  
+For details, see the project [NOTICE](NOTICE).
 
 ---
 
 ## Trademarks
 
-"CitOmni" and the CitOmni logo are trademarks of Lars Grove Mortensen; factual references are allowed, but do not modify the marks, create confusingly similar logos, or imply endorsement.
+"CitOmni" and the CitOmni logo are trademarks of Lars Grove Mortensen.  
+For permitted uses, see [NOTICE](NOTICE).
 
 ---
 

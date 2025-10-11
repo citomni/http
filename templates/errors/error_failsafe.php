@@ -1,11 +1,15 @@
 <?php
 /*
- * SPDX-License-Identifier: GPL-3.0-or-later
- * Copyright (C) 2012-2025 Lars Grove Mortensen
+ * This file is part of the CitOmni framework.
+ * Low overhead, high performance, ready for anything.
  *
- * CitOmni HTTP - High-performance HTTP runtime for CitOmni applications.
- * Source:  https://github.com/citomni/http
- * License: See the LICENSE file for full terms.
+ * For more information, visit https://github.com/citomni
+ *
+ * Copyright (c) 2012-present Lars Grove Mortensen
+ * SPDX-License-Identifier: MIT
+ *
+ * For full copyright, trademark, and license information,
+ * please see the LICENSE file distributed with this source code.
  */
 
 /*

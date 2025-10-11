@@ -2,7 +2,7 @@
 	"name": "citomni/http",
 	"description": "High-performance HTTP runtime for CitOmni apps: kernel boot glue, request/response, router, view, security (CSRF), maintenance mode, webhooks HMAC, and nonce ledger.",
 	"type": "library",
-	"license": "GPL-3.0-or-later",
+	"license": "MIT",
 	"homepage": "https://github.com/citomni/http",
 	"keywords": [
 		"citomni", "http", "router", "request", "response", "csrf",
