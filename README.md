@@ -27,7 +27,7 @@ CitOmni's "Green by design" claim is empirically validated at the framework leve
 The core runtime achieves near-floor CPU and memory costs per request on commodity shared infrastructure, sustaining hundreds of RPS per worker with extremely low footprint.
 
 See the full test report here:
-https://github.com/citomni/.github/blob/main/docs/CitOmni_Framework_-Capacity_and_Green_by_Design_Test_Report-2025-10-02.md
+[CitOmni Docs → /reports/2025-10-02-capacity-and-green-by-design.md](https://github.com/citomni/docs/blob/main/reports/2025-10-02-capacity-and-green-by-design.md)
 
 ---
 
@@ -821,7 +821,7 @@ Ensure the hidden input `<input name="csrf_token">` exists and matches `security
 ## Coding & Documentation Conventions
 
 All CitOmni projects follow the shared conventions documented here:
-[CitOmni Coding & Documentation Conventions](https://github.com/citomni/kernel/blob/main/docs/CONVENTIONS.md)
+[CitOmni Coding & Documentation Conventions](https://github.com/citomni/docs/blob/main/contribute/CONVENTIONS.md)
 
 ---
 
@@ -838,14 +838,17 @@ For details, see the project [NOTICE](NOTICE).
 
 ## Trademarks
 
-"CitOmni" and the CitOmni logo are trademarks of Lars Grove Mortensen.  
-For permitted uses, see [NOTICE](NOTICE).
+"CitOmni" and the CitOmni logo are trademarks of **Lars Grove Mortensen**.  
+You may make factual references to "CitOmni", but do not modify the marks, create confusingly similar logos,  
+or imply sponsorship, endorsement, or affiliation without prior written permission.  
+Do not register or use "citomni" (or confusingly similar terms) in company names, domains, social handles, or top-level vendor/package names.  
+For details, see the project's [NOTICE](NOTICE).
 
 ---
 
 ## Author
 
-Developed by **Lars Grove Mortensen** © 2012-2025
+Developed by **Lars Grove Mortensen** © 2012-present
 Contributions and pull requests are welcome!
 
 ---
