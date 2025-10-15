@@ -26,7 +26,7 @@ use CitOmni\Kernel\Service\BaseService;
  * Highlights
  * - Lazy autostart via ensureStarted() on first use (no global autostart).
  * - Hardened INI defaults (strict mode, only cookies, strong SID, etc.).
- * - Cookie flags derive from session.* → cookie.* → http.base_url / Request::isHttps() (fallback).
+ * - Cookie flags derive from session.* -> cookie.* -> http.base_url / Request::isHttps() (fallback).
  * - Invariant: SameSite=None requires Secure=true (throws on misconfiguration).
  * - Optional rotation (session.rotate_interval) and fingerprint binding (session.fingerprint.*), both disabled by default.
  * - Minimal overhead: INI/cookie init runs once per request/process before session_start().
@@ -42,7 +42,7 @@ use CitOmni\Kernel\Service\BaseService;
  * Collaborators:
  * - $this->app->cfg->session.*   (optional) Session and hardening options.
  * - $this->app->cfg->cookie.*    (optional) Cookie flag fallbacks.
- * - $this->app->cfg->http.*      (read)     For base_url → https inference.
+ * - $this->app->cfg->http.*      (read)     For base_url -> https inference.
  * - PHP session_*() functions    (native runtime).
  *
  * Configuration keys (optional; effective defaults):
@@ -90,7 +90,7 @@ use CitOmni\Kernel\Service\BaseService;
  * - Fingerprint policy:
  *   - When enabled, stores a compact UA/IP prefix signature in '_sess_fpr'.
  *   - On mismatch, destroys the session, restarts cleanly, and stores new signature
- *     (deterministic “reset-then-continue” behavior).
+ *     (deterministic "reset-then-continue" behavior).
  *
  * Error handling:
  * - Public API never throws on missing keys or unset session state.

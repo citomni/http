@@ -439,8 +439,80 @@ final class Config {
 				'action' => 'redirectWebsiteLicense',
 				'methods' => ['GET']
 			],
-			'/appinfo.html' => [
-				'controller' => \CitOmni\Http\Controller\PublicController::class,
+			
+			
+			// --- System/ops routes ---
+			'/_system/ping' => [
+				'controller' => \CitOmni\Http\Controller\SystemController::class,
+				'action' => 'ping',
+				'methods' => ['GET'],
+			],
+			'/_system/health' => [
+				'controller' => \CitOmni\Http\Controller\SystemController::class,
+				'action' => 'health',
+				'methods' => ['GET'],
+			],
+			'/_system/version' => [
+				'controller' => \CitOmni\Http\Controller\SystemController::class,
+				'action' => 'version',
+				'methods' => ['GET'],
+			],
+			'/_system/time' => [
+				'controller' => \CitOmni\Http\Controller\SystemController::class,
+				'action' => 'time',
+				'methods' => ['GET'],
+			],
+			'/_system/clientip' => [
+				'controller' => \CitOmni\Http\Controller\SystemController::class,
+				'action' => 'clientIp',
+				'methods' => ['GET'],
+			],
+			'/_system/request-echo' => [
+				'controller' => \CitOmni\Http\Controller\SystemController::class,
+				'action' => 'requestEcho',
+				'methods' => ['GET'],
+			],
+			'/_system/trusted-proxies' => [
+				'controller' => \CitOmni\Http\Controller\SystemController::class,
+				'action' => 'trustedProxies',
+				'methods' => ['GET'],
+			],
+
+			// Protected ops (HMAC via WebhooksAuth):
+			'/_system/reset-cache' => [
+				'controller' => \CitOmni\Http\Controller\SystemController::class,
+				'action' => 'resetCache',
+				'methods' => ['POST'],
+			],
+			'/_system/warmup-cache' => [
+				'controller' => \CitOmni\Http\Controller\SystemController::class,
+				'action' => 'warmupCache',
+				'methods' => ['POST'],
+			],
+			'/_system/maintenance' => [
+				'controller' => \CitOmni\Http\Controller\SystemController::class,
+				'action' => 'maintenance',
+				'methods' => ['GET'],
+			],
+			'/_system/maintenance/enable' => [
+				'controller' => \CitOmni\Http\Controller\SystemController::class,
+				'action' => 'maintenanceEnable',
+				'methods' => ['POST'],
+			],
+			'/_system/maintenance/disable' => [
+				'controller' => \CitOmni\Http\Controller\SystemController::class,
+				'action' => 'maintenanceDisable',
+				'methods' => ['POST'],
+			],
+
+			'/_system/_debug/webhook' => [
+				'controller' => \CitOmni\Http\Controller\SystemController::class,
+				'action'     => 'webhookDebug',
+				'methods'    => ['POST'],
+			],			
+			
+			'/_system/appinfo.html' => [
+				'controller' => \CitOmni\Http\Controller\SystemController::class,
 				'action' => 'appinfo',
 				'methods' => ['GET'],
 				'template_file' => 'public/appinfo.html',
