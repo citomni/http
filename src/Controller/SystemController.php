@@ -30,8 +30,14 @@ use CitOmni\Kernel\Controller\BaseController;
  * - Reads: Request, Response, View, ErrorHandler, Maintenance, WebhooksAuth, App cfg wrapper.
  * - Writes: Response (JSON/text/HTML), Maintenance state, cache files (reset/warmup).
  *
+ * Security note:
+ * - Do NOT store webhook secrets in cfg. The HMAC secret is loaded from:
+ *   CITOMNI_APP_PATH . '/var/secrets/webhooks.secret.php'
+ * - The actual secret file must not be committed; keep only the `.tpl` template in VCS.
+ *
  * Configuration keys:
- * - webhooks.signing_key (string) - HMAC secret used by WebhooksAuth.
+ * - webhooks.secret_file (string) - Filesystem path to a side-effect-free PHP file
+ *   that returns ['secret' => <hex>, 'algo' => 'sha256'|'sha512' (optional)].
  * - http.base_url (string) - Fallback for canonical links when CITOMNI_PUBLIC_ROOT_URL is unset.
  * - routes (array) - Listed but not echoed in flat cfg snapshot by default.
  *
@@ -41,7 +47,7 @@ use CitOmni\Kernel\Controller\BaseController;
  * - No broad try/catch blocks here; logging is centralized.
  *
  * Typical usage:
- * - Called by DevKit, monitors, and CI smoke tests to verify liveness and perform safe ops.
+ * - Called by deployment tooling, monitors, and CI smoke tests to verify liveness and perform safe ops.
  *
  * Examples:
  * - Core (liveness): GET /_system/ping  -> "OK 2025-10-16T22:31:00Z"
@@ -505,7 +511,7 @@ final class SystemController extends BaseController {
 	 * 		- timezone (default PHP TZ)
 	 *
 	 * Typical usage:
-	 *   Called by CI/CD and DevKit to confirm runtime flags and clock sanity.
+	 *   Called by CI/CD tooling to confirm runtime flags and clock sanity.
 	 *
 	 * Examples:
 	 *
@@ -710,7 +716,7 @@ final class SystemController extends BaseController {
 	 * - Idempotent: Missing files are ignored; failures are reported in "failed".
 	 *
 	 * Typical usage:
-	 *   Triggered by CI/CD or DevKit post-deploy when opcache timestamps are disabled.
+	 *   Triggered post-deploy when OPcache timestamps are disabled.
 	 *
 	 * Examples:
 	 *
