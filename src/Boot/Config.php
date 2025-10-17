@@ -90,30 +90,60 @@ final class Config {
 
 		/*
 		 *------------------------------------------------------------------
-		 * HTTP-SETTINGS (bootstrap policy)
+		 * HTTP SETTINGS (bootstrap policy & runtime toggles)
 		 *------------------------------------------------------------------
 		 *
-		 * CITOMNI_PUBLIC_ROOT_URL is defined by Kernel using this policy:
-		 *   - DEV:
-		 *       * If http.base_url is an absolute URL, use it.
-		 *       * Else auto-detect from server vars (optionally proxy-aware).
-		 *   - Non-DEV (stage/prod):
+		 * CITOMNI_PUBLIC_ROOT_URL / http.base_url
+		 * - Base URL resolution is prioritized as:
+		 *     1) CITOMNI_PUBLIC_ROOT_URL (constant; if defined and non-empty)
+		 *     2) http.base_url (absolute URL, no trailing slash)
+		 *     3) Best-effort computed from the current request (scheme/host/port)
+		 * - Kernel policy:
+		 *     DEV:
+		 *       * If http.base_url is absolute, it is used.
+		 *       * Otherwise Kernel auto-detects from server vars (optionally proxy-aware).
+		 *     STAGE/PROD (non-DEV):
 		 *       * Require an absolute http.base_url (no trailing slash).
-		 *       * If missing/invalid -> RuntimeException (fail fast).
+		 *       * Missing/invalid -> RuntimeException (fail fast).
 		 *
-		 * trust_proxy:
-		 *   - When true, auto-detection may honor X-Forwarded-* headers.
-		 *   - Only enable when your reverse proxy / LB is trusted and listed
-		 *     under http.trusted_proxies at the application layer.
+		 * trust_proxy (bool)
+		 * - When true, Request may honor proxy headers for scheme/host/port/client IP,
+		 *   but ONLY if the peer (REMOTE_ADDR) is trusted per http.trusted_proxies.
+		 * - Keep false by default; enable only behind a trusted reverse proxy/LB.
 		 *
-		 * trusted_proxies:
-		 *   - Consumed by the Request service (not by Kernel) to resolve
-		 *     client IP/host safely behind trusted proxies.
+		 * trusted_proxies (array of CIDR/IP)
+		 * - Allowlist used by Request to decide whether to accept proxy-provided values.
+		 * - The current peer (REMOTE_ADDR) must match one of these entries for
+		 *   proxy headers to be considered.
+		 * - IMPORTANT: An empty list means "trust NO proxies". There is no "trust all" mode.
+		 * - Examples: ['10.0.0.0/8', '192.168.0.0/16', '::1']
+		 *
+		 * Proxy headers considered (when trust_proxy=true AND REMOTE_ADDR is trusted):
+		 * - Scheme:   Forwarded: proto=..., X-Forwarded-Proto, X-Forwarded-SSL,
+		 *             X-Forwarded-Scheme, Front-End-Https, X-URL-Scheme, CF-Visitor
+		 * - Host:     X-Forwarded-Host (first), or Forwarded: host=... (first hop)
+		 * - Port:     X-Forwarded-Port (>0), or parsed from Forwarded host token
+		 * - Client IP: X-Forwarded-For (first public IP in the list); otherwise REMOTE_ADDR
+		 *   (Private/reserved addresses are filtered out.)
+		 *
+		 * router_case_insensitive (bool)
+		 * - When true, Router:
+		 *     1) strips base prefix case-insensitively,
+		 *     2) matches exact routes through a lowered key map,
+		 *     3) compiles regex routes with the 'i' flag.
+		 * - Intended for local Windows/XAMPP convenience. Default false (recommended
+		 *   for STAGE/PROD). When false, paths are case-sensitive (conventional).
+		 *
+		 * Notes
+		 * - Never include a trailing slash in http.base_url.
+		 * - Prefer lowercase URL paths in your app to avoid cross-OS surprises.
+		 * - Request enforces an ASCII-only guard for paths (defense in depth).
 		 */
 		'http' => [
-			// 'base_url'    => 'https://www.example.dk', // Never include a trailing slash! Non-DEV MUST override with an absolute URL (e.g., "https://www.example.com")
-			'trust_proxy'     => false, // true only when behind a trusted reverse proxy/LB; enables honoring Forwarded/X-Forwarded-* for scheme/host.
-			'trusted_proxies' => ['10.0.0.0/8', '192.168.0.0/16', '::1'], // Optional whitelist of proxy IPs/CIDRs allowed to supply those headers. Empty = trust any proxy (not recommended). e.g., ['10.0.0.0/8', '192.168.0.0/16']
+			// 'base_url' => 'https://www.example.com', // Never include a trailing slash! Non-DEV MUST override with an absolute URL (e.g., "https://www.example.com")
+			'trust_proxy'             => false,       // Enable only behind a trusted proxy/LB listed below.
+			'trusted_proxies'         => ['10.0.0.0/8', '192.168.0.0/16', '::1'], // Empty list means; trust NO proxies.
+			'router_case_insensitive' => false,       // Local dev convenience; keep false in STAGE/PROD.
 		],
 
 

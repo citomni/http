@@ -169,9 +169,24 @@ class Router extends BaseService {
 		}
 
 		// 1.3) Apply base prefix to the request URI
-		if ($basePrefix !== '' && \strncmp($uri, $basePrefix, \strlen($basePrefix)) === 0) {
-			$uri = \substr($uri, \strlen($basePrefix));
+		// if ($basePrefix !== '' && \strncmp($uri, $basePrefix, \strlen($basePrefix)) === 0) {
+			// $uri = \substr($uri, \strlen($basePrefix));
+		// }
+
+		
+		// Check if lowercase is allowed (set true|false in cfg)
+		$caseInsensitive = (bool)($this->app->cfg->http->router_case_insensitive ?? false);
+
+		
+		// 1.3) Apply base prefix to the request URI (ci-aware)
+		if ($basePrefix !== '') {
+			$bpLen = \strlen($basePrefix);
+			$match = \strncmp($uri, $basePrefix, $bpLen) === 0 || ($caseInsensitive && \strncasecmp($uri, $basePrefix, $bpLen) === 0);
+			if ($match) {
+				$uri = \substr($uri, $bpLen);
+			}
 		}
+		
 
 		// Decode percent-escapes after subdir trimming
 		$uri = \rawurldecode($uri);
@@ -198,29 +213,63 @@ class Router extends BaseService {
 		// if (!\is_array($routes)) {
 			// $routes = []; // Defensively (if anybody sabotaged cfg)
 		// }		
+		// $routes = $this->app->cfg->routes ?? null;
+		// if (!\is_array($routes)) {
+			// throw new \RuntimeException('Config node "routes" must be an array.');
+		// }
+		
+		// 1c) Optional case-insensitive routing (local dev friendliness on Windows)		
+		if ($caseInsensitive) {
+			$uri = \strtolower($uri);
+		}
+
+		// 2) Load routes (must be array)
 		$routes = $this->app->cfg->routes ?? null;
 		if (!\is_array($routes)) {
 			throw new \RuntimeException('Config node "routes" must be an array.');
 		}
-		
 
-		// 3) Exact match fast-path
+		// 2a) If case-insensitive, build a lowered exact-route map (leave 'regex' as-is)
+		if ($caseInsensitive) {
+			$lowerExact = [];
+			foreach ($routes as $k => $v) {
+				if ($k === 'regex') { continue; }
+				if (\is_string($k)) {
+					$lowerExact[\strtolower($k)] = $v;
+				}
+			}
+			// Keep original regex bucket
+			$routes = $lowerExact + ['regex' => ($routes['regex'] ?? [])];
+		}		
+
+		// 3) Exact match fast-path (works for both normal and lowered maps)
 		if (isset($routes[$uri]) && \is_array($routes[$uri])) {
 			$this->dispatch($routes[$uri], $method);
 			return;
 		}
 
 		// 4) Regex routes (placeholder patterns like /user/{id})
+		// if (isset($routes['regex']) && \is_array($routes['regex'])) {
+			// foreach ($routes['regex'] as $path => $route) {
+				// $pattern = self::toRegex((string)$path);
+				// if (\preg_match($pattern, $uri, $matches)) {
+					// \array_shift($matches); // drop full match, keep captures
+					// $this->dispatch((array)$route, $method, $matches);
+					// return;
+				// }
+			// }
+		// }
 		if (isset($routes['regex']) && \is_array($routes['regex'])) {
 			foreach ($routes['regex'] as $path => $route) {
-				$pattern = self::toRegex((string)$path);
+				$pattern = self::toRegex((string)$path, $caseInsensitive);
 				if (\preg_match($pattern, $uri, $matches)) {
-					\array_shift($matches); // drop full match, keep captures
+					\array_shift($matches);
 					$this->dispatch((array)$route, $method, $matches);
 					return;
 				}
 			}
 		}
+		
 
 		// 5) 404 when no routes matched
 		$this->app->errorHandler->httpError(404, [
@@ -250,7 +299,7 @@ class Router extends BaseService {
 	 * @param string $path Route path with optional {placeholders}.
 	 * @return string Compiled PCRE pattern, anchored and delimited with '#'.
 	 */
-	private static function toRegex(string $path): string {
+	private static function toRegex(string $path, bool $caseInsensitive = false): string {
 		$tokens = [];
 
 		// 1) Replace placeholders with unique tokens and remember rules
@@ -273,8 +322,8 @@ class Router extends BaseService {
 			$quoted = \str_replace(\preg_quote($token, '#'), '(' . $rule . ')', $quoted);
 		}
 
-		// 4) Anchor pattern
-		return '#^' . $quoted . '$#';
+		// 4) Anchor pattern (add 'i' for case-insensitive match when requested)
+		return $caseInsensitive ? ('#^' . $quoted . '$#i') : ('#^' . $quoted . '$#');
 	}
 
 
