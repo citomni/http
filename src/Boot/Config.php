@@ -624,24 +624,22 @@ final class Config {
 			
 			'/_system/appinfo.html' => [
 				'controller' => \CitOmni\Http\Controller\SystemController::class,
-				'action' => 'appinfo',
-				'methods' => ['GET'],
-				'template_file' => 'public/appinfo.html',
-				'template_layer' => 'citomni/http'
-			],
-			
-			'/_system/appinfo-new.html' => [
-				'controller' => \CitOmni\Http\Controller\SystemController::class,
 				'action' => 'appinfoHtml',
 				'methods' => ['GET'],
 				'template_file' => 'public/appinfo.html',
 				'template_layer' => 'citomni/http'
-			],
-			
+			],			
 			'/_system/appinfo.json' => [
 				'controller' => \CitOmni\Http\Controller\SystemController::class,
 				'action' => 'appinfoJson',
 				'methods' => ['GET'],
+			],			
+			'/_system/appinfo-old.html' => [
+				'controller' => \CitOmni\Http\Controller\SystemController::class,
+				'action' => 'appinfo',
+				'methods' => ['GET'],
+				'template_file' => 'public/appinfo.html',
+				'template_layer' => 'citomni/http'
 			],
 			
 			// --- Regex routes (matches BEFORE top-level placeholders) ---

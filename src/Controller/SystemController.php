@@ -71,9 +71,7 @@ final class SystemController extends BaseController {
 	protected function init(): void {
 		// Intentionally empty (no I/O). Each action sets no-cache explicitly.
 	}
-
-
-
+	
 
 
 	public function appinfoHtml(): void {
@@ -86,7 +84,9 @@ final class SystemController extends BaseController {
 		}
 
 		// Build everything once (single source of truth)
-		$g = $this->appinfoGenerator();
+		$g = $this->appinfoGenerator(false, [
+			'header_signature',
+		]);
 
 		// Robots + no-cache; also safe for member-only pages
 		$this->app->response->noIndex();
@@ -137,36 +137,87 @@ final class SystemController extends BaseController {
 
 
 	/**
-	 * JSON twin of appinfoHtml(): returns the same data in one JSON payload.
-	 * Path suggestion: /_system/appinfo.json (same env-guard as HTML).
+	 * Outputs structured runtime/config data as JSON for DevKit or similar tools.
+	 *
+	 * Behavior:
+	 * - Only accessible in dev/stage (404 otherwise).
+	 * - Builds the same dataset as the HTML page via appinfoGenerator().
+	 * - Unredacted-by-default in dev (or when ?raw=1 / ?unredacted=1).
+	 * - Optional flags: ?flat=1 (adds cfg_flat), ?exports=1 (adds PHP export strings).
+	 * - Sends proper no-cache JSON and terminates via Response::jsonNoCache().
+	 *
+	 * Typical usage:
+	 *   /_system/appinfo.json
+	 *   /_system/appinfo.json?flat=1
+	 *   /_system/appinfo.json?flat=1&exports=1
+	 *   /_system/appinfo.json?raw=1         (force unredacted even outside dev, if the route is reachable)
+	 *
+	 * Notes:
+	 * - Redaction allowlist includes "header_signature" (header name is not secret).
+	 * - Shared secrets/tokens remain masked unless unredacted is active.
 	 *
 	 * @return void
 	 */
 	public function appinfoJson(): void {
-		if (\defined('CITOMNI_ENVIRONMENT') && !\in_array(\CITOMNI_ENVIRONMENT, ['dev','stage'], true)) {
+		if (\defined('CITOMNI_ENVIRONMENT') && !\in_array(\CITOMNI_ENVIRONMENT, ['dev', 'stage'], true)) {
+			// Hide this endpoint entirely outside dev/stage.
 			$this->app->errorHandler->httpError(404, ['reason' => 'not_found']);
 			return;
 		}
 
-		$g = $this->appinfoGenerator();
+		// Interpret boolean-like GET flags consistently.
+		$bool = static function(mixed $v): bool {
+			if ($v === null) {
+				return false;
+			}
+			if (\is_bool($v)) {
+				return $v;
+			}
+			$s = \strtolower(\trim((string)$v));
+			return $s === '1' || $s === 'true' || $s === 'yes' || $s === 'on';
+		};
 
+		// Unredacted mode:
+		// - enabled automatically in dev
+		// - or explicitly via ?raw=1 / ?unredacted=1
+		$isDev      = \defined('CITOMNI_ENVIRONMENT') && \CITOMNI_ENVIRONMENT === 'dev';
+		$forceRaw   = $bool($this->app->request->get('raw')) || $bool($this->app->request->get('unredacted'));
+		$unredacted = $isDev || $forceRaw;
+
+		// Allowlist: keys that should never be masked (case-insensitive leaf match).
+		// 'header_signature' is a header *name*, not a secret.
+		$allowlist = ['header_signature'];
+
+		// Build snapshot once (shared with the HTML version). The generator accepts:
+		// - $unredacted: bool (disable masking completely)
+		// - $allowlist: array<string> (leaf keys to exempt from masking)
+		$g = $this->appinfoGenerator($unredacted, $allowlist);
+
+		// Optional payload extensions controlled by flags.
+		$wantFlat   = $bool($this->app->request->get('flat'));
+		$wantExport = $bool($this->app->request->get('exports'));
+
+		// Base payload (stable, compact default).
 		$payload = [
-			// Samme datagrundlag som HTML-varianten bruger
-			'sysinfo'                    => $g['_sysinfo_raw'],
-			'packages'                   => $g['_packages_raw'],
-			//'cfg_flat'                   => $g['_cfg_flat_raw'],
-			'cfg'                   => $g['_cfg_tree_raw'],
-
-			// De to PHP-exports som strenge (identisk formatering)
-			// 'cfg_php_export_excl_routes' => $g['cfgPhpExRoutesBody'] ?? null,
-			// 'routes_php_export'          => $g['routesPhpBody'] ?? null,
+			'sysinfo'  => $g['_sysinfo_raw'],
+			'packages' => $g['_packages_raw'],
+			'cfg'      => $g['_cfg_tree_raw'],
 		];
 
-		// Sætter no-cache + korrekt Content-Type + afslutter (never)
+		// Include flattened config (dot.notation => value) for quick lookups/diffs.
+		if ($wantFlat) {
+			$payload['cfg_flat'] = $g['_cfg_flat_raw'];
+		}
+
+		// Include human-readable PHP export strings (useful for side-by-side diffs).
+		if ($wantExport) {
+			$payload['cfg_php_export_excl_routes'] = $g['cfgPhpExRoutesBody'] ?? null;
+			$payload['routes_php_export']          = $g['routesPhpBody']      ?? null;
+		}
+
+		// Emit as JSON with no-cache headers and terminate.
 		$this->app->response->jsonNoCache($payload, true);
 	}
-
-
 
 
 	/**
@@ -181,21 +232,32 @@ final class SystemController extends BaseController {
 	 *   _sysinfo_raw:array,_packages_raw:array,_cfg_flat_raw:array,_cfg_tree_raw:array
 	 * }
 	 */
-	private function appinfoGenerator(): array {
-		// ----------------------------- Helpers -------------------------------------
+	private function appinfoGenerator(bool $unredacted = false, array $allowlistKeys = []): array {
+		// Normalize allowlist to lowercase for cheap comparisons
+		$allow = [];
+		foreach ($allowlistKeys as $k) {
+			$allow[\strtolower((string)$k)] = true;
+		}
 
-		// Secret masker: Redact obvious secret-like values (fast heuristic, no DB lookups)
-		$__maskValue = static function(string $key, mixed $value): mixed {
-			$k = \strtolower($key);
-			if (\preg_match('~(secret|token|password|pass|api[_-]?key|salt|private|credential|signature|auth|bearer)~i', $k)) {
+		// Secret masker: redact obvious secret-like values unless unredacted or allowlisted.
+		$__maskValue = static function(string $key, mixed $value) use ($unredacted, $allow): mixed {
+			if ($unredacted) {
+				return $value; // No masking at all
+			}
+			$leaf = \strtolower($key);
+			if (isset($allow[$leaf])) {
+				return $value; // Explicit allowlist
+			}
+			// Heuristic pattern (as before)
+			if (\preg_match('~(secret|token|password|pass|api[_-]?key|salt|private|credential|signature|auth|bearer)~i', $leaf)) {
 				return '__redacted__';
 			}
 			if (\is_string($value)) {
-				// Heuristics for long randoms / hex / base64-ish
+				// Long hex / base64-ish redaction (unchanged)
 				if (\preg_match('~^[A-Fa-f0-9]{32,}$~', $value) === 1) { return '__redacted__'; }
 				if (\preg_match('~^[A-Za-z0-9+/=]{40,}$~', $value) === 1) { return '__redacted__'; }
-				// Heuristic: URI with userinfo
 				if (\preg_match('~^(?:\w+://)[^/\s]+@~', $value) === 1) { return '__redacted__'; }
+				if (\strlen($value) > 256) { return \substr($value, 0, 256) . '...'; }
 			}
 			return $value;
 		};
@@ -244,35 +306,51 @@ final class SystemController extends BaseController {
 			return $out;
 		};
 
-		/**
-		 * Export any PHP value as a short-array string with tabs.
-		 * - Uses [] instead of array()
-		 * - Preserves ints/bools/null
-		 * - Safely quotes strings (single quotes)
-		 */
+		// Export any PHP value as a short-array string with tabs.
+		// - Uses [] instead of array()
+		// - Single-quoted strings with proper escaping
+		// - Omits numeric keys for list arrays (array_is_list)
+		// - Keeps keys for associative arrays
 		$__exportPhp = null;
 		$__exportPhp = static function(mixed $v, int $level = 0) use (&$__exportPhp): string {
 			$tab = "\t";
+
+			// Scalars
 			if ($v === null) { return 'null'; }
 			if (\is_bool($v)) { return $v ? 'true' : 'false'; }
 			if (\is_int($v) || \is_float($v)) { return (string)$v; }
 			if (\is_string($v)) {
 				return "'" . \str_replace(["\\", "'"], ["\\\\", "\\'"], $v) . "'";
 			}
+
+			// Arrays
 			if (\is_array($v)) {
 				if ($v === []) { return '[]'; }
+
 				$indent = \str_repeat($tab, $level);
 				$next   = \str_repeat($tab, $level + 1);
 				$lines  = [];
-				foreach ($v as $k => $vv) {
-					$key = \is_int($k) ? (string)$k : "'" . \str_replace(["\\", "'"], ["\\\\", "\\'"], (string)$k) . "'";
-					$lines[] = $next . $key . ' => ' . $__exportPhp($vv, $level + 1) . ',';
+
+				if (\array_is_list($v)) {
+					// List: do NOT print numeric keys (matches your original output)
+					foreach ($v as $vv) {
+						$lines[] = $next . $__exportPhp($vv, $level + 1) . ',';
+					}
+				} else {
+					// Associative: keep keys
+					foreach ($v as $k => $vv) {
+						$key = \is_int($k) ? (string)$k : "'" . \str_replace(["\\", "'"], ["\\\\", "\\'"], (string)$k) . "'";
+						$lines[] = $next . $key . ' => ' . $__exportPhp($vv, $level + 1) . ',';
+					}
 				}
+
 				return "[\n" . \implode("\n", $lines) . "\n" . $indent . "]";
 			}
-			// objects/resources fall back to strings (kept safe)
+
+			// Fallback for objects/resources: stringify safely
 			return "'" . \str_replace(["\\", "'"], ["\\\\", "\\'"], (string)$v) . "'";
 		};
+
 
 		// Keep selected keys first (in given order), sort the rest alphabetically
 		$__orderTop = static function(array $arr, array $priorityKeys = ['identity']): array {
@@ -404,7 +482,7 @@ final class SystemController extends BaseController {
 
 
 		// --------------------------- PHP export bodies ------------------------------
-		// A) Everything except routes, with identity first, rest A–Z
+		// A) Everything except routes, with identity first, rest A-Z
 		$noRoutes = $cfgTreeArr;
 		if (\array_key_exists('routes', $noRoutes)) {
 			unset($noRoutes['routes']);
@@ -737,14 +815,14 @@ final class SystemController extends BaseController {
 		
 		// Start from your existing tree
 
-		// A) Everything except routes, with identity first, rest A–Z
+		// A) Everything except routes, with identity first, rest A-Z
 		$noRoutes = $cfgTree;
 		unset($noRoutes['routes']);
 		$noRoutes = $__orderTop($noRoutes, ['identity']);
 		// $detailsPhpExRoutesFull  = $__exportPhp($noRoutes);     // with [ ... ] (body-only for compact template inclusion)
 		$cfgPhpExRoutesBody  = $__exportPhpBody($noRoutes); // NO [ ... ], ideal for <pre>
 
-		// B) Routes only (sorted by path) — guard if cfgTree isn't an array
+		// B) Routes only (sorted by path) - guard if cfgTree isn't an array
 		$routesOnly = [];
 		if (\is_array($cfgTreeArr) && isset($cfgTreeArr['routes']) && \is_array($cfgTreeArr['routes'])) {
 			$routesOnly = $cfgTreeArr['routes'];
@@ -801,7 +879,7 @@ final class SystemController extends BaseController {
 		]);
 		
 		
-	}	
+	}
 
 
 	/**
