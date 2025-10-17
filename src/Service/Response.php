@@ -416,54 +416,6 @@ class Response extends BaseService {
  *   - Problem Details (RFC 7807): payload shape (type,title,status,detail,...).
  *     For strict media type, set `application/problem+json` explicitly if needed.
  */
-	
-
-	/**
-	 * Sends a JSON response with a specific HTTP status code and terminates execution.
-	 *
-	 * Behavior:
-	 * - Sets status code, sends Content-Type and echoes JSON-encoded payload.
-	 * - Uses JSON_THROW_ON_ERROR and unescaped unicode/slashes for clarity.
-	 * - Terminates deterministically.
-	 *
-	 * Notes:
-	 * - Any json encoding error will throw and be logged by the global handler.
-	 *
-	 * Typical usage:
-	 *   $this->app->response->jsonStatus(['ok' => true], 200);
-	 *
-	 * @param array $data JSON-serializable payload.
-	 * @param int $statusCode HTTP status code (default 200).
-	 * @return never
-	 * @throws \JsonException When payload cannot be encoded.
-	 */
-	public function jsonStatus(array $data, int $statusCode = 200): never {
-		$this->setStatus($statusCode);
-		if (!\headers_sent()) {
-			\header('Content-Type: application/json; charset=' . (string)$this->app->cfg->locale->charset);
-		}
-		echo \json_encode($data, \JSON_UNESCAPED_UNICODE | \JSON_UNESCAPED_SLASHES | \JSON_THROW_ON_ERROR);
-		
-		// Terminate script execution to prevent further output
-		exit;
-	}
-
-
-	/**
-	 * Sends a JSON with status, strict no-cache, and terminate (handy for webhooks).
-	 *
-	 * Typical usage:
-	 *   $this->app->response->jsonStatusNoCache(['ok' => true], 201);
-	 *
-	 * @param array $data
-	 * @param int $statusCode
-	 * @return void
-	 * @throws \JsonException When payload cannot be encoded.
-	 */
-	public function jsonStatusNoCache(array $data, int $statusCode = 200): void {
-		$this->noCache();
-		$this->jsonStatus($data, $statusCode);
-	}
 
 
 	/**
@@ -473,41 +425,103 @@ class Response extends BaseService {
 	 *
 	 * Behavior:
 	 * - Sends Content-Type and echoes JSON-encoded payload with strict flags.
+	 * - Optional pretty-print for developer inspection when $di === true.
 	 *
 	 * Notes:
 	 * - Deterministic termination. Use jsonStatus() to set a custom status code.
 	 *
 	 * Typical usage:
-	 *   $this->app->response->json(['ok' => true]);
+	 *   $this->app->response->json(['ok' => true], true); // pretty JSON in dev
 	 *
-	 * @param array $data
+	 * @param array $data JSON-serializable payload.
+	 * @param bool  $di   Developer-inspect: when true, adds JSON_PRETTY_PRINT (default: false).
 	 * @return never
 	 * @throws \JsonException When payload cannot be encoded.
 	 */
-	public function json(array $data): never {
+	public function json(array $data, bool $di = false): never {
 		if (!\headers_sent()) {
 			\header('Content-Type: application/json; charset=' . $this->app->cfg->locale->charset);
 		}
-		echo \json_encode($data, \JSON_UNESCAPED_UNICODE | \JSON_UNESCAPED_SLASHES | \JSON_THROW_ON_ERROR);
-		
-		// Terminate script execution to prevent further output
+		$opts = \JSON_UNESCAPED_UNICODE | \JSON_UNESCAPED_SLASHES | \JSON_THROW_ON_ERROR;
+		if ($di) {
+			$opts |= \JSON_PRETTY_PRINT;
+		}
+		echo \json_encode($data, $opts);
 		exit;
 	}
 
 
 	/**
-	 * Sends a JSON 200 OK with strict no-cache and terminate (handy for webhooks).
+	 * Sends a JSON 200 OK with strict no-cache and terminates the script.
+	 * Emits no-store/no-cache headers before delegating to json().
+	 *
+	 * Behavior:
+	 * - Sets no-cache headers and outputs JSON.
+	 * - Optional pretty-print for developer inspection when $di === true.
 	 *
 	 * Typical usage:
-	 *   $this->app->response->jsonNoCache(['ok' => true]);
+	 *   $this->app->response->jsonNoCache(['fresh' => true], true);
 	 *
-	 * @param array $data
+	 * @param array $data JSON-serializable payload.
+	 * @param bool  $di   Developer-inspect: when true, adds JSON_PRETTY_PRINT (default: false).
 	 * @return void
+	 */
+	public function jsonNoCache(array $data, bool $di = false): void {
+		$this->noCache();
+		$this->json($data, $di);
+	}
+	
+
+	/**
+	 * Sends a JSON response with a custom HTTP status and terminates the script.
+	 * Sets the status code, Content-Type header, encodes the data, and exits.
+	 *
+	 * Behavior:
+	 * - Deterministic termination after emitting JSON body and status.
+	 * - Optional pretty-print for developer inspection when $di === true.
+	 *
+	 * Typical usage:
+	 *   $this->app->response->jsonStatus(['ok' => true], 201, true);
+	 *
+	 * @param array $data       JSON-serializable payload.
+	 * @param int   $statusCode HTTP status code (e.g., 200, 201, 400).
+	 * @param bool  $di         Developer-inspect: when true, adds JSON_PRETTY_PRINT (default: false).
+	 * @return never
 	 * @throws \JsonException When payload cannot be encoded.
 	 */
-	public function jsonNoCache(array $data): void {
+	public function jsonStatus(array $data, int $statusCode = 200, bool $di = false): never {
+		$this->setStatus($statusCode);
+		if (!\headers_sent()) {
+			\header('Content-Type: application/json; charset=' . (string)$this->app->cfg->locale->charset);
+		}
+		$opts = \JSON_UNESCAPED_UNICODE | \JSON_UNESCAPED_SLASHES | \JSON_THROW_ON_ERROR;
+		if ($di) {
+			$opts |= \JSON_PRETTY_PRINT;
+		}
+		echo \json_encode($data, $opts);
+		exit;
+	}
+
+
+	/**
+	 * Sends a JSON response with a custom HTTP status and strict no-cache.
+	 * Emits no-store/no-cache headers and delegates to jsonStatus().
+	 *
+	 * Behavior:
+	 * - Sets status+no-cache and outputs JSON.
+	 * - Optional pretty-print for developer inspection when $di === true.
+	 *
+	 * Typical usage:
+	 *   $this->app->response->jsonStatusNoCache(['ok' => true], 200, true);
+	 *
+	 * @param array $data       JSON-serializable payload.
+	 * @param int   $statusCode HTTP status code.
+	 * @param bool  $di         Developer-inspect: when true, adds JSON_PRETTY_PRINT (default: false).
+	 * @return void
+	 */
+	public function jsonStatusNoCache(array $data, int $statusCode = 200, bool $di = false): void {
 		$this->noCache();
-		$this->json($data);
+		$this->jsonStatus($data, $statusCode, $di);
 	}
 
 
@@ -524,6 +538,7 @@ class Response extends BaseService {
 	 * - Adds `instance` from the current request URI when the Request service exists.
 	 * - Uses JSON_THROW_ON_ERROR for deterministic failures.
 	 * - Calls `exit;` to prevent partial responses (fail fast).
+	 * - Optional pretty-print for developer inspection when `$di === true`.
 	 *
 	 * Notes:
 	 * - Choose an appropriate 4xx/5xx `$status`.
@@ -536,7 +551,8 @@ class Response extends BaseService {
 	 *     422,
 	 *     'Email is required',
 	 *     'https://example.com/probs/validation',
-	 *     ['invalid_params' => [['name' => 'email', 'reason' => 'missing']]]
+	 *     ['invalid_params' => [['name' => 'email', 'reason' => 'missing']]],
+	 *     true // pretty JSON in dev
 	 *   );
 	 *
 	 * @param string $title   Short, human-readable summary of the problem.
@@ -544,10 +560,11 @@ class Response extends BaseService {
 	 * @param string $detail  Longer explanation specific to this occurrence (optional).
 	 * @param string $type    URI identifying the problem type, or 'about:blank'.
 	 * @param array  $extra   Additional members to include (ignored on key collisions with core fields).
+	 * @param bool   $di      Developer-inspect: when true, adds JSON_PRETTY_PRINT (default: false).
 	 * @return never
 	 * @throws \JsonException If JSON encoding fails.
 	 */
-	public function jsonProblem(string $title, int $status, string $detail = '', string $type = 'about:blank', array $extra = []): never {
+	public function jsonProblem(string $title, int $status, string $detail = '', string $type = 'about:blank', array $extra = [], bool $di = false): never {
 		
 		// Base RFC 7807 members; defaults are explicit and immutable vs $extra.
 		$base = [
@@ -574,8 +591,12 @@ class Response extends BaseService {
 			\header('Content-Type: application/problem+json; charset=' . (string)$this->app->cfg->locale->charset);
 		}
 
-		// Emit the payload and stop execution (no partial responses).
-		echo \json_encode($payload, \JSON_UNESCAPED_UNICODE | \JSON_UNESCAPED_SLASHES | \JSON_THROW_ON_ERROR);
+		$opts = \JSON_UNESCAPED_UNICODE | \JSON_UNESCAPED_SLASHES | \JSON_THROW_ON_ERROR;
+		if ($di) {
+			$opts |= \JSON_PRETTY_PRINT;
+		}
+		echo \json_encode($payload, $opts);
+	
 		exit;
 	}
 

@@ -74,6 +74,372 @@ final class SystemController extends BaseController {
 
 
 
+
+
+	public function appinfoHtml(): void {
+		if (\defined('CITOMNI_ENVIRONMENT') && !\in_array(\CITOMNI_ENVIRONMENT, ['dev','stage'], true)) {
+			// Use 404 (Not Found) to avoid disclosing the route in prod/stage.
+			$this->app->errorHandler->httpError(404, [
+				'reason' => 'not_found', // deliberately generic
+			]);
+			return;
+		}
+
+		// Build everything once (single source of truth)
+		$g = $this->appinfoGenerator();
+
+		// Robots + no-cache; also safe for member-only pages
+		$this->app->response->noIndex();
+		$this->app->response->setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+
+		// Render using the exact same variables/values/fallbacks as the original
+		$this->app->view->render($this->routeConfig["template_file"], $this->routeConfig["template_layer"], [
+
+			// Controls whether to add <meta name="robots" content="noindex"> in the template (1 = add, 0 = do not add)
+			'noindex'               => 1,
+
+			// Canonical URL
+			'canonical'             => \CITOMNI_PUBLIC_ROOT_URL . "/appinfo.html",
+
+			'meta_title'            => 'Application information',
+			'meta_description'      => 'CitOmni HTTP is installed and running. You are seeing the default welcome page.',
+			'badge_text'            => 'READY',
+			'badge_variant'         => 'badge--success', // green
+			'title'                 => 'Application information',
+			'subtitle'              => 'CitOmni HTTP is up and running. All systems go.',
+			// 'lead_text'           => 'You are all set. CitOmni is ready for your development. Update your routes to get started.',
+			'lead_text'             => 'Green lights across the board. CitOmni is ready for your development!',
+			'status_code'           => '200 OK',
+			// 'status_text'         => '| CitOmni is ready for your development.',
+			// 'http_method'         => $_SERVER['REQUEST_METHOD'] ?? 'GET',
+			// 'request_path'        => $_SERVER['REQUEST_URI'] ?? '/',
+
+			'primary_href'          => 'https://github.com/citomni/http#readme',
+			'primary_target'        => '_blank',
+			'primary_label'         => 'Open README',
+			'secondary_href'        => 'https://github.com/citomni/http/releases',
+			'secondary_target'      => '_blank',
+			'secondary_label'       => 'Changelog',
+			'tertiary_href'         => 'https://github.com/citomni/http/issues/new/choose',
+			'tertiary_target'       => '_blank', // _self
+			'tertiary_label'        => 'Report issue',
+			'year'                  => \date('Y'),
+			'owner'                 => 'CitOmni.com',
+
+			// JSON + export blocks for the page (exact flags and fallbacks preserved)
+			'sysinfoJson'           => $g['sysinfoJson']        ?? 'System information not found.',
+			'packagesJson'          => $g['packagesJson']       ?? 'No packages found.',
+			'cfgPhpExRoutesBody'    => $g['cfgPhpExRoutesBody'] ?? 'No CFG found.',
+			'routesPhpBody'         => $g['routesPhpBody']      ?? 'No Routes found.',
+			'cfgFlatJson'           => $g['cfgFlatJson']        ?? 'No flat CFG found.',
+		]);
+	}
+
+
+	/**
+	 * JSON twin of appinfoHtml(): returns the same data in one JSON payload.
+	 * Path suggestion: /_system/appinfo.json (same env-guard as HTML).
+	 *
+	 * @return void
+	 */
+	public function appinfoJson(): void {
+		if (\defined('CITOMNI_ENVIRONMENT') && !\in_array(\CITOMNI_ENVIRONMENT, ['dev','stage'], true)) {
+			$this->app->errorHandler->httpError(404, ['reason' => 'not_found']);
+			return;
+		}
+
+		$g = $this->appinfoGenerator();
+
+		$payload = [
+			// Samme datagrundlag som HTML-varianten bruger
+			'sysinfo'                    => $g['_sysinfo_raw'],
+			'packages'                   => $g['_packages_raw'],
+			//'cfg_flat'                   => $g['_cfg_flat_raw'],
+			'cfg'                   => $g['_cfg_tree_raw'],
+
+			// De to PHP-exports som strenge (identisk formatering)
+			// 'cfg_php_export_excl_routes' => $g['cfgPhpExRoutesBody'] ?? null,
+			// 'routes_php_export'          => $g['routesPhpBody'] ?? null,
+		];
+
+		// Sætter no-cache + korrekt Content-Type + afslutter (never)
+		$this->app->response->jsonNoCache($payload, true);
+	}
+
+
+
+
+	/**
+	 * Single source of truth for appinfo data.
+	 *
+	 * Returns exactly the JSON strings and PHP-export bodies the HTML page expects,
+	 * plus the raw arrays for the JSON endpoint.
+	 *
+	 * @return array{
+	 *   sysinfoJson:string,packagesJson:string,cfgFlatJson:string,
+	 *   cfgPhpExRoutesBody:string,routesPhpBody:string,
+	 *   _sysinfo_raw:array,_packages_raw:array,_cfg_flat_raw:array,_cfg_tree_raw:array
+	 * }
+	 */
+	private function appinfoGenerator(): array {
+		// ----------------------------- Helpers -------------------------------------
+
+		// Secret masker: Redact obvious secret-like values (fast heuristic, no DB lookups)
+		$__maskValue = static function(string $key, mixed $value): mixed {
+			$k = \strtolower($key);
+			if (\preg_match('~(secret|token|password|pass|api[_-]?key|salt|private|credential|signature|auth|bearer)~i', $k)) {
+				return '__redacted__';
+			}
+			if (\is_string($value)) {
+				// Heuristics for long randoms / hex / base64-ish
+				if (\preg_match('~^[A-Fa-f0-9]{32,}$~', $value) === 1) { return '__redacted__'; }
+				if (\preg_match('~^[A-Za-z0-9+/=]{40,}$~', $value) === 1) { return '__redacted__'; }
+				// Heuristic: URI with userinfo
+				if (\preg_match('~^(?:\w+://)[^/\s]+@~', $value) === 1) { return '__redacted__'; }
+			}
+			return $value;
+		};
+
+		// Cyclic reference guard for safe object traversal
+		$__seen = new \SplObjectStorage();
+		$__maxDepth = 8;  // Defense-in-depth: avoid deep object graphs
+
+		// Convert arbitrary structures into JSON-serializable safe values
+		$__toSafe = static function(mixed $v, int $depth = 0, ?string $kHint = null) use (&$__toSafe, $__maskValue, $__seen, $__maxDepth) {
+			if ($depth >= $__maxDepth) { return '__max_depth__'; }
+			if ($v === null || \is_scalar($v)) { return $kHint !== null ? $__maskValue($kHint, $v) : $v; }
+			if (\is_array($v)) {
+				$out = [];
+				foreach ($v as $k => $vv) {
+					$ks = \is_int($k) ? (string)$k : (string)$k;
+					$out[$k] = $__toSafe($vv, $depth + 1, $ks);
+				}
+				return $out;
+			}
+			if (\is_object($v)) {
+				if ($__seen->contains($v)) { return '__cycle__'; }
+				$__seen->attach($v);
+				try { if ($v instanceof \DateTimeInterface) { return $v->format(\DateTimeInterface::RFC3339_EXTENDED); } } catch (\Throwable) {}
+				try {
+					$props = \get_object_vars($v);
+					if ($props) { return $__toSafe($props, $depth + 1, $kHint); }
+				} catch (\Throwable) {}
+				return '(object) ' . $v::class;
+			}
+			return '(resource)';
+		};
+
+		// Flatten nested arrays into dot.notation => value for quick scanning
+		$__flatten = static function(array $arr, string $prefix = '') use (&$__flatten, $__maskValue) : array {
+			$out = [];
+			foreach ($arr as $k => $v) {
+				$key = $prefix === '' ? (string)$k : $prefix . '.' . $k;
+				if (\is_array($v)) {
+					$out += $__flatten($v, $key);
+				} else {
+					$out[$key] = $__maskValue($key, $v);
+				}
+			}
+			\ksort($out);
+			return $out;
+		};
+
+		/**
+		 * Export any PHP value as a short-array string with tabs.
+		 * - Uses [] instead of array()
+		 * - Preserves ints/bools/null
+		 * - Safely quotes strings (single quotes)
+		 */
+		$__exportPhp = null;
+		$__exportPhp = static function(mixed $v, int $level = 0) use (&$__exportPhp): string {
+			$tab = "\t";
+			if ($v === null) { return 'null'; }
+			if (\is_bool($v)) { return $v ? 'true' : 'false'; }
+			if (\is_int($v) || \is_float($v)) { return (string)$v; }
+			if (\is_string($v)) {
+				return "'" . \str_replace(["\\", "'"], ["\\\\", "\\'"], $v) . "'";
+			}
+			if (\is_array($v)) {
+				if ($v === []) { return '[]'; }
+				$indent = \str_repeat($tab, $level);
+				$next   = \str_repeat($tab, $level + 1);
+				$lines  = [];
+				foreach ($v as $k => $vv) {
+					$key = \is_int($k) ? (string)$k : "'" . \str_replace(["\\", "'"], ["\\\\", "\\'"], (string)$k) . "'";
+					$lines[] = $next . $key . ' => ' . $__exportPhp($vv, $level + 1) . ',';
+				}
+				return "[\n" . \implode("\n", $lines) . "\n" . $indent . "]";
+			}
+			// objects/resources fall back to strings (kept safe)
+			return "'" . \str_replace(["\\", "'"], ["\\\\", "\\'"], (string)$v) . "'";
+		};
+
+		// Keep selected keys first (in given order), sort the rest alphabetically
+		$__orderTop = static function(array $arr, array $priorityKeys = ['identity']): array {
+			$head = [];
+			foreach ($priorityKeys as $k) {
+				if (isset($arr[$k])) {
+					$head[$k] = $arr[$k];
+					unset($arr[$k]);
+				}
+			}
+			\ksort($arr); // alphabetical for remaining top-level keys
+			return $head + $arr;
+		};
+
+		// Export ONLY the body of an array (no surrounding [ ... ])
+		// $baseLevel controls left padding of the top-level lines (0 = no indent).
+		$__exportPhpBody = static function(array $arr, int $baseLevel = 0) use (&$__exportPhp): string {
+			$prefix = \str_repeat("\t", $baseLevel);
+			$lines  = [];
+			foreach ($arr as $k => $v) {
+				$key = \is_int($k) ? (string)$k : "'" . \str_replace(["\\", "'"], ["\\\\", "\\'"], (string)$k) . "'";
+				$lines[] = $prefix . $key . ' => ' . $__exportPhp($v, $baseLevel) . ',';
+			}
+			return \implode("\n", $lines);
+		};
+
+		// --------------------------- Composer packages -----------------------------
+		$packages = [];
+		if (\class_exists(\Composer\InstalledVersions::class)) {
+			foreach (\Composer\InstalledVersions::getInstalledPackages() as $pkg) {
+				$packages[$pkg] = [
+					'version' => \Composer\InstalledVersions::getPrettyVersion($pkg) ?? '',
+					'ref'     => \Composer\InstalledVersions::getReference($pkg) ?? null,
+				];
+			}
+			\ksort($packages); // deterministic
+		}
+
+
+		// ----------------------------- Active config --------------------------------
+		// Convert the read-only wrapper to a safe, serializable array tree.
+		// We MUST end with a real array to keep HTML panels non-empty (1:1 behavior).
+		$__cfgToArray = static function(mixed $cfg): array {
+			if (\is_array($cfg)) {
+				return $cfg;
+			}
+			if (\is_object($cfg)) {
+				// Preferred explicit export if available
+				if (\method_exists($cfg, 'toArray')) {
+					try { $arr = $cfg->toArray(); if (\is_array($arr)) { return $arr; } } catch (\Throwable) {}
+				}
+				// Iterator fallback
+				if ($cfg instanceof \Traversable) {
+					$out = [];
+					try { foreach ($cfg as $k => $v) { $out[$k] = $v; } } catch (\Throwable) {}
+					return $out;
+				}
+				// Public props
+				try {
+					$vars = \get_object_vars($cfg);
+					if (!empty($vars)) { return $vars; }
+				} catch (\Throwable) {}
+			}
+			// Last resort: JSON round-trip (safe + stable enough for config)
+			$tmp = \json_decode(\json_encode($cfg, \JSON_PARTIAL_OUTPUT_ON_ERROR), true);
+			return \is_array($tmp) ? $tmp : [];
+		};
+
+		// Build a safe tree first, then apply masking/normalization (like original)
+		$cfgTreeRaw = $__cfgToArray($this->app->cfg);
+		$cfgTree    = $__toSafe($cfgTreeRaw);
+
+		// Ensure array from here on
+		$cfgTreeArr = \is_array($cfgTree) ? $cfgTree : [];
+
+		// Build a flattened config, excluding routes (noise-heavy)
+		$cfgFlatSource = $cfgTreeArr;
+		if (\array_key_exists('routes', $cfgFlatSource) && \is_array($cfgFlatSource['routes'])) {
+			unset($cfgFlatSource['routes']); // Avoid noisy route maps in flat view
+		}
+		$cfgFlat = $__flatten($cfgFlatSource);
+
+		// Keep the original timing/metrics exactly as before
+		$nowNs   = \hrtime(true);
+		$startNs = \defined('CITOMNI_START_NS') ? (int)\CITOMNI_START_NS : $nowNs;
+		$elapsed = (float)\sprintf('%.3f', ($nowNs - $startNs) / 1_000_000_000);
+
+		$routesCount = (isset($this->app->cfg->routes) && \is_array($this->app->cfg->routes)) ? \count($this->app->cfg->routes) : 0;
+
+		$baseUrl = \defined('CITOMNI_PUBLIC_ROOT_URL')
+			? \CITOMNI_PUBLIC_ROOT_URL
+			: ($this->app->cfg->http->base_url ?? '');
+
+
+
+
+		// ------------------------------- Build payload ------------------------------
+		$sysinfo = [
+			'environment'   => \defined('CITOMNI_ENVIRONMENT') ? (string)\CITOMNI_ENVIRONMENT : '(unknown)',
+			'hostname'      => \gethostname() ?: 'unknown',
+			'datetime_local'=> \date('c'),
+			'datetime_utc'  => \gmdate('c'),
+			'app' => [
+				'name'     => $this->app->cfg->identity->name ?? 'My CitOmni App',
+				'version'  => $this->app->cfg->identity->version ?? null,
+				'channel'  => $this->app->cfg->identity->channel ?? null,
+				'base_url' => $baseUrl,
+			],
+			'metrics' => [
+				'time_s'                    => $elapsed,
+				'memory_usage_current_kb'   => (int)\round(\memory_get_usage() / 1024),
+				'memory_usage_peak_kb'      => (int)\round(\memory_get_peak_usage() / 1024),
+				'included_files_count'      => \count(\get_included_files()),
+				'routes_count'              => $routesCount,
+			],
+			'opcache' => [
+				'enabled'             => (bool)\filter_var(\ini_get('opcache.enable'), \FILTER_VALIDATE_BOOL),
+				'validate_timestamps' => \ini_get('opcache.validate_timestamps') !== '0',
+			],
+			'php' => [
+				'version' => \PHP_VERSION,
+			],
+		];
+
+		// ------------------------------ JSON strings --------------------------------
+		$sysinfoJson  = \json_encode($sysinfo,  \JSON_PRETTY_PRINT | \JSON_UNESCAPED_SLASHES);
+		$packagesJson = \json_encode($packages, \JSON_PRETTY_PRINT | \JSON_UNESCAPED_SLASHES);
+		$cfgFlatJson  = \json_encode($cfgFlat,  \JSON_PRETTY_PRINT | \JSON_UNESCAPED_SLASHES);
+
+
+		// --------------------------- PHP export bodies ------------------------------
+		// A) Everything except routes, with identity first, rest A–Z
+		$noRoutes = $cfgTreeArr;
+		if (\array_key_exists('routes', $noRoutes)) {
+			unset($noRoutes['routes']);
+		}
+		$noRoutes = $__orderTop($noRoutes, ['identity']);
+		$cfgPhpExRoutesBody = $__exportPhpBody($noRoutes); // body-only for <pre>
+
+		// B) Routes only (sorted by path)
+		$routesOnly = [];
+		if (isset($cfgTreeArr['routes']) && \is_array($cfgTreeArr['routes'])) {
+			$routesOnly = $cfgTreeArr['routes'];
+		}
+		\ksort($routesOnly);
+		$routesPhpBody = $__exportPhpBody(['routes' => $routesOnly]);
+
+
+
+		return [
+			// strings used by HTML template (kept 1:1)
+			'sysinfoJson'        => $sysinfoJson,
+			'packagesJson'       => $packagesJson,
+			'cfgFlatJson'        => $cfgFlatJson,
+			'cfgPhpExRoutesBody' => $cfgPhpExRoutesBody,
+			'routesPhpBody'      => $routesPhpBody,
+
+			// raw data used by JSON endpoint
+			'_sysinfo_raw'  => $sysinfo,
+			'_packages_raw' => $packages,
+			'_cfg_flat_raw' => $cfgFlat,
+			'_cfg_tree_raw' => $cfgTree,
+		];
+	}
+
+
+
 	/**
 	 * Render a dev/stage application information page with safe snapshots.
 	 *
@@ -302,11 +668,19 @@ final class SystemController extends BaseController {
 		}
 
 		// ----------------------------- Active config --------------------------------
+		// Convert the read-only wrapper to a safe, serializable structure.
+		// Guard against non-array returns to avoid "Cannot unset string offsets".
+		$cfgTree = $__toSafe($this->app->cfg);
 
-		$cfgTree = $__toSafe($this->app->cfg);  // Deep-read-only wrapper exported to safe scalars/arrays
-		$cfgFlat = $cfgTree;
-		unset($cfgFlat['routes']);  // Avoid noisy route maps in flat view
-		$cfgFlat = \is_array($cfgFlat) ? $__flatten($cfgFlat) : [];
+		// Ensure we work with arrays from here on
+		$cfgTreeArr = \is_array($cfgTree) ? $cfgTree : (array)$cfgTree;
+
+		// Build a flattened config, excluding routes (noise-heavy)
+		$cfgFlatSource = $cfgTreeArr;
+		if (\is_array($cfgFlatSource) && \array_key_exists('routes', $cfgFlatSource)) {
+			unset($cfgFlatSource['routes']); // Avoid noisy route maps in flat view
+		}
+		$cfgFlat = \is_array($cfgFlatSource) ? $__flatten($cfgFlatSource) : [];
 
 		$nowNs   = \hrtime(true);
 		$startNs = \defined('CITOMNI_START_NS') ? (int)\CITOMNI_START_NS : $nowNs;
@@ -370,11 +744,13 @@ final class SystemController extends BaseController {
 		// $detailsPhpExRoutesFull  = $__exportPhp($noRoutes);     // with [ ... ] (body-only for compact template inclusion)
 		$cfgPhpExRoutesBody  = $__exportPhpBody($noRoutes); // NO [ ... ], ideal for <pre>
 
-		// B) Routes only (sorted by path if you like)
-		$routesOnly = $cfgTree['routes'] ?? [];
+		// B) Routes only (sorted by path) — guard if cfgTree isn't an array
+		$routesOnly = [];
+		if (\is_array($cfgTreeArr) && isset($cfgTreeArr['routes']) && \is_array($cfgTreeArr['routes'])) {
+			$routesOnly = $cfgTreeArr['routes'];
+		}
 		\ksort($routesOnly);
-		// $detailsPhpRoutesFull = $__exportPhp(['routes' => $routesOnly]); // pasteable block
-		$routesPhpBody = $__exportPhpBody(['routes' => $routesOnly]); // body only
+		$routesPhpBody = $__exportPhpBody(['routes' => $routesOnly]);
 
 		// Robots + no-cache; also safe for member-only pages
 		$this->app->response->noIndex();

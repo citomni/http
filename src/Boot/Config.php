@@ -620,7 +620,7 @@ final class Config {
 				'controller' => \CitOmni\Http\Controller\SystemController::class,
 				'action'     => 'webhookDebug',
 				'methods'    => ['POST'],
-			],			
+			],
 			
 			'/_system/appinfo.html' => [
 				'controller' => \CitOmni\Http\Controller\SystemController::class,
@@ -628,6 +628,20 @@ final class Config {
 				'methods' => ['GET'],
 				'template_file' => 'public/appinfo.html',
 				'template_layer' => 'citomni/http'
+			],
+			
+			'/_system/appinfo-new.html' => [
+				'controller' => \CitOmni\Http\Controller\SystemController::class,
+				'action' => 'appinfoHtml',
+				'methods' => ['GET'],
+				'template_file' => 'public/appinfo.html',
+				'template_layer' => 'citomni/http'
+			],
+			
+			'/_system/appinfo.json' => [
+				'controller' => \CitOmni\Http\Controller\SystemController::class,
+				'action' => 'appinfoJson',
+				'methods' => ['GET'],
 			],
 			
 			// --- Regex routes (matches BEFORE top-level placeholders) ---
