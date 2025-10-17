@@ -38,12 +38,14 @@ use CitOmni\Kernel\Service\BaseService;
  *
  * Configuration keys:
  * - webhooks.enabled (bool) - master enable switch (default true)
- * - webhooks.secret (string) - shared HMAC secret (required when enabled)
+ * - webhooks.secret_file (string) - absolute path to a side-effect-free PHP file
+ *   that returns ['secret' => <hex>, 'algo' => 'sha256'|'sha512' (optional)]
  * - webhooks.ttl_seconds (int) - max age for requests (default 300)
  * - webhooks.ttl_clock_skew_tolerance (int) - +/- seconds tolerance (default 60)
- * - webhooks.allowed_ips (string[]) - exact IPs or IPv4 CIDR ranges (default [])
- * - webhooks.nonce_dir (string) - directory for the nonce ledger (required when enabled)
- * - webhooks.algo (string) - "sha256" or "sha512" (default "sha256")
+ * - webhooks.allowed_ips (string[]) - exact IPs or IPv4 CIDR
+ * - webhooks.nonce_dir (string) - directory for the nonce ledger
+ * - webhooks.algo (string) - "sha256" or "sha512" (default "sha256"); if omitted,
+ *   and the secret file contains 'algo', the file's value is used.
  * - webhooks.bind_context (bool) - include method/path/query/body hash in HMAC base (default false)
  * - webhooks.header_signature (string) - server key for signature header (default "HTTP_X_CITOMNI_SIGNATURE")
  * - webhooks.header_timestamp (string) - server key for timestamp header (default "HTTP_X_CITOMNI_TIMESTAMP")
@@ -154,6 +156,8 @@ class WebhooksAuth extends BaseService {
 	// Whether to bind signature to method, path, query, and body hash
 	private bool $bindContext = false;
 
+	// Filesystem path to secret file (side-effect free; returns array)
+	private string $secretFile = '';
 
 	// Header keys (mapped from $_SERVER by PHP)
 	// Header carrying the computed HMAC signature
@@ -234,7 +238,6 @@ class WebhooksAuth extends BaseService {
 
 		// Core toggles and parameters
 		$this->enabled = (bool)$get($opts, 'enabled', true);
-		$this->secret = (string)$get($opts, 'secret', '');
 		$this->ttlSeconds = (int)$get($opts, 'ttl_seconds', 300);
 		$this->clockSkew = (int)$get($opts, 'ttl_clock_skew_tolerance', 60);
 		$this->algo = strtolower((string)$get($opts, 'algo', 'sha256')); // normalize for comparison
@@ -242,8 +245,7 @@ class WebhooksAuth extends BaseService {
 		$this->allowedIps = array_values(array_filter(
 			array_map(static fn($x) => trim((string)$x), (array)$get($opts, 'allowed_ips', [])),
 			static fn($x) => $x !== ''
-		));
-		
+		));		
 
 		// nonce_dir: prefer explicit option; fallback to cfg->webhooks->nonce_dir; else empty (validated below if enabled)
 		$nonceDir = $get($opts, 'nonce_dir', null);
@@ -251,6 +253,12 @@ class WebhooksAuth extends BaseService {
 			$nonceDir = $this->app->cfg->webhooks->nonce_dir;
 		}
 		$this->nonceDir = (string)$nonceDir;
+		
+		// Pick up secret_file (defaulting to baseline path if desired)
+		$this->secretFile = (string)$get($opts, 'secret_file', CITOMNI_APP_PATH . '/var/secrets/webhooks.secret.php');
+
+		// Load secret (and maybe algo) from file immediately
+		$this->loadSecretFromFile($this->secretFile);
 
 		// Header keys as seen in $_SERVER (can be overridden)
 		$this->hSignature = (string)$get($opts, 'header_signature', 'HTTP_X_CITOMNI_SIGNATURE');
@@ -260,13 +268,13 @@ class WebhooksAuth extends BaseService {
 		// Fail fast if enabled and required pieces are missing/invalid
 		if ($this->enabled) {
 			
-			// Secret must be non-empty string
+			// Secret must be found in valid secret-file
 			if ($this->secret === '') {
-				throw new \RuntimeException('WebhooksAuth: missing HMAC secret.');
+				throw new \RuntimeException('WebhooksAuth: Missing HMAC secret (expected via secret_file).');
 			}
 			// Nonce directory path must be provided (existence/writability is validated lazily by the Nonce service)
 			if ($this->nonceDir === '') {
-				throw new \RuntimeException('WebhooksAuth: missing nonce_dir.');
+				throw new \RuntimeException('WebhooksAuth: Missing nonce_dir.');
 			}
 			// TTL must be positive (0 disables all requests instantly)
 			if ($this->ttlSeconds < 1) {
@@ -278,7 +286,7 @@ class WebhooksAuth extends BaseService {
 			}
 			// Only allow known algorithms
 			if ($this->algo !== 'sha256' && $this->algo !== 'sha512') {
-				throw new \RuntimeException('WebhooksAuth: unsupported algo (expected sha256 or sha512).');
+				throw new \RuntimeException('WebhooksAuth: Unsupported algo (expected sha256 or sha512).');
 			}
 		}
 
@@ -360,7 +368,7 @@ class WebhooksAuth extends BaseService {
 			throw new \RuntimeException('Webhooks are disabled.');
 		}
 		if ($this->secret === '' || $this->nonceDir === '') {
-			throw new \RuntimeException('Webhooks not configured.');
+			throw new \RuntimeException('Webhooks not configured (missing secret or nonce_dir).');
 		}
 
 		// 1) IP allow-list (supports exact match and CIDR like "203.0.113.0/24")
@@ -567,5 +575,46 @@ class WebhooksAuth extends BaseService {
 		// No match found
 		return false;
 	}
+
+
+	/**
+	 * Loads the HMAC secret (and optionally algo) from a side-effect-free PHP file.
+	 *
+	 * File must return an array like:
+	 *   ['secret' => <hex>, 'algo' => 'sha256'|'sha512' (optional), ...metadata]
+	 *
+	 * Precedence:
+	 * - If cfg provided 'algo', it wins over the file's 'algo'.
+	 *
+	 * @param string|null $file Absolute path to secret file. If empty/missing, no-op.
+	 * @return void
+	 */
+	private function loadSecretFromFile(?string $file): void {
+		$file = (string)$file;
+		if ($file === '' || !is_file($file)) {
+			// Keep $this->secret empty; validation will fail on use if enabled.
+			return;
+		}
+
+		$data = @include $file;
+		if (!is_array($data)) {
+			throw new \RuntimeException('WebhooksAuth: secret_file did not return an array.');
+		}
+
+		$secret = (string)($data['secret'] ?? '');
+		if ($secret === '' || !ctype_xdigit($secret)) {
+			throw new \RuntimeException('WebhooksAuth: secret_file "secret" must be hex.');
+		}
+		$this->secret = strtolower($secret);
+
+		// Accept file-provided algo only if cfg didn't explicitly set one different
+		if (isset($data['algo'])) {
+			$maybe = strtolower((string)$data['algo']);
+			if (($this->algo === '' || $this->algo === 'sha256') && ($maybe === 'sha256' || $maybe === 'sha512')) {
+				$this->algo = $maybe;
+			}
+		}
+	}
+
 
 }
