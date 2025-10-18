@@ -74,46 +74,76 @@ final class SystemController extends BaseController {
 	
 
 
+	/**
+	 * Render a dev-only application information page with safe snapshots.
+	 *
+	 * Behavior:
+	 * - Dev-only (404 for non-dev): hides the endpoint in stage/prod.
+	 * - Calls appinfoGenerator() as the single source of truth for:
+	 *   sysinfo, packages, cfg tree/flat, PHP export blocks, and (optionally)
+	 *   merged configuration per environment (dev/stage/prod).
+	 * - Sends robots noindex + strong no-cache headers.
+	 * - Renders a small LiteView template with canonical metadata.
+	 *
+	 * Notes:
+	 * - No DB or remote I/O; everything is local and deterministic.
+	 * - Secret masking is managed inside appinfoGenerator(); here we only render.
+	 * - Keep controller thin: guards, headers, and a single render call.
+	 *
+	 * Typical usage:
+	 *   Used locally (dev) to inspect runtime and compare cfg across environments.
+	 *
+	 * Failure:
+	 * - In non-dev environments, intentionally responds with 404 to conceal presence.
+	 *
+	 * @return void
+	 */
 	public function appinfoHtml(): void {
-		if (\defined('CITOMNI_ENVIRONMENT') && !\in_array(\CITOMNI_ENVIRONMENT, ['dev','stage'], true)) {
-			// Use 404 (Not Found) to avoid disclosing the route in prod/stage.
-			$this->app->errorHandler->httpError(404, [
-				'reason' => 'not_found', // deliberately generic
-			]);
+		// Dev-only guard: conceal endpoint outside dev with a 404 (not_found).
+		if (\defined('CITOMNI_ENVIRONMENT') && \CITOMNI_ENVIRONMENT !== 'dev') {
+			$this->app->errorHandler->httpError(404, ['reason' => 'not_found']);
 			return;
 		}
 
-		// Build everything once (single source of truth)
-		$g = $this->appinfoGenerator(false, [
-			'header_signature',
-		]);
+		// Build the full dataset once using a single source of truth.
+		// - unredacted = false (default masked view in dev; flip to true if desired)
+		// - allowlist includes 'header_signature' (a header name, not a secret)
+		// - includeEnvMerged = true to synthesize merged cfg for dev|stage|prod
+		$g = $this->appinfoGenerator(
+			false,							// $unredacted
+			['header_signature'],			// $allowlistKeys
+			true,							// $includeEnvMerged
+			['dev', 'stage', 'prod']		// $envs
+		);
 
-		// Robots + no-cache; also safe for member-only pages
+		// Robots + no-cache
 		$this->app->response->noIndex();
 		$this->app->response->setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
 
-		// Render using the exact same variables/values/fallbacks as the original
-		$this->app->view->render($this->routeConfig["template_file"], $this->routeConfig["template_layer"], [
+		// Robust canonical: prefer constant, else fall back to cfg->http->base_url
+		$canonicalBase = \defined('CITOMNI_PUBLIC_ROOT_URL')
+			? (string)\CITOMNI_PUBLIC_ROOT_URL
+			: (string)($this->app->cfg->http->base_url ?? '');
+		$canonical = \rtrim($canonicalBase, '/') . '/appinfo.html';
+
+		// Render using the exact same variables/values/fallbacks as before,
+		// plus the three per-env JSON blocks produced by the generator.
+		$this->app->view->render($this->routeConfig['template_file'], $this->routeConfig['template_layer'], [
 
 			// Controls whether to add <meta name="robots" content="noindex"> in the template (1 = add, 0 = do not add)
 			'noindex'               => 1,
 
 			// Canonical URL
-			'canonical'             => \CITOMNI_PUBLIC_ROOT_URL . "/appinfo.html",
-
+			'canonical'             => \CITOMNI_PUBLIC_ROOT_URL . "/appinfo.html",			
+			
 			'meta_title'            => 'Application information',
 			'meta_description'      => 'CitOmni HTTP is installed and running. You are seeing the default welcome page.',
 			'badge_text'            => 'READY',
 			'badge_variant'         => 'badge--success', // green
 			'title'                 => 'Application information',
 			'subtitle'              => 'CitOmni HTTP is up and running. All systems go.',
-			// 'lead_text'           => 'You are all set. CitOmni is ready for your development. Update your routes to get started.',
 			'lead_text'             => 'Green lights across the board. CitOmni is ready for your development!',
 			'status_code'           => '200 OK',
-			// 'status_text'         => '| CitOmni is ready for your development.',
-			// 'http_method'         => $_SERVER['REQUEST_METHOD'] ?? 'GET',
-			// 'request_path'        => $_SERVER['REQUEST_URI'] ?? '/',
-
 			'primary_href'          => 'https://github.com/citomni/http#readme',
 			'primary_target'        => '_blank',
 			'primary_label'         => 'Open README',
@@ -121,152 +151,248 @@ final class SystemController extends BaseController {
 			'secondary_target'      => '_blank',
 			'secondary_label'       => 'Changelog',
 			'tertiary_href'         => 'https://github.com/citomni/http/issues/new/choose',
-			'tertiary_target'       => '_blank', // _self
+			'tertiary_target'       => '_blank',
 			'tertiary_label'        => 'Report issue',
 			'year'                  => \date('Y'),
 			'owner'                 => 'CitOmni.com',
 
-			// JSON + export blocks for the page (exact flags and fallbacks preserved)
+			// JSON + export blocks for the page (kept 1:1 with original)
 			'sysinfoJson'           => $g['sysinfoJson']        ?? 'System information not found.',
 			'packagesJson'          => $g['packagesJson']       ?? 'No packages found.',
 			'cfgPhpExRoutesBody'    => $g['cfgPhpExRoutesBody'] ?? 'No CFG found.',
 			'routesPhpBody'         => $g['routesPhpBody']      ?? 'No Routes found.',
 			'cfgFlatJson'           => $g['cfgFlatJson']        ?? 'No flat CFG found.',
+
+			// Prebuilt merged cfg per env (masked JSON strings)
+			'cfgEnvDevJson'         => $g['cfgByEnvJson']['dev']   ?? '{}',
+			'cfgEnvStageJson'       => $g['cfgByEnvJson']['stage'] ?? '{}',
+			'cfgEnvProdJson'        => $g['cfgByEnvJson']['prod']  ?? '{}',
 		]);
+
+		/*
+		echo PHP_EOL;
+
+		echo "## sysinfoJson ##" . PHP_EOL;
+		var_dump($g['sysinfoJson']);
+
+		echo "## packagesJson ##" . PHP_EOL;
+		var_dump($g['packagesJson']);
+
+		echo "## cfgPhpExRoutesBody ##" . PHP_EOL;
+		var_dump($g['cfgPhpExRoutesBody']);
+		
+		echo "## routesPhpBody ##" . PHP_EOL;
+		var_dump($g['routesPhpBody']);
+		
+		echo "## cfgFlatJson ##" . PHP_EOL;
+		var_dump($g['cfgFlatJson']);
+
+		echo "## cfgByEnvJson.dev ##" . PHP_EOL;		
+		var_dump($g['cfgByEnvJson']['dev']);
+		
+		echo "## cfgByEnvJson.stage ##" . PHP_EOL;
+		var_dump($g['cfgByEnvJson']['stage']);
+		
+		echo "## cfgByEnvJson.prod ##" . PHP_EOL;
+		var_dump($g['cfgByEnvJson']['prod']);
+		*/
+		
 	}
 
 
 	/**
-	 * Outputs structured runtime/config data as JSON for DevKit or similar tools.
+	 * Emit structured runtime/config data as JSON for DevKit or similar tools.
 	 *
 	 * Behavior:
-	 * - Only accessible in dev/stage (404 otherwise).
+	 * - Dev-only (404 for non-dev): hides the endpoint in stage/prod.
 	 * - Builds the same dataset as the HTML page via appinfoGenerator().
-	 * - Unredacted-by-default in dev (or when ?raw=1 / ?unredacted=1).
-	 * - Optional flags: ?flat=1 (adds cfg_flat), ?exports=1 (adds PHP export strings).
-	 * - Sends proper no-cache JSON and terminates via Response::jsonNoCache().
+	 * - Unredacted-by-default can be toggled in dev via ?raw=1 or ?unredacted=1.
+	 * - Optional flags:
+	 *     ?flat=1     -> include cfg_flat (dot.notation)
+	 *     ?exports=1  -> include PHP export strings (cfg/routes bodies)
+	 * - Always sends no-cache JSON via Response::jsonNoCache().
 	 *
-	 * Typical usage:
-	 *   /_system/appinfo.json
-	 *   /_system/appinfo.json?flat=1
-	 *   /_system/appinfo.json?flat=1&exports=1
-	 *   /_system/appinfo.json?raw=1         (force unredacted even outside dev, if the route is reachable)
+	 * Payload (base):
+	 *   {
+	 *     "sysinfo":    <array>,       // metrics, php/opcache, identity
+	 *     "packages":   <array>,       // composer packages (version+ref)
+	 *     "cfg":        <array>,       // current env cfg (masked unless unredacted)
+	 *     "cfg_by_env": <array>,       // merged cfg per env (dev/stage/prod), masked unless unredacted
+	 *     // optionally:
+	 *     "cfg_flat":   <array>,       // dot.notation => value (no routes)
+	 *     "cfg_php_export_excl_routes": "<string>",  // PHP short array export (no 'routes')
+	 *     "routes_php_export":          "<string>"   // PHP short array export for 'routes' only
+	 *   }
 	 *
 	 * Notes:
-	 * - Redaction allowlist includes "header_signature" (header name is not secret).
-	 * - Shared secrets/tokens remain masked unless unredacted is active.
+	 * - Secret masking policy and allowlist are enforced in appinfoGenerator().
+	 * - Controllers remain thin (guard/flags/emit).
+	 *
+	 * Failure:
+	 * - In non-dev environments, intentionally responds with 404 to conceal presence.
 	 *
 	 * @return void
 	 */
 	public function appinfoJson(): void {
-		if (\defined('CITOMNI_ENVIRONMENT') && !\in_array(\CITOMNI_ENVIRONMENT, ['dev', 'stage'], true)) {
-			// Hide this endpoint entirely outside dev/stage.
+		
+		// Dev-only guard
+		if (\defined('CITOMNI_ENVIRONMENT') && \CITOMNI_ENVIRONMENT !== 'dev') {
 			$this->app->errorHandler->httpError(404, ['reason' => 'not_found']);
 			return;
 		}
 
-		// Interpret boolean-like GET flags consistently.
+		// Consistent boolean flag parser (?flat=1, ?exports=true, ?raw=1, ...)
 		$bool = static function(mixed $v): bool {
-			if ($v === null) {
-				return false;
-			}
-			if (\is_bool($v)) {
-				return $v;
-			}
+			if ($v === null) { return false; }
+			if (\is_bool($v)) { return $v; }
 			$s = \strtolower(\trim((string)$v));
 			return $s === '1' || $s === 'true' || $s === 'yes' || $s === 'on';
 		};
 
 		// Unredacted mode:
-		// - enabled automatically in dev
-		// - or explicitly via ?raw=1 / ?unredacted=1
+		// - Enabled automatically in dev if ?raw=1 or ?unredacted=1 is present.
 		$isDev      = \defined('CITOMNI_ENVIRONMENT') && \CITOMNI_ENVIRONMENT === 'dev';
 		$forceRaw   = $bool($this->app->request->get('raw')) || $bool($this->app->request->get('unredacted'));
-		$unredacted = $isDev || $forceRaw;
+		$unredacted = $isDev && $forceRaw;
 
-		// Allowlist: keys that should never be masked (case-insensitive leaf match).
-		// 'header_signature' is a header *name*, not a secret.
-		$allowlist = ['header_signature'];
-
-		// Build snapshot once (shared with the HTML version). The generator accepts:
-		// - $unredacted: bool (disable masking completely)
-		// - $allowlist: array<string> (leaf keys to exempt from masking)
-		$g = $this->appinfoGenerator($unredacted, $allowlist);
-
-		// Optional payload extensions controlled by flags.
+		// Optional payload extensions
 		$wantFlat   = $bool($this->app->request->get('flat'));
 		$wantExport = $bool($this->app->request->get('exports'));
 
-		// Base payload (stable, compact default).
+		// Single source of truth for all data (including per-env merged cfg)
+		$g = $this->appinfoGenerator(
+			$unredacted,  // $unredacted (disable masking when true)
+			['header_signature','secret_file'],  // $allowlistKeys
+			true,  // $includeEnvMerged
+			['dev', 'stage', 'prod']  // $envs
+		);
+
+		// Assemble payload
 		$payload = [
-			'sysinfo'  => $g['_sysinfo_raw'],
-			'packages' => $g['_packages_raw'],
-			'cfg'      => $g['_cfg_tree_raw'],
+			'sysinfo'    => $g['_sysinfo_raw'],
+			'packages'   => $g['_packages_raw'],
+			'cfg'        => $g['_cfg_tree_raw'],
+			'cfg_by_env' => $g['_cfg_by_env_raw'],
 		];
 
-		// Include flattened config (dot.notation => value) for quick lookups/diffs.
 		if ($wantFlat) {
 			$payload['cfg_flat'] = $g['_cfg_flat_raw'];
 		}
-
-		// Include human-readable PHP export strings (useful for side-by-side diffs).
 		if ($wantExport) {
 			$payload['cfg_php_export_excl_routes'] = $g['cfgPhpExRoutesBody'] ?? null;
 			$payload['routes_php_export']          = $g['routesPhpBody']      ?? null;
 		}
 
-		// Emit as JSON with no-cache headers and terminate.
+		// Emit with no-cache headers
 		$this->app->response->jsonNoCache($payload, true);
 	}
 
 
 	/**
-	 * Single source of truth for appinfo data.
+	 * Single source of truth for appinfo datasets (HTML & JSON).
 	 *
-	 * Returns exactly the JSON strings and PHP-export bodies the HTML page expects,
-	 * plus the raw arrays for the JSON endpoint.
+	 * Behavior:
+	 * - Produces stable sysinfo metrics and preformatted JSON/PHP-export strings.
+	 * - Converts the live cfg wrapper to a safe array, applies heuristic secret masking,
+	 *   and exposes both a tree view and a flattened dot-notation view.
+	 * - Optionally synthesizes merged configuration for specific environments
+	 *   (e.g., 'dev','stage','prod') via App::buildConfig($env) and applies the same
+	 *   masking policy unless $unredacted = true.
+	 * - Export artifacts (PHP exports & flattened JSON strings) can be pinned to a
+	 *   specific environment (default: "prod") using $artifactEnv to enable dev-side
+	 *   inspection of prod without exposing endpoints in prod.
+	 *
+	 * Performance:
+	 * - Local, deterministic operations only (no DB/network I/O).
+	 * - Composer package listing is cheap (reads InstalledVersions if present).
+	 * - Per-env synthesis calls App::buildConfig($env) and includes at most the env
+	 *   overlay file per env; gate it with $includeEnvMerged to avoid extra work.
+	 *
+	 * Notes:
+	 * - Secret masking is heuristic and errs on the side of redaction. An allowlist
+	 *   of leaf keys (case-insensitive) may bypass masking for specific keys (e.g., header names).
+	 * - Controllers should stay thin and delegate all assembly to this method.
+	 *
+	 * Typical usage:
+	 *   // HTML (dev-only), include merged cfg per env for DevKit inspection pinned to prod artifacts:
+	 *   $g = $this->appinfoGenerator(false, ['header_signature'], true, ['dev','stage','prod'], 'prod');
+	 *
+	 *   // JSON (dev-only), no per-env synthesis:
+	 *   $g = $this->appinfoGenerator($unredacted, ['header_signature']);
+	 *
+	 * @param bool                 $unredacted       Disable masking completely (dev convenience). Default: false.
+	 * @param array<int,string>    $allowlistKeys    Leaf keys never masked (case-insensitive).
+	 * @param bool                 $includeEnvMerged When true, synthesize merged cfg for $envs via App::buildConfig().
+	 * @param array<int,string>    $envs             Which envs to synthesize when $includeEnvMerged=true. Values among {'dev','stage','prod'}.
+	 * @param string               $artifactEnv      Env used for export/flat artifacts ("prod" default). Affects:
+	 *                                               - cfgPhpExRoutesBody
+	 *                                               - routesPhpBody
+	 *                                               - cfgFlatJson (and _cfg_flat_raw)
 	 *
 	 * @return array{
-	 *   sysinfoJson:string,packagesJson:string,cfgFlatJson:string,
-	 *   cfgPhpExRoutesBody:string,routesPhpBody:string,
-	 *   _sysinfo_raw:array,_packages_raw:array,_cfg_flat_raw:array,_cfg_tree_raw:array
+	 *   sysinfoJson:string,
+	 *   packagesJson:string,
+	 *   cfgFlatJson:string,
+	 *   cfgPhpExRoutesBody:string,
+	 *   routesPhpBody:string,
+	 *   _sysinfo_raw:array<string,mixed>,
+	 *   _packages_raw:array<string,mixed>,
+	 *   _cfg_flat_raw:array<string,mixed>,
+	 *   _cfg_tree_raw:array<string,mixed>,
+	 *   cfgByEnvJson?:array<string,string>,
+	 *   _cfg_by_env_raw?:array<string,array<string,mixed>>
 	 * }
 	 */
-	private function appinfoGenerator(bool $unredacted = false, array $allowlistKeys = []): array {
-		// Normalize allowlist to lowercase for cheap comparisons
+	private function appinfoGenerator(
+		bool $unredacted = false,
+		array $allowlistKeys = [],
+		bool $includeEnvMerged = false,
+		array $envs = ['dev', 'stage', 'prod'],
+		string $artifactEnv = 'prod'
+	): array {
+		// ------------------------------ Masking helpers ------------------------------
+
+		// Normalize allowlist for O(1) case-insensitive lookups.
 		$allow = [];
 		foreach ($allowlistKeys as $k) {
 			$allow[\strtolower((string)$k)] = true;
 		}
 
-		// Secret masker: redact obvious secret-like values unless unredacted or allowlisted.
+		/**
+		 * Secret masker (leaf-key aware).
+		 * - If $unredacted is true, do nothing.
+		 * - Allowlist bypasses masking for selected leaf keys.
+		 * - Heuristics redact common secret-like fields and long opaque strings.
+		 */
 		$__maskValue = static function(string $key, mixed $value) use ($unredacted, $allow): mixed {
 			if ($unredacted) {
-				return $value; // No masking at all
+				return $value;
 			}
 			$leaf = \strtolower($key);
 			if (isset($allow[$leaf])) {
-				return $value; // Explicit allowlist
+				return $value;
 			}
-			// Heuristic pattern (as before)
 			if (\preg_match('~(secret|token|password|pass|api[_-]?key|salt|private|credential|signature|auth|bearer)~i', $leaf)) {
 				return '__redacted__';
 			}
 			if (\is_string($value)) {
-				// Long hex / base64-ish redaction (unchanged)
-				if (\preg_match('~^[A-Fa-f0-9]{32,}$~', $value) === 1) { return '__redacted__'; }
-				if (\preg_match('~^[A-Za-z0-9+/=]{40,}$~', $value) === 1) { return '__redacted__'; }
-				if (\preg_match('~^(?:\w+://)[^/\s]+@~', $value) === 1) { return '__redacted__'; }
-				if (\strlen($value) > 256) { return \substr($value, 0, 256) . '...'; }
+				if (\preg_match('~^[A-Fa-f0-9]{32,}$~', $value) === 1) { return '__redacted__'; }        // long hex
+				if (\preg_match('~^[A-Za-z0-9+/=]{40,}$~', $value) === 1) { return '__redacted__'; }      // base64-ish
+				if (\preg_match('~^(?:\w+://)[^/\s]+@~', $value) === 1) { return '__redacted__'; }        // URI with userinfo
+				if (\strlen($value) > 256) { return \substr($value, 0, 256) . '...'; }                    // long blobs
 			}
 			return $value;
 		};
 
-		// Cyclic reference guard for safe object traversal
+		/**
+		 * Convert arbitrary values into JSON-serializable, masked-safe structures.
+		 * - Avoids deep graphs (max depth 8).
+		 * - Detects cycles in object graphs.
+		 * - Prefers arrays over objects for presentation.
+		 */
 		$__seen = new \SplObjectStorage();
-		$__maxDepth = 8;  // Defense-in-depth: avoid deep object graphs
+		$__maxDepth = 8;
 
-		// Convert arbitrary structures into JSON-serializable safe values
 		$__toSafe = static function(mixed $v, int $depth = 0, ?string $kHint = null) use (&$__toSafe, $__maskValue, $__seen, $__maxDepth) {
 			if ($depth >= $__maxDepth) { return '__max_depth__'; }
 			if ($v === null || \is_scalar($v)) { return $kHint !== null ? $__maskValue($kHint, $v) : $v; }
@@ -291,8 +417,10 @@ final class SystemController extends BaseController {
 			return '(resource)';
 		};
 
-		// Flatten nested arrays into dot.notation => value for quick scanning
-		$__flatten = static function(array $arr, string $prefix = '') use (&$__flatten, $__maskValue) : array {
+		/**
+		 * Flatten nested arrays into dot.notation => value (routes omitted later).
+		 */
+		$__flatten = static function(array $arr, string $prefix = '') use (&$__flatten, $__maskValue): array {
 			$out = [];
 			foreach ($arr as $k => $v) {
 				$key = $prefix === '' ? (string)$k : $prefix . '.' . $k;
@@ -306,78 +434,39 @@ final class SystemController extends BaseController {
 			return $out;
 		};
 
-		// Export any PHP value as a short-array string with tabs.
-		// - Uses [] instead of array()
-		// - Single-quoted strings with proper escaping
-		// - Omits numeric keys for list arrays (array_is_list)
-		// - Keeps keys for associative arrays
-		$__exportPhp = null;
-		$__exportPhp = static function(mixed $v, int $level = 0) use (&$__exportPhp): string {
-			$tab = "\t";
-
-			// Scalars
-			if ($v === null) { return 'null'; }
-			if (\is_bool($v)) { return $v ? 'true' : 'false'; }
-			if (\is_int($v) || \is_float($v)) { return (string)$v; }
-			if (\is_string($v)) {
-				return "'" . \str_replace(["\\", "'"], ["\\\\", "\\'"], $v) . "'";
+		/**
+		 * Safely convert cfg wrapper/objects to a plain array for traversal/masking.
+		 */
+		$__cfgToArray = static function(mixed $cfg): array {
+			if (\is_array($cfg)) {
+				return $cfg;
 			}
-
-			// Arrays
-			if (\is_array($v)) {
-				if ($v === []) { return '[]'; }
-
-				$indent = \str_repeat($tab, $level);
-				$next   = \str_repeat($tab, $level + 1);
-				$lines  = [];
-
-				if (\array_is_list($v)) {
-					// List: do NOT print numeric keys (matches your original output)
-					foreach ($v as $vv) {
-						$lines[] = $next . $__exportPhp($vv, $level + 1) . ',';
-					}
-				} else {
-					// Associative: keep keys
-					foreach ($v as $k => $vv) {
-						$key = \is_int($k) ? (string)$k : "'" . \str_replace(["\\", "'"], ["\\\\", "\\'"], (string)$k) . "'";
-						$lines[] = $next . $key . ' => ' . $__exportPhp($vv, $level + 1) . ',';
-					}
+			if (\is_object($cfg)) {
+				// Prefer an explicit export if available (e.g., Cfg::toArray()).
+				if (\method_exists($cfg, 'toArray')) {
+					try {
+						$arr = $cfg->toArray();
+						if (\is_array($arr)) { return $arr; }
+					} catch (\Throwable) {}
 				}
-
-				return "[\n" . \implode("\n", $lines) . "\n" . $indent . "]";
-			}
-
-			// Fallback for objects/resources: stringify safely
-			return "'" . \str_replace(["\\", "'"], ["\\\\", "\\'"], (string)$v) . "'";
-		};
-
-
-		// Keep selected keys first (in given order), sort the rest alphabetically
-		$__orderTop = static function(array $arr, array $priorityKeys = ['identity']): array {
-			$head = [];
-			foreach ($priorityKeys as $k) {
-				if (isset($arr[$k])) {
-					$head[$k] = $arr[$k];
-					unset($arr[$k]);
+				// Traversable -> array
+				if ($cfg instanceof \Traversable) {
+					$out = [];
+					try { foreach ($cfg as $k => $v) { $out[$k] = $v; } } catch (\Throwable) {}
+					return $out;
 				}
+				// Public props as a last-resort for simple objects
+				try {
+					$vars = \get_object_vars($cfg);
+					if (!empty($vars)) { return $vars; }
+				} catch (\Throwable) {}
 			}
-			\ksort($arr); // alphabetical for remaining top-level keys
-			return $head + $arr;
+			// Final fallback: JSON round-trip
+			$tmp = \json_decode(\json_encode($cfg, \JSON_PARTIAL_OUTPUT_ON_ERROR), true);
+			return \is_array($tmp) ? $tmp : [];
 		};
 
-		// Export ONLY the body of an array (no surrounding [ ... ])
-		// $baseLevel controls left padding of the top-level lines (0 = no indent).
-		$__exportPhpBody = static function(array $arr, int $baseLevel = 0) use (&$__exportPhp): string {
-			$prefix = \str_repeat("\t", $baseLevel);
-			$lines  = [];
-			foreach ($arr as $k => $v) {
-				$key = \is_int($k) ? (string)$k : "'" . \str_replace(["\\", "'"], ["\\\\", "\\'"], (string)$k) . "'";
-				$lines[] = $prefix . $key . ' => ' . $__exportPhp($v, $baseLevel) . ',';
-			}
-			return \implode("\n", $lines);
-		};
-
-		// --------------------------- Composer packages -----------------------------
+		// ------------------------------- Packages -----------------------------------
 		$packages = [];
 		if (\class_exists(\Composer\InstalledVersions::class)) {
 			foreach (\Composer\InstalledVersions::getInstalledPackages() as $pkg) {
@@ -389,51 +478,7 @@ final class SystemController extends BaseController {
 			\ksort($packages); // deterministic
 		}
 
-
-		// ----------------------------- Active config --------------------------------
-		// Convert the read-only wrapper to a safe, serializable array tree.
-		// We MUST end with a real array to keep HTML panels non-empty (1:1 behavior).
-		$__cfgToArray = static function(mixed $cfg): array {
-			if (\is_array($cfg)) {
-				return $cfg;
-			}
-			if (\is_object($cfg)) {
-				// Preferred explicit export if available
-				if (\method_exists($cfg, 'toArray')) {
-					try { $arr = $cfg->toArray(); if (\is_array($arr)) { return $arr; } } catch (\Throwable) {}
-				}
-				// Iterator fallback
-				if ($cfg instanceof \Traversable) {
-					$out = [];
-					try { foreach ($cfg as $k => $v) { $out[$k] = $v; } } catch (\Throwable) {}
-					return $out;
-				}
-				// Public props
-				try {
-					$vars = \get_object_vars($cfg);
-					if (!empty($vars)) { return $vars; }
-				} catch (\Throwable) {}
-			}
-			// Last resort: JSON round-trip (safe + stable enough for config)
-			$tmp = \json_decode(\json_encode($cfg, \JSON_PARTIAL_OUTPUT_ON_ERROR), true);
-			return \is_array($tmp) ? $tmp : [];
-		};
-
-		// Build a safe tree first, then apply masking/normalization (like original)
-		$cfgTreeRaw = $__cfgToArray($this->app->cfg);
-		$cfgTree    = $__toSafe($cfgTreeRaw);
-
-		// Ensure array from here on
-		$cfgTreeArr = \is_array($cfgTree) ? $cfgTree : [];
-
-		// Build a flattened config, excluding routes (noise-heavy)
-		$cfgFlatSource = $cfgTreeArr;
-		if (\array_key_exists('routes', $cfgFlatSource) && \is_array($cfgFlatSource['routes'])) {
-			unset($cfgFlatSource['routes']); // Avoid noisy route maps in flat view
-		}
-		$cfgFlat = $__flatten($cfgFlatSource);
-
-		// Keep the original timing/metrics exactly as before
+		// -------------------------------- Sysinfo -----------------------------------
 		$nowNs   = \hrtime(true);
 		$startNs = \defined('CITOMNI_START_NS') ? (int)\CITOMNI_START_NS : $nowNs;
 		$elapsed = (float)\sprintf('%.3f', ($nowNs - $startNs) / 1_000_000_000);
@@ -444,15 +489,11 @@ final class SystemController extends BaseController {
 			? \CITOMNI_PUBLIC_ROOT_URL
 			: ($this->app->cfg->http->base_url ?? '');
 
-
-
-
-		// ------------------------------- Build payload ------------------------------
 		$sysinfo = [
-			'environment'   => \defined('CITOMNI_ENVIRONMENT') ? (string)\CITOMNI_ENVIRONMENT : '(unknown)',
-			'hostname'      => \gethostname() ?: 'unknown',
-			'datetime_local'=> \date('c'),
-			'datetime_utc'  => \gmdate('c'),
+			'environment'    => \defined('CITOMNI_ENVIRONMENT') ? (string)\CITOMNI_ENVIRONMENT : '(unknown)',
+			'hostname'       => \gethostname() ?: 'unknown',
+			'datetime_local' => \date('c'),
+			'datetime_utc'   => \gmdate('c'),
 			'app' => [
 				'name'     => $this->app->cfg->identity->name ?? 'My CitOmni App',
 				'version'  => $this->app->cfg->identity->version ?? null,
@@ -460,11 +501,11 @@ final class SystemController extends BaseController {
 				'base_url' => $baseUrl,
 			],
 			'metrics' => [
-				'time_s'                    => $elapsed,
-				'memory_usage_current_kb'   => (int)\round(\memory_get_usage() / 1024),
-				'memory_usage_peak_kb'      => (int)\round(\memory_get_peak_usage() / 1024),
-				'included_files_count'      => \count(\get_included_files()),
-				'routes_count'              => $routesCount,
+				'time_s'                  => $elapsed,
+				'memory_usage_current_kb' => (int)\round(\memory_get_usage() / 1024),
+				'memory_usage_peak_kb'    => (int)\round(\memory_get_peak_usage() / 1024),
+				'included_files_count'    => \count(\get_included_files()),
+				'routes_count'            => $routesCount,
 			],
 			'opcache' => [
 				'enabled'             => (bool)\filter_var(\ini_get('opcache.enable'), \FILTER_VALIDATE_BOOL),
@@ -475,46 +516,148 @@ final class SystemController extends BaseController {
 			],
 		];
 
-		// ------------------------------ JSON strings --------------------------------
+		// -------------------------- Current-env cfg tree -----------------------------
+		// Export the read-only wrapper to a safe array, then apply masking/normalization.
+		$cfgTreeRaw = $__cfgToArray($this->app->cfg);
+		$cfgTree    = $__toSafe($cfgTreeRaw);
+		$cfgTreeArr = \is_array($cfgTree) ? $cfgTree : [];
+
+		// -------------------- Artifact env (exports + flat) -------------------------
+		// Pin artifacts (flat + PHP export bodies) to a specific env (default: 'prod').
+		$artifactEnv = \in_array($artifactEnv, ['dev', 'stage', 'prod'], true) ? $artifactEnv : 'prod';
+
+		$artifactEnvMerged = $this->app->buildConfig($artifactEnv);
+		$artifactSafeTree  = $__toSafe($artifactEnvMerged);
+		$artifactArr       = \is_array($artifactSafeTree) ? $artifactSafeTree : [];
+
+		// Build a flattened view for artifacts, excluding "routes" (noise-heavy).
+		$flatSource = $artifactArr;
+		if (\array_key_exists('routes', $flatSource) && \is_array($flatSource['routes'])) {
+			unset($flatSource['routes']);
+		}
+		$cfgFlat = $__flatten($flatSource);
+
+		// ----------------------------- JSON strings ---------------------------------
 		$sysinfoJson  = \json_encode($sysinfo,  \JSON_PRETTY_PRINT | \JSON_UNESCAPED_SLASHES);
 		$packagesJson = \json_encode($packages, \JSON_PRETTY_PRINT | \JSON_UNESCAPED_SLASHES);
 		$cfgFlatJson  = \json_encode($cfgFlat,  \JSON_PRETTY_PRINT | \JSON_UNESCAPED_SLASHES);
 
-
 		// --------------------------- PHP export bodies ------------------------------
-		// A) Everything except routes, with identity first, rest A-Z
-		$noRoutes = $cfgTreeArr;
+		/**
+		 * Export any PHP value as a short-array string with tabs.
+		 * - Uses [] instead of array()
+		 * - Quotes strings safely (single quotes)
+		 * - Preserves ints/bools/null
+		 * - Indents with tabs
+		 */
+		$__exportPhp = null;
+		$__exportPhp = static function(mixed $v, int $level = 0) use (&$__exportPhp): string {
+			$tab = "\t";
+			if ($v === null) { return 'null'; }
+			if (\is_bool($v)) { return $v ? 'true' : 'false'; }
+			if (\is_int($v) || \is_float($v)) { return (string)$v; }
+			if (\is_string($v)) {
+				return "'" . \str_replace(["\\", "'"], ["\\\\", "\\'"], $v) . "'";
+			}
+			if (\is_array($v)) {
+				if ($v === []) { return '[]'; }
+				$indent = \str_repeat($tab, $level);
+				$next   = \str_repeat($tab, $level + 1);
+				$lines  = [];
+				if (\array_is_list($v)) {
+					foreach ($v as $vv) {
+						$lines[] = $next . $__exportPhp($vv, $level + 1) . ',';
+					}
+				} else {
+					foreach ($v as $k => $vv) {
+						$key = \is_int($k) ? (string)$k : "'" . \str_replace(["\\", "'"], ["\\\\", "\\'"], (string)$k) . "'";
+						$lines[] = $next . $key . ' => ' . $__exportPhp($vv, $level + 1) . ',';
+					}
+				}
+				return "[\n" . \implode("\n", $lines) . "\n" . $indent . "]";
+			}
+			return "'" . \str_replace(["\\", "'"], ["\\\\", "\\'"], (string)$v) . "'";
+		};
+
+		/**
+		 * Export ONLY the body of an array (no surrounding [ ... ]).
+		 * $baseLevel controls left padding of the top-level lines (0 = no indent).
+		 */
+		$__exportPhpBody = static function(array $arr, int $baseLevel = 0) use (&$__exportPhp): string {
+			$prefix = \str_repeat("\t", $baseLevel);
+			$lines  = [];
+			foreach ($arr as $k => $v) {
+				$key = \is_int($k) ? (string)$k : "'" . \str_replace(["\\", "'"], ["\\\\", "\\'"], (string)$k) . "'";
+				$lines[] = $prefix . $key . ' => ' . $__exportPhp($v, $baseLevel) . ',';
+			}
+			return \implode("\n", $lines);
+		};
+
+		// Keep selected keys first (in given order), sort the rest alphabetically.
+		$__orderTop = static function(array $arr, array $priority = ['identity']): array {
+			$head = [];
+			foreach ($priority as $k) {
+				if (isset($arr[$k])) { $head[$k] = $arr[$k]; unset($arr[$k]); }
+			}
+			\ksort($arr);
+			return $head + $arr;
+		};
+
+		// A) Everything except routes (from artifact env), identity first.
+		$noRoutes = $artifactArr;
 		if (\array_key_exists('routes', $noRoutes)) {
 			unset($noRoutes['routes']);
 		}
 		$noRoutes = $__orderTop($noRoutes, ['identity']);
-		$cfgPhpExRoutesBody = $__exportPhpBody($noRoutes); // body-only for <pre>
+		$cfgPhpExRoutesBody = $__exportPhpBody($noRoutes);  // body-only for <pre>
 
-		// B) Routes only (sorted by path)
+		// B) Routes only (from artifact env), sorted by path.
 		$routesOnly = [];
-		if (isset($cfgTreeArr['routes']) && \is_array($cfgTreeArr['routes'])) {
-			$routesOnly = $cfgTreeArr['routes'];
+		if (isset($artifactArr['routes']) && \is_array($artifactArr['routes'])) {
+			$routesOnly = $artifactArr['routes'];
 		}
 		\ksort($routesOnly);
 		$routesPhpBody = $__exportPhpBody(['routes' => $routesOnly]);
 
+		// ---------------------- Optional: per-env merged cfg ------------------------
+		$byEnvRaw  = [];
+		$byEnvJson = [];
+		if ($includeEnvMerged) {
+			$valid = ['dev' => true, 'stage' => true, 'prod' => true];
+			foreach ($envs as $env) {
+				$e = (string)$env;
+				if (!isset($valid[$e])) {
+					continue; // ignore unknown labels (generator is internal)
+				}
+				$merged = $this->app->buildConfig($e);
+				$safe   = $__toSafe($merged);
+				$arr    = \is_array($safe) ? $safe : [];
+				$byEnvRaw[$e]  = $arr;
+				$byEnvJson[$e] = \json_encode($arr, \JSON_PRETTY_PRINT | \JSON_UNESCAPED_SLASHES);
+			}
+		}
 
-
+		// ------------------------------ Return payload -----------------------------
 		return [
-			// strings used by HTML template (kept 1:1)
+			// Strings used by HTML template
 			'sysinfoJson'        => $sysinfoJson,
 			'packagesJson'       => $packagesJson,
-			'cfgFlatJson'        => $cfgFlatJson,
-			'cfgPhpExRoutesBody' => $cfgPhpExRoutesBody,
-			'routesPhpBody'      => $routesPhpBody,
+			'cfgFlatJson'        => $cfgFlatJson,        // based on $artifactEnv (default: prod)
+			'cfgPhpExRoutesBody' => $cfgPhpExRoutesBody, // based on $artifactEnv (default: prod)
+			'routesPhpBody'      => $routesPhpBody,      // based on $artifactEnv (default: prod)
 
-			// raw data used by JSON endpoint
-			'_sysinfo_raw'  => $sysinfo,
-			'_packages_raw' => $packages,
-			'_cfg_flat_raw' => $cfgFlat,
-			'_cfg_tree_raw' => $cfgTree,
+			// Raw data used by JSON endpoint
+			'_sysinfo_raw'       => $sysinfo,
+			'_packages_raw'      => $packages,
+			'_cfg_flat_raw'      => $cfgFlat,            // based on $artifactEnv (default: prod)
+			'_cfg_tree_raw'      => $cfgTreeArr,         // current env tree (masked)
+
+			// Optional per-env merged cfg outputs
+			'cfgByEnvJson'       => $includeEnvMerged ? $byEnvJson : null,
+			'_cfg_by_env_raw'    => $includeEnvMerged ? $byEnvRaw  : null,
 		];
 	}
+
 
 
 

@@ -347,16 +347,28 @@
 			content: "Packages installed";
 		}
 
-		.panel--cfg::before{
-			content: "Config";
-		}
-		
 		.panel--routes::before{
-			content: "Routes";
+			content: "Routes (prod)";
+		}
+
+		.panel--cfg::before{
+			content: "Config (prod)";
 		}
 
 		.panel--cfg-flat::before{
-			content: "Config (flat)";
+			content: "Flat config (prod)";
+		}
+
+		.panel--cfg-dev::before{
+			content: "Complete CFG (dev)";
+		}
+
+		.panel--cfg-stage::before{
+			content: "Complete CFG (stage)";
+		}
+
+		.panel--cfg-prod::before{
+			content: "Complete CFG (prod)";
 		}
 		
 {% endblock %}
@@ -379,16 +391,28 @@
 		<pre>{{ $packagesJson }}</pre>
 	</div>
 
-	<div class="panel panel--header panel--cfg" role="region" aria-label="Config">
-		<pre>{{ $cfgPhpExRoutesBody }}</pre>
-	</div>
-
-	<div class="panel panel--header panel--routes" role="region" aria-label="Routes">
+	<div class="panel panel--header panel--routes" role="region" aria-label="Routes (prod)">
 		<pre>{{ $routesPhpBody }}</pre>
 	</div>
 
-	<div class="panel panel--header panel--cfg-flat" role="region" aria-label="Flat config">
+	<div class="panel panel--header panel--cfg" role="region" aria-label="Config (prod)">
+		<pre>{{ $cfgPhpExRoutesBody }}</pre>
+	</div>
+
+	<div class="panel panel--header panel--cfg-flat" role="region" aria-label="Flat config (prod)">
 		<pre>{{ $cfgFlatJson }}</pre>
+	</div>
+
+	<div class="panel panel--header panel--cfg-dev" role="region" aria-label="Complete CFG (dev)">
+		<pre>{{ $cfgEnvDevJson }}</pre>
+	</div>
+
+	<div class="panel panel--header panel--cfg-stage" role="region" aria-label="Complete CFG (stage)">
+		<pre>{{ $cfgEnvStageJson }}</pre>
+	</div>
+
+	<div class="panel panel--header panel--cfg-prod" role="region" aria-label="Complete CFG (prod)">
+		<pre>{{ $cfgEnvProdJson }}</pre>
 	</div>
 	
 {% endblock %}

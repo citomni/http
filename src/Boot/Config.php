@@ -633,7 +633,7 @@ final class Config {
 				'controller' => \CitOmni\Http\Controller\SystemController::class,
 				'action' => 'appinfoJson',
 				'methods' => ['GET'],
-			],			
+			],
 			'/_system/appinfo-old.html' => [
 				'controller' => \CitOmni\Http\Controller\SystemController::class,
 				'action' => 'appinfo',
