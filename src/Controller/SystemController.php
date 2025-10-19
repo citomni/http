@@ -284,7 +284,7 @@ final class SystemController extends BaseController {
 		}
 
 		// Emit with no-cache headers
-		$this->app->response->jsonNoCache($payload, true);
+		$this->app->response->jsonNoCache($payload, false);
 	}
 
 
@@ -1056,7 +1056,7 @@ final class SystemController extends BaseController {
 		$ip = $this->app->request->ip();
 		$this->app->response->jsonStatus([
 			'ip' => $ip,
-		], 200);
+		], 200);		
 	}
 
 
@@ -1574,47 +1574,45 @@ final class SystemController extends BaseController {
 	 * Debug HMAC validation for webhooks (heavily gated).
 	 *
 	 * Behavior:
-	 * - Option A (commented): Restrict to dev/stage.
-	 * - Option B (active): Allow exactly one operator IP in prod for short bursts.
-	 * - Returns explicit authorization result and echoes seen headers.
+	 * - Access is allowed only when the caller IP is present in cfg.webhooks.allowed_ips (exact match).
+	 * - Deny-by-default: if the allow-list is empty or missing, the endpoint returns 404 (conceal).
+	 * - Still requires a valid HMAC via WebhooksAuth::assertAuthorized() on the exact raw body.
+	 * - Returns an explicit authorization result and echoes the seen headers.
 	 *
 	 * Notes:
-	 * - Reads raw body directly (php://input) to keep HMAC bytes exact.
-	 * - Replace the placeholder IP before enabling in prod (seriously).
+	 * - Reads the raw body directly from php://input to preserve exact HMAC bytes.
+	 * - Use this only for short-lived diagnostics; remove your IP from the allow-list afterwards.
+	 * - This endpoint intentionally responds with 404 for non-allowed IPs to avoid route disclosure.
 	 *
 	 * Typical usage:
-	 *   Temporary diagnostics to validate client signatures during setup.
+	 *   Temporary diagnostics during webhook setup to validate client signatures.
 	 *
 	 * Examples:
-	 *
 	 *   // Authorized
-	 *   POST /_system/webhook-debug (HMAC ok) -> { "authorized": true, ... }
+	 *   POST /_system/webhook-debug (HMAC ok, IP in allow-list)
+	 *   -> { "authorized": true, "message": "OK", "seen_headers": {...}, "remote_addr": "..." }
 	 *
-	 *   // Unauthorized
-	 *   POST /_system/webhook-debug (bad HMAC) -> { "authorized": false, "error":"..." }
+	 *   // Unauthorized (bad HMAC)
+	 *   POST /_system/webhook-debug (IP allowed, HMAC fails)
+	 *   -> { "authorized": false, "error": "...", "seen_headers": {...}, "remote_addr": "..." }
 	 *
 	 * Failure:
-	 * - Non-allowed IPs receive 404 via ErrorHandler (conceal endpoint).
+	 * - Caller IP not in cfg.webhooks.allowed_ips -> 404 via ErrorHandler (conceal endpoint).
 	 *
 	 * @return void
 	 */
 	public function webhookDebug(): void {
 		$this->app->response->noCache();
 
-		// Gate A: Only allow this in dev/stage
-		// if (!\in_array(\CITOMNI_ENVIRONMENT, ['dev', 'stage'], true)) {
-		// 	$this->app->errorHandler->httpError(404, ['title' => 'Not Found']);
-		// }
+		$clientIp    = (string)$this->app->request->ip();
+		$allowedList = (array)($this->app->cfg->webhooks['allowed_ips'] ?? []);
 
-		// Gate B: Temporary single IP in prod (replace the address!)
-		$allowedIp = 'INSERT_YOUR_OWN_IP_HERE';  // NOTE: You can find it by calling the route: /_system/clientip 
-		$clientIp  = $this->app->request->ip();
-		if ($clientIp !== $allowedIp) {
-			// Security: Conceal this endpoint when IP does not match
+		// Deny-by-default: empty/missing list -> 404 (conceal the endpoint)
+		if ($allowedList === [] || !\in_array($clientIp, $allowedList, true)) {
 			$this->app->errorHandler->httpError(404, ['title' => 'Not Found']);
 		}
 
-		// Read raw once (do not use Request->json() here; HMAC needs the exact raw body)
+		// Read raw once; HMAC must verify against the exact bytes
 		$raw = (string)(@\file_get_contents('php://input') ?: '');
 
 		try {
@@ -1626,22 +1624,21 @@ final class SystemController extends BaseController {
 				'authorized'   => true,
 				'message'      => 'OK',
 				'seen_headers' => [
-					'signature' => $_SERVER['HTTP_X_CITOMNI_SIGNATURE']  ?? null,
-					'timestamp' => $_SERVER['HTTP_X_CITOMNI_TIMESTAMP']  ?? null,
-					'nonce'     => $_SERVER['HTTP_X_CITOMNI_NONCE']      ?? null,
+					'signature' => $_SERVER['HTTP_X_CITOMNI_SIGNATURE'] ?? null,
+					'timestamp' => $_SERVER['HTTP_X_CITOMNI_TIMESTAMP'] ?? null,
+					'nonce'     => $_SERVER['HTTP_X_CITOMNI_NONCE'] ?? null,
 				],
 				'remote_addr' => $_SERVER['REMOTE_ADDR'] ?? null,
 			], 200);
 		} catch (\Throwable $e) {
-			
 			// Debug mode returns explicit reason; do not replicate elsewhere
 			$this->app->response->jsonStatus([
 				'authorized'   => false,
 				'error'        => $e->getMessage(),
 				'seen_headers' => [
-					'signature' => $_SERVER['HTTP_X_CITOMNI_SIGNATURE']  ?? null,
-					'timestamp' => $_SERVER['HTTP_X_CITOMNI_TIMESTAMP']  ?? null,
-					'nonce'     => $_SERVER['HTTP_X_CITOMNI_NONCE']      ?? null,
+					'signature' => $_SERVER['HTTP_X_CITOMNI_SIGNATURE'] ?? null,
+					'timestamp' => $_SERVER['HTTP_X_CITOMNI_TIMESTAMP'] ?? null,
+					'nonce'     => $_SERVER['HTTP_X_CITOMNI_NONCE'] ?? null,
 				],
 				'remote_addr' => $_SERVER['REMOTE_ADDR'] ?? null,
 			], 200);

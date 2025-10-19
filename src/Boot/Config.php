@@ -412,16 +412,16 @@ final class Config {
 		 *   optional source IP allow-list, and a nonce ledger to prevent replays.
 		 *
 		 * Secrets & file policy (IMPORTANT)
-		 * - DO NOT put secrets in cfg. The HMAC secret is loaded from a side-effect-free
+		 * - Do NOT put secrets in cfg. The HMAC secret is loaded from a side-effect-free
 		 *   PHP file that returns a plain array (see contract below).
 		 * - Default location: CITOMNI_APP_PATH . '/var/secrets/webhooks.secret.php'
 		 * - Commit only the template: /var/secrets/webhooks.secret.php.tpl
-		 *   Never commit the real secret file to GitHub.
+		 *   Never commit the real secret file to Git.
 		 *
 		 * Secret file contract (side-effect free; returns array):
 		 *   return [
-		 *     'secret' => '<hex>',           // REQUIRED: hex string; 64 chars for sha256, 128 for sha512
-		 *     'algo'   => 'sha256'|'sha512', // OPTIONAL: used if cfg does not override 'algo'
+		 *     'secret' => '<hex>',            // REQUIRED: hex string; recommended 64 (sha256) or 128 (sha512) hex chars
+		 *     'algo'   => 'sha256'|'sha512',  // OPTIONAL: used if cfg does not override 'algo'
 		 *     // Optional metadata for ops visibility (ignored by verifier):
 		 *     // 'rotated_at_utc' => '2025-10-17T11:12:00Z',
 		 *     // 'generator'      => 'CitOmni DevKit',
@@ -432,7 +432,9 @@ final class Config {
 		 *     "<timestamp>.<nonce>.<rawBody>"
 		 * - Context-bound mode (bind_context=true):
 		 *     ts + "\n" + nonce + "\n" + METHOD + "\n" + PATH + "\n" + QUERY + "\n" + sha256(rawBody)
-		 *   (Stronger request coupling at the cost of a stricter client.)
+		 *   Notes:
+		 *   - The body hash is always SHA-256 (independent of HMAC algo).
+		 *   - Stronger request coupling at the cost of a stricter client.
 		 *
 		 * Required headers (server keys as seen in $_SERVER; names configurable below):
 		 * - X-Citomni-Timestamp : UNIX seconds when the signature was created.
@@ -446,23 +448,32 @@ final class Config {
 		 *
 		 * Required when enabled:
 		 * - 'secret_file' : absolute path to the secret file (see contract above).
-		 * - 'nonce_dir'   : writable directory for nonce ledger (prevents replays).
+		 * - 'nonce_dir'   : writable directory for the nonce ledger (prevents replays).
 		 *
-		 * Notes
-		 * - 'algo' may be set here or (optionally) in the secret file. If set in both,
-		 *   cfg wins (explicit beats implicit).
-		 * - 'allowed_ips' supports exact IPs and IPv4 CIDR (e.g., '203.0.113.0/24').
-		 *   Empty means "no IP restriction". Prefer restricting in STAGE/PROD.
-		 * - Keep 'enabled' = false by default. Enable only when actively used.
+		 * IP allow-list semantics (important)
+		 * - 'allowed_ips' **empty** => IP check is **disabled** (no restriction).
+		 * - 'allowed_ips' non-empty => request IP **must** match an entry:
+		 *     * exact IP match, or
+		 *     * IPv4 CIDR (e.g., '203.0.113.0/24').
+		 * - Only IPv4 CIDR is supported in core (IPv6 lists will not match CIDR).
+		 * - Source IP is taken from $_SERVER['REMOTE_ADDR'].
+		 *   If behind a reverse proxy, either list the proxy IP/CIDR here or leave
+		 *   'allowed_ips' empty (until trusted-proxy client IP rewriting is in place).
+		 *
+		 * Algo precedence
+		 * - If 'algo' is set in cfg, it always wins.
+		 * - Otherwise, 'algo' from the secret file is used when present.
 		 *
 		 * Typical app overrides (env files):
 		 *   'webhooks' => [
-		 *     'enabled'   => true,
-		 *     'allowed_ips' => ['203.0.113.10', '198.51.100.0/24'],
-		 *     // Optionally tighten timing:
-		 *     // 'ttl_seconds' => 180, 'ttl_clock_skew_tolerance' => 30,
-		 *     // Optionally switch algo (must match secret length):
-		 *     // 'algo' => 'sha512',
+		 *     'enabled'        => true,
+		 *     'secret_file'    => CITOMNI_APP_PATH . '/var/secrets/webhooks.secret.php',
+		 *     'nonce_dir'      => CITOMNI_APP_PATH . '/var/nonces',
+		 *     'allowed_ips'    => ['203.0.113.10', '198.51.100.0/24'], // leave empty to disable IP check
+		 *     // 'ttl_seconds'  => 180,
+		 *     // 'ttl_clock_skew_tolerance' => 30,
+		 *     // 'algo'         => 'sha512',
+		 *     // 'bind_context' => true,
 		 *   ]
 		 */
 		'webhooks' => [

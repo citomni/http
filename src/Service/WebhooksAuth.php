@@ -86,7 +86,7 @@ use CitOmni\Kernel\Service\BaseService;
  *   // Enabling context binding for stronger request coupling:
  *   $this->app->webhooksAuth->setOptions([
  *       'enabled' => true,
- *       'secret' => 'example-shared-secret',
+ *       'secret_file' => CITOMNI_APP_PATH . '/var/secrets/webhooks.secret.php',
  *       'nonce_dir' => CITOMNI_APP_PATH . '/var/nonces',
  *       'bind_context' => true, // binds method, path, query, and body hash
  *       'allowed_ips' => ['203.0.113.0/24', '198.51.100.10'],
@@ -111,11 +111,11 @@ use CitOmni\Kernel\Service\BaseService;
  *
  * Options object shape (stdClass or array-access):
  * - enabled (bool)                         default: true
- * - secret (string)                        required when enabled
+ * - secret_file (string)                   required when enabled; absolute path to side-effect-free PHP file
+ * - nonce_dir (string)                     required when enabled; writable directory for nonce ledger
  * - ttl_seconds (int)                      default: 300
- * - ttl_clock_skew_tolerance (int)         default: 60    // +/- seconds
- * - allowed_ips (string[])                 default: []    // exact or IPv4 CIDR
- * - nonce_dir (string)                     default: $this->app->cfg->webhooks->nonce_dir
+ * - ttl_clock_skew_tolerance (int)         default: 60
+ * - allowed_ips (string[])                 default: []
  * - algo (string)                          default: 'sha256'  // 'sha256' or 'sha512'
  * - bind_context (bool)                    default: false
  * - header_signature (string)              default: 'HTTP_X_CITOMNI_SIGNATURE'
@@ -197,8 +197,8 @@ class WebhooksAuth extends BaseService {
 	 * Accepts either an associative array or an object (e.g., stdClass) with the following keys:
 	 *
 	 * Required when `enabled=true`:
-	 * - secret (string)   : Shared HMAC secret
-	 * - nonce_dir (string): Filesystem path for storing used nonces (prevents replay)
+	 * - secret_file (string)   // path to PHP file that returns ['secret' => <hex>, 'algo' => ...]
+	 * - nonce_dir (string)     // writable directory for nonce ledger
 	 *
 	 * Optional:
 	 * - enabled (bool)                      default: true
