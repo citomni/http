@@ -142,7 +142,9 @@ class WebhooksAuth extends BaseService {
 	// Extra tolerance in seconds for clock skew between client and server
 	private int $clockSkew = 60;
 	
-		
+	// Last failure reason; null on success or not called yet.
+	private ?string $lastError = null;
+
 	// Optional IP allow-list (supports exact match and IPv4 CIDR)
 	/** @var string[] */
 	private array $allowedIps = [];
@@ -242,10 +244,20 @@ class WebhooksAuth extends BaseService {
 		$this->clockSkew = (int)$get($opts, 'ttl_clock_skew_tolerance', 60);
 		$this->algo = strtolower((string)$get($opts, 'algo', 'sha256')); // normalize for comparison
 		$this->bindContext = (bool)$get($opts, 'bind_context', false);
-		$this->allowedIps = array_values(array_filter(
-			array_map(static fn($x) => trim((string)$x), (array)$get($opts, 'allowed_ips', [])),
-			static fn($x) => $x !== ''
-		));		
+		
+		// Normalize allowed_ips: accept only scalar strings/ints; ignore arrays/objects/null.
+		$rawAllowed = (array)$get($opts, 'allowed_ips', []);
+		$allowed = [];
+		foreach ($rawAllowed as $item) {
+			if (\is_string($item) || \is_int($item)) {
+				$val = \trim((string)$item);
+				if ($val !== '') {
+					$allowed[] = $val;
+				}
+			}
+			// Non-scalar entries are ignored to avoid "Array to string conversion".
+		}
+		$this->allowedIps = $allowed;
 
 		// nonce_dir: prefer explicit option; fallback to cfg->webhooks->nonce_dir; else empty (validated below if enabled)
 		$nonceDir = $get($opts, 'nonce_dir', null);
@@ -301,32 +313,45 @@ class WebhooksAuth extends BaseService {
 	 * - Returns true if the request is authorized.
 	 * - Returns false if any validation step fails.
 	 *
-	 * Unlike assertAuthorized(), this method never throws - it catches all
-	 * throwables internally. This makes it suitable for use cases where the
-	 * caller only cares about a boolean pass/fail, and where exception details
-	 * are either irrelevant or should be logged globally by another layer.
+	 * Diagnostics:
+	 * - Never throws. On failure, the last failure reason is captured internally
+	 *   and can be retrieved via {@see WebhooksAuth::getLastError()}.
+	 * - On success, the internal failure state is cleared.
+	 *
+	 * Notes:
+	 * - This method is suitable when the caller only needs a boolean and logging
+	 *   is handled centrally. The failure reason is *not* sent to the client.
+	 * - The stored last error is per-service instance; do not rely on it across
+	 *   concurrent requests/processes.
 	 *
 	 * Example:
 	 *   if ($this->app->webhooksAuth->guard($_SERVER, $rawBody)) {
-	 *       // request is authorized
+	 *       // Authorized
 	 *   } else {
-	 *       // request failed auth (reason suppressed)
+	 *       // Failed; fetch internal reason for logs/metrics:
+	 *       $reason = $this->app->webhooksAuth->getLastError();
 	 *   }
 	 *
-	 * @param array  $server   Typically the $_SERVER superglobal.
-	 * @param string $rawBody  Raw request body (as read from php://input).
-	 * @return bool            True if authorized; false otherwise.
+	 * @param array  $server  Typically the $_SERVER superglobal.
+	 * @param string $rawBody Raw request body (as read from php://input).
+	 * @return bool           True if authorized; false otherwise.
 	 */
 	public function guard(array $server, string $rawBody): bool {
 		try {
 			// Attempt full authorization, throws on any failure.
 			$this->assertAuthorized($server, $rawBody);
+			
+			// Clear previous error on success
+			$this->lastError = null; 
 
 			// If no exception was thrown, the request is authorized.
 			return true;
 		} catch (\Throwable $e) {
 			// Swallow all errors/exceptions and return false instead.
 			// Reason for failure is intentionally suppressed.
+			// return false;
+			
+			$this->lastError = $e->getMessage(); // capture precise reason
 			return false;
 		}
 	}
@@ -616,5 +641,24 @@ class WebhooksAuth extends BaseService {
 		}
 	}
 
+
+	/**
+	 * Returns the most recent failure reason captured by {@see guard()}.
+	 *
+	 * Behavior:
+	 * - Returns a human-readable reason string (from the thrown exception) for the
+	 *   last failed guard() call in this instance, or null if the last guard()
+	 *   succeeded or guard() has not yet been called.
+	 * - The value is cleared on successful guard() calls.
+	 *
+	 * Notes:
+	 * - For diagnostics/logging only. Do not expose this directly in client responses.
+	 * - Instance-local state; not shared across requests/processes.
+	 *
+	 * @return ?string Reason string, or null when unavailable.
+	 */
+	public function getLastError(): ?string {
+		return $this->lastError;
+	}
 
 }

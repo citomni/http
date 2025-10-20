@@ -1692,10 +1692,27 @@ final class SystemController extends BaseController {
 			->guard($_SERVER, $raw);
 
 		if (!$ok) {
-			// Security: Use 404 to avoid revealing protected endpoint existence
-			$this->app->errorHandler->httpError(self::PROTECTED_FAIL_STATUS, ['title' => 'Not Found']);
+			// Add silent diagnostic for logs (not in response body)
+			$reason = $this->app->webhooksAuth->getLastError();
+			$this->app->errorHandler->httpError(
+				self::PROTECTED_FAIL_STATUS,
+				[
+					'title' => 'Not Found',
+					// error handler should log this metadata; it won't be echoed to the client
+					'meta'  => [
+						'webhook_guard_reason' => $reason,
+						'remote_addr'          => $_SERVER['REMOTE_ADDR'] ?? null,
+						'have_sig'             => isset($_SERVER['HTTP_X_CITOMNI_SIGNATURE']),
+						'have_ts'              => isset($_SERVER['HTTP_X_CITOMNI_TIMESTAMP']),
+						'have_nonce'           => isset($_SERVER['HTTP_X_CITOMNI_NONCE']),
+					],
+				]
+			);
 		}
 
 		return $raw;
 	}
+	
+	
+	
 }
