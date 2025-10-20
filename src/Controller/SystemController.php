@@ -1250,52 +1250,6 @@ final class SystemController extends BaseController {
 
 
 	/**
-	 * Return the current trusted proxy list.
-	 *
-	 * Behavior:
-	 * - Reads Request->getTrustedProxies() and returns a redacted list (IPv6 shortened).
-	 *
-	 * Notes:
-	 * - Public and read-only; helps explain client IP resolution.
-	 *
-	 * Typical usage:
-	 *   Verify trusted proxies after infra changes or CDN rollouts.
-	 *
-	 * Examples:
-	 *
-	 *   // Baseline
-	 *   GET /_system/trusted-proxies -> { "trusted_proxies": ["192.0.2.1"], "count": 1 }
-	 *
-	 *   // IPv6 redaction
-	 *   GET /_system/trusted-proxies -> ["2001:db8:85a3:...."]
-	 *
-	 * Failure:
-	 * - None; list may be empty if not configured.
-	 *
-	 * @return void
-	 */
-	public function trustedProxies(): void {
-		$this->app->response->noCache();
-
-		$proxies = $this->app->request->getTrustedProxies();
-		$out = \array_values(\array_map(static function ($x) {
-			
-			// Optional: Minimal IPv6 redaction to avoid dumping long blocks
-			$x = (string)$x;
-			if (\strpos($x, ':') !== false && \strlen($x) > 16) {
-				return \substr($x, 0, 16) . '...';
-			}
-			return $x;
-		}, $proxies));
-
-		$this->app->response->jsonStatus([
-			'trusted_proxies' => $out,
-			'count'           => \count($out),
-		], 200);
-	}
-
-
-	/**
 	 * Reset OPcache and remove CitOmni cache files (protected by WebhooksAuth).
 	 *
 	 * Behavior:

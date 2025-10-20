@@ -594,11 +594,6 @@ final class Config {
 				'action' => 'requestEcho',
 				'methods' => ['GET'],
 			],
-			'/_system/trusted-proxies' => [
-				'controller' => \CitOmni\Http\Controller\SystemController::class,
-				'action' => 'trustedProxies',
-				'methods' => ['GET'],
-			],
 
 			// Protected ops (HMAC via WebhooksAuth):
 			'/_system/reset-cache' => [
