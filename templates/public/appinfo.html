@@ -12,364 +12,120 @@
 #}
 {% extends "public/status_layout.html" %}
 
-{% block css %}
+{% block addon_css %}
 
-		/* ------------------------------------------------------------------
-		   CitOmni HTTP - Material-inspired minimal template (no dependencies)
-		   Goals: fast paint, good a11y, nice defaults, zero JS required.
-		   ------------------------------------------------------------------ */
+	/*
+	@media (max-width: 520px){
+		.header .logo{ height: 28px; }
+	}
+	*/
 
-		:root {
-			/* Light theme */
-			--md-bg: #f6f7f9;
-			--md-surface: #ffffff;
-			--md-text: #101114;
-			--md-text-muted: #444851;
-			--md-primary: #2962ff;        /* Material-ish blue 700 */
-			--md-primary-ink: #ffffff;
-			--md-accent: #00c853;         /* Green A700 */
-			--md-danger: #d32f2f;         /* Red 700 */
-			--md-border: #e3e6eb;
-			--md-ring: rgba(41,98,255,.35);
-			--md-shadow: 0 1px 2px rgba(16,17,20,.06), 0 8px 24px rgba(16,17,20,.06);
+	.badge--warning{
+		background: rgba(255,171,0,.15);  /* amber */
+		color: #ff8f00;                    /* amber 800-ish */
+		border-color: rgba(255,171,0,.35);
+	}
 
-			/* Sizing / rhythm */
-			--radius: 16px;
-			--radius-chip: 999px;
-			--pad: 20px;
-			--gap: 16px;
-			--maxw: 880px;
-		}
+	.badge--danger {
+		background: rgba(211,47,47,.12);
+		color: var(--md-danger);
+		border-color: rgba(211,47,47,.25);
+	}
 
-		@media (prefers-color-scheme: dark) {
-			:root {
-				--md-bg: #0f1115;
-				--md-surface: #151821;
-				--md-text: #eef1f7;
-				--md-text-muted: #b8bfcc;
-				--md-primary: #82b1ff;
-				--md-primary-ink: #0f1115;
-				--md-accent: #69f0ae;
-				--md-danger: #ef5350;
-				--md-border: #222838;
-				--md-ring: rgba(130,177,255,.35);
-				--md-shadow: 0 1px 2px rgba(0,0,0,.45), 0 8px 24px rgba(0,0,0,.35);
-			}
-		}
+	.badge--neutral{
+		background: rgba(68,72,81,.10);
+		color: var(--md-text-muted);
+		border-color: rgba(68,72,81,.25);
+	}
 
-		* { box-sizing: border-box; }
-		html, body { height: 100%; }
-		body {
-			margin: 0;
-			background: radial-gradient(1200px 800px at 80% -10%, rgba(41,98,255,0.08), transparent 60%),
-			            radial-gradient(1000px 700px at -10% 100%, rgba(0,200,83,0.08), transparent 55%),
-			            var(--md-bg);
-			color: var(--md-text);
-			font: 16px/1.5 system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, "Helvetica Neue", Arial, "Noto Sans", "Apple Color Emoji", "Segoe UI Emoji";
-			text-rendering: optimizeLegibility;
-			-webkit-font-smoothing: antialiased;
-			-moz-osx-font-smoothing: grayscale;
-		}
+	/* Terminal-flavored panel: understated, readable, no gimmicks */
+	.panel--terminal{
+		/* Base surface tuned for both light/dark schemes */
+		background: #0f1115;            /* dark neutral */
+		color: #cfd6e4;                 /* high-contrast text */
+		border: 1px solid #222838;
+		border-radius: calc(var(--radius) - 4px);
+		box-shadow: inset 0 1px 0 rgba(255,255,255,.03);
+		font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+		padding: calc(var(--pad) - 2px);
+	}
+	.panel--terminal pre{
+		margin: 0;
+		white-space: pre;               /* keep exact formatting */
+	}
 
-		a { color: var(--md-primary); text-decoration: none; }
-		a:hover { text-decoration: underline; }
+	/* Optional subtle "terminal chrome" header */
+	.panel--terminal::before{
+		/* Accessible label; keep it minimal */
+		content: "terminal";
+		display: block;
+		margin: -6px -6px 10px;
+		padding: 6px 8px;
+		font-size: 12px;
+		letter-spacing: .2px;
+		color: #9aa6b2;
+		border-bottom: 1px solid #1a2030;
+		background: linear-gradient(180deg, rgba(255,255,255,.04), transparent 70%);
+	}
 
-		.container {
-			min-height: 100%;
-			display: grid;
-			place-items: center;
-			padding: calc(var(--pad) * 2) var(--pad);
-		}
+	.panel--header::before{
+		display: block;
+		margin: -6px -6px 30px;
+		padding: 6px 8px;
+		font-size: 12px;
+		letter-spacing: .2px;
+		color: #9aa6b2;
+		border-bottom: 1px solid #1a2030;
+		background: linear-gradient(180deg, rgba(255,255,255,.04), transparent 70%);
+	}
 
-		.card {
-			width: 100%;
-			max-width: var(--maxw);
-			background: var(--md-surface);
-			border: 1px solid var(--md-border);
-			border-radius: var(--radius);
-			box-shadow: var(--md-shadow);
-			overflow: clip;
-		}
-
-		.header {
-			display: flex;
-			align-items: center;
-			gap: var(--gap);
-			padding: calc(var(--pad) * 1.25) calc(var(--pad) * 1.25) var(--pad);
-			border-bottom: 1px solid var(--md-border);
-			background:
-				linear-gradient(180deg, rgba(41,98,255,.06), transparent 70%);
-		}
-		
-		.header .logo{
-			/* RTL-venlig: brug logical property; fald tilbage til left */
-			margin-inline-start: auto;  /* elegant */
-			margin-left: auto;          /* fallback */
-			flex: 0 0 auto;
-			height: 40px;               /* juster efter dit logo */
-			width: auto;
-			object-fit: contain;
-		}
-
-		/*
-		@media (max-width: 520px){
-			.header .logo{ height: 28px; }
-		}
-		*/
-
-		.badge {
-			flex: 0 0 auto;
-			padding: 8px 12px;
-			border-radius: var(--radius-chip);
-			font-weight: 600;
-			letter-spacing: .3px;
-			background: rgba(41,98,255,.12);
-			color: var(--md-primary);
-			border: 1px solid rgba(41,98,255,.25);
-			white-space: nowrap;
-		}
-		
-		.badge--success{
-			background: rgba(0,200,83,.12);   /* grøn A700 bagtone */
-			color: var(--md-accent);          /* matcher temaets grønne tekst */
-			border-color: rgba(0,200,83,.25);
-		}
-
-		.badge--warning{
-			background: rgba(255,171,0,.15);  /* amber */
-			color: #ff8f00;                    /* amber 800-ish */
-			border-color: rgba(255,171,0,.35);
-		}
-		
-		.badge--danger {
-			background: rgba(211,47,47,.12);
-			color: var(--md-danger);
-			border-color: rgba(211,47,47,.25);
-		}
-		
-		.badge--neutral{
-			background: rgba(68,72,81,.10);
-			color: var(--md-text-muted);
-			border-color: rgba(68,72,81,.25);
-		}
-
-		.title {
-			margin: 0;
-			font-size: clamp(20px, 3.6vw, 28px);
-			line-height: 1.2;
-			font-weight: 750;
-			letter-spacing: .2px;
-		}
-
-		.subtitle {
-			margin: 2px 0 0;
-			color: var(--md-text-muted);
-			font-size: 14.5px;
-		}
-
-		.body {
-			padding: calc(var(--pad) * 1.25);
-			display: grid;
-			gap: var(--gap);
-		}
-
-		.lead {
-			margin: 0;
-			font-size: 17px;
-		}
-
-		.panel {
-			border: 1px dashed var(--md-border);
-			border-radius: calc(var(--radius) - 4px);
-			background: linear-gradient(180deg, rgba(0,0,0,.03), transparent 60%);
-			padding: var(--pad);
-			overflow: auto;
-		}
-		pre, code, kbd, samp {
-			font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
-			font-size: 13.5px;
-		}
-		pre {
-			margin: 0;
-			white-space: pre-wrap;
-			word-wrap: break-word;
-		}
-
-
-		/* Terminal-flavored panel: understated, readable, no gimmicks */
+	/* Respect user preference for light mode */
+	@media (prefers-color-scheme: light){
 		.panel--terminal{
-			/* Base surface tuned for both light/dark schemes */
-			background: #0f1115;            /* dark neutral */
-			color: #cfd6e4;                 /* high-contrast text */
-			border: 1px solid #222838;
-			border-radius: calc(var(--radius) - 4px);
-			box-shadow: inset 0 1px 0 rgba(255,255,255,.03);
-			font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
-			padding: calc(var(--pad) - 2px);
+			background: #0f1115;        /* keep dark for terminal contrast */
+			color: #e6ebf2;
+			border-color: #1e2636;
 		}
-		.panel--terminal pre{
-			margin: 0;
-			white-space: pre;               /* keep exact formatting */
-		}
-
-		/* Optional subtle "terminal chrome" header */
 		.panel--terminal::before{
-			/* Accessible label; keep it minimal */
-			content: "terminal";
-			display: block;
-			margin: -6px -6px 10px;
-			padding: 6px 8px;
-			font-size: 12px;
-			letter-spacing: .2px;
-			color: #9aa6b2;
-			border-bottom: 1px solid #1a2030;
-			background: linear-gradient(180deg, rgba(255,255,255,.04), transparent 70%);
+			color: #b3becc;
+			border-bottom-color: #1e2636;
 		}
+	}
 
-		.panel--header::before{
-			display: block;
-			margin: -6px -6px 30px;
-			padding: 6px 8px;
-			font-size: 12px;
-			letter-spacing: .2px;
-			color: #9aa6b2;
-			border-bottom: 1px solid #1a2030;
-			background: linear-gradient(180deg, rgba(255,255,255,.04), transparent 70%);
-		}
+	/* Hide if empty (works in modern browsers) */
+	.panel:has(pre:empty){ display:none; }
 
-		/* Respect user preference for light mode */
-		@media (prefers-color-scheme: light){
-			.panel--terminal{
-				background: #0f1115;        /* keep dark for terminal contrast */
-				color: #e6ebf2;
-				border-color: #1e2636;
-			}
-			.panel--terminal::before{
-				color: #b3becc;
-				border-bottom-color: #1e2636;
-			}
-		}
+	.panel--sysinfo::before{
+		content: "System information";
+	}
 
-		/* Hide if empty (works in modern browsers) */
-		.panel:has(pre:empty){ display:none; }
+	.panel--packages::before{
+		content: "Packages installed";
+	}
 
-		dl.meta {
-			display: grid;
-			grid-template-columns: max-content 1fr;
-			gap: 8px 16px;
-			margin: 0;
-		}
-		dl.meta dt {
-			color: var(--md-text-muted);
-		}
-		dl.meta dd {
-			margin: 0;
-		}
+	.panel--routes::before{
+		content: "Routes (prod)";
+	}
 
-		.actions {
-			display: flex;
-			flex-wrap: wrap;
-			gap: 10px;
-			padding: 0 calc(var(--pad) * 1.25) calc(var(--pad) * 1.25);
-		}
+	.panel--cfg::before{
+		content: "Config (prod)";
+	}
 
-		.btn {
-			appearance: none;
-			display: inline-flex;
-			align-items: center;
-			justify-content: center;
-			gap: 10px;
-			padding: 10px 16px;
-			border-radius: 12px;
-			border: 1px solid var(--md-border);
-			background: var(--md-surface);
-			color: var(--md-text);
-			font-weight: 600;
-			text-decoration: none;
-			box-shadow: var(--md-shadow);
-			transition: transform .06s ease, box-shadow .12s ease, border-color .12s ease;
-			outline: none;
-		}
-		.btn:hover {
-			transform: translateY(-1px);
-			border-color: rgba(41,98,255,.35);
-			text-decoration: none;
-		}
-		.btn:focus-visible {
-			box-shadow: 0 0 0 3px var(--md-ring);
-		}
-		.btn--primary {
-			background: linear-gradient(180deg, var(--md-primary), color-mix(in oklab, var(--md-primary), black 8%));
-			color: var(--md-primary-ink);
-			border-color: color-mix(in oklab, var(--md-primary), black 12%);
-		}
-		.btn--muted {
-			background: linear-gradient(180deg, #eef1f7, #e5e9f3);
-			border-color: #dee3ef;
-		}
-		@media (prefers-color-scheme: dark) {
-			.btn--muted {
-				background: linear-gradient(180deg, #1b2030, #171b27);
-				border-color: #252b3c;
-				color: #cfd6e4;
-			}
-		}
+	.panel--cfg-flat::before{
+		content: "Flat config (prod)";
+	}
 
-		.footer {
-			padding: 14px calc(var(--pad) * 1.25);
-			border-top: 1px solid var(--md-border);
-			display: flex;
-			justify-content: space-between;
-			align-items: center;
-			color: var(--md-text-muted);
-			font-size: 13px;
-			background: linear-gradient(0deg, rgba(0,0,0,.02), transparent 65%);
-		}
-		.footer small { opacity: .9; }
-		.brand {
-			font-weight: 700;
-			letter-spacing: .3px;
-		}
+	.panel--cfg-dev::before{
+		content: "Complete CFG (dev)";
+	}
 
-		/* Safe, subtle motion (users with motion sensitivity are respected) */
-		@media (prefers-reduced-motion: reduce) {
-			.btn { transition: none; }
-			.btn:hover { transform: none; }
-		}
-		
-		
-		
-		.panel--sysinfo::before{
-			content: "System information";
-		}
+	.panel--cfg-stage::before{
+		content: "Complete CFG (stage)";
+	}
 
-		.panel--packages::before{
-			content: "Packages installed";
-		}
-
-		.panel--routes::before{
-			content: "Routes (prod)";
-		}
-
-		.panel--cfg::before{
-			content: "Config (prod)";
-		}
-
-		.panel--cfg-flat::before{
-			content: "Flat config (prod)";
-		}
-
-		.panel--cfg-dev::before{
-			content: "Complete CFG (dev)";
-		}
-
-		.panel--cfg-stage::before{
-			content: "Complete CFG (stage)";
-		}
-
-		.panel--cfg-prod::before{
-			content: "Complete CFG (prod)";
-		}
+	.panel--cfg-prod::before{
+		content: "Complete CFG (prod)";
+	}
 		
 {% endblock %}
 
