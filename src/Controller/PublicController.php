@@ -185,7 +185,7 @@ class PublicController extends BaseController {
 		$html .= '<p>All textual and visual content on this website is &copy; '
 			. $e((string)$year) . ' ' . $e($ownerName) . ', unless stated otherwise.</p>';
 		$html .= '<p>Content may not be copied, redistributed, or modified without prior written consent.</p>';
-		$html .= '<p>This website is built on the <a href="https://www.citomni.com/" target="_blank" rel="noopener">CitOmni framework</A> <a href="https://raw.githubusercontent.com/citomni/kernel/refs/heads/main/LICENSE" target="_blank" rel="noopener noreferrer">(GPL-3.0-or-later)</a>. '
+		$html .= '<p>This website is built on the <a href="https://www.citomni.com/" target="_blank" rel="noopener">CitOmni framework</A> <a href="https://raw.githubusercontent.com/citomni/kernel/refs/heads/main/LICENSE" target="_blank" rel="noopener noreferrer">(MIT)</a>. '
 			. 'The framework’s license applies to the framework only, not to the website content.</p>';
 		if ($ownerEmail !== '') {
 			$html .= '<p>Permissions: ' . $e($ownerEmail) . '</p>';
