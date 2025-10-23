@@ -32,17 +32,19 @@ namespace CitOmni\Http\Boot;
  */
 final class Services {
 	public const MAP = [
-		'errorHandler' => \CitOmni\Http\Service\ErrorHandler::class,
-		'request'      => \CitOmni\Http\Service\Request::class,
-		'response'     => \CitOmni\Http\Service\Response::class,
-		'router'       => \CitOmni\Http\Service\Router::class,
-		'session'      => \CitOmni\Http\Service\Session::class,
-		'cookie'       => \CitOmni\Http\Service\Cookie::class,
-		'view'         => \CitOmni\Http\Service\View::class,
-		'security'     => \CitOmni\Http\Service\Security::class,
-		'nonce'        => \CitOmni\Http\Service\Nonce::class,
-		'maintenance'  => \CitOmni\Http\Service\Maintenance::class,
-		'webhooksAuth' => \CitOmni\Http\Service\WebhooksAuth::class,
+		'errorHandler'	=> \CitOmni\Http\Service\ErrorHandler::class,
+		'request'		=> \CitOmni\Http\Service\Request::class,
+		'response'		=> \CitOmni\Http\Service\Response::class,
+		'router'		=> \CitOmni\Http\Service\Router::class,
+		'session'		=> \CitOmni\Http\Service\Session::class,
+		'cookie'		=> \CitOmni\Http\Service\Cookie::class,
+		'view'			=> \CitOmni\Http\Service\View::class,
+		'security'		=> \CitOmni\Http\Service\Security::class,
+		'nonce'			=> \CitOmni\Http\Service\Nonce::class,
+		'maintenance'	=> \CitOmni\Http\Service\Maintenance::class,
+		'webhooksAuth'	=> \CitOmni\Http\Service\WebhooksAuth::class,
+		'slugger'		=> \CitOmni\Http\Service\Slugger::class,
+		'tags'			=> \CitOmni\Http\Service\Tags::class,
 	];
 
 }
