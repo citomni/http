@@ -82,9 +82,10 @@ final class Config {
 		 */
 		 
 		'locale' => [
-			'language' => 'da',
-			'timezone' => 'Europe/Copenhagen',
-			'charset'  => 'UTF-8', // PHP default_charset + HTML output
+			'language'		=> 'en',	// used for <html lang="..."> etc.
+			'icu_locale'	=> 'en_US',	// used by Intl (dates/numbers)
+			'timezone' 		=> 'UTC',	
+			'charset'		=> 'UTF-8',	// PHP default_charset + HTML output
 		],		
 
 

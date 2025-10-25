@@ -243,20 +243,31 @@ final class Kernel {
 
 		// 3) Timezone
 		$tz = (string)($app->cfg->locale->timezone ?? 'UTC');
-		if (!@date_default_timezone_set((string)$tz)) {
-			throw new \RuntimeException('Invalid timezone: ' . (string)$tz);
+		if (!@date_default_timezone_set($tz)) {
+			throw new \RuntimeException('Invalid timezone: ' . $tz);
 		}
 
-		// 4) Charset
+		// 4) ICU Locale for Intl (dates/numbers/currency)
+		$icu = (string)($app->cfg->locale->icu_locale ?? 'en_US');
+		if (!\class_exists(\Locale::class)) {
+			throw new \RuntimeException('PHP intl extension is required for localized dates/numbers.');
+		}
+		try {
+			\Locale::setDefault($icu); // independent of html lang
+		} catch (\Throwable $e) {
+			throw new \RuntimeException('Invalid ICU locale: ' . $icu);
+		}
+
+		// 5) Charset
 		$charset = (string)($app->cfg->locale->charset ?? 'UTF-8');
 		if (!@ini_set('default_charset', $charset) || \ini_get('default_charset') !== $charset) {
 			throw new \RuntimeException('Failed to set default charset to ' . $charset);
 		}
 
-		// 5) Define CITOMNI_PUBLIC_ROOT_URL (env-aware)
+		// 6) Define CITOMNI_PUBLIC_ROOT_URL (env-aware)
 		self::definePublicRootUrl($app);
 
-		// 6) Wire http.trusted_proxies into Request service
+		// 7) Wire http.trusted_proxies into Request service
 		// If http.trusted_proxies is defined in the configuration, inject it into
 		// the Request service. This way we make sure that client IP resolution becomes proxy-aware
 		// (i.e. behind load balancers or reverse proxies).

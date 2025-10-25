@@ -37,6 +37,7 @@ final class Services {
 		'response'		=> \CitOmni\Http\Service\Response::class,
 		'router'		=> \CitOmni\Http\Service\Router::class,
 		'session'		=> \CitOmni\Http\Service\Session::class,
+		'datetime'		=> \CitOmni\Http\Service\Datetime::class,
 		'cookie'		=> \CitOmni\Http\Service\Cookie::class,
 		'view'			=> \CitOmni\Http\Service\View::class,
 		'security'		=> \CitOmni\Http\Service\Security::class,

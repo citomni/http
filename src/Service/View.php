@@ -35,6 +35,7 @@ use LiteView\LiteView;
  * - \LiteView\LiteView        (render engine).
  * - $this->app->cfg           (read-only config wrapper; http/identity/locale/view/security).
  * - $this->app->txt           (i18n lookups for $txt()).
+ * - $this->app->datetime      (locale/timezone-aware date formatting for $dt(), $dtNow(), $dtMonth(), $dtWeekday()).
  * - $this->app->security      (optional: CSRF input via $csrfField()).
  * - $this->app->hasService()  (feature probing inside templates).
  * - $this->app->hasPackage()  (layer/package probing inside templates).
@@ -44,6 +45,7 @@ use LiteView\LiteView;
  * - identity.app_name              (string) App display name.
  * - locale.language                (string) Language code (e.g., "da", "en").
  * - locale.charset                 (string) Charset (default "UTF-8").
+ * - locale.icu_locale, locale.timezone  (indirectly used by Datetime service for $dt/helpers).
  * - view.asset_version             (string) Optional cache-busting value appended by $asset().
  * - view.marketing_scripts         (string) Optional HTML snippet exposed as "marketing_scripts".
  * - view.view_vars                 (array)  Arbitrary read-only vars exposed as "view_vars".
@@ -72,6 +74,10 @@ use LiteView\LiteView;
  * - Rendering engine:
  *   - Uses LiteView::render($file, $root, cache_enabled, <APP>/var/cache,
  *     trim_whitespace, remove_html_comments, $finalVars, allow_php_tags).
+ * - Datetime helper defaults:
+ *   1) Timezone and ICU locale default to service/app configuration.
+ *   2) $dtMonth()/$dtWeekday(): $form defaults to 'full'; $locale is optional.
+ *   3) Overriding tz/locale is supported per call for edge cases (e.g., audience-specific pages).
  *
  * Helpers exposed to templates (examples assume LiteView syntax):
  * - {{ $txt('key', 'file', 'layer', 'Default', ['NAME' => 'Alice']) }}
@@ -83,6 +89,22 @@ use LiteView\LiteView;
  * - {{ $asset('/assets/app.css', '1.2.3') }}
  *   Returns base_url + path and appends ?v=version if provided or if
  *   view.asset_version is set; preserves existing query correctly.
+ *
+ * - {{ $dt('2025-10-25 16:30', 'yyyy-MM-dd HH:mm') }}
+ *   Minimal call (uses default locale/timezone from cfg/service).
+ *   Optional overrides: {{ $dt(null, 'yyyy-MM-dd', 'Europe/Copenhagen', 'da_DK') }}
+ *
+ * - {{ $dtNow('EEEE d. MMMM yyyy') }}
+ *   Minimal call (uses defaults). Optional overrides:
+ *   {{ $dtNow('yyyy-MM-dd HH:mm', 'Pacific/Apia', 'en_US') }}
+ *
+ * - {{ $dtMonth(10) }}                {# "October" (default form='full') #}
+ *   Optional forms: {{ $dtMonth(10, 'short') }}, {{ $dtMonth(10, 'narrow') }}
+ *   Optional locale override: {{ $dtMonth(10, 'short', 'en_US') }}
+ *
+ * - {{ $dtWeekday(6) }}               {# "Friday" (default form='full') #}
+ *   Optional forms: {{ $dtWeekday(6, 'short') }}, {{ $dtWeekday(6, 'narrow') }}
+ *   Optional locale override: {{ $dtWeekday(6, 'full', 'da_DK') }}
  *
  * - {% if $hasService('auth') %} ... {% endif %}
  *   Checks for a service id in the service map.
@@ -118,7 +140,7 @@ use LiteView\LiteView;
  *   service calls until used in the template.
  * - Asset/version logic is branchless in the common case (no version set).
  *
- * Typical usage:
+ * Examples (render template):
  *   // Vendor layer template (CitOmni/Http)
  *   $this->app->view->render('public/home.html', 'citomni/http', [
  *   	'title' => 'Welcome'
@@ -130,6 +152,11 @@ use LiteView\LiteView;
  *   ]);
  *
  * Examples (template side):
+ *   <!-- Date/time helpers (minimal calls use defaults) -->
+ *   <time datetime="{{ $dtNow('yyyy-MM-dd\'T\'HH:mm:ssXXX') }}">  {# Override per call if needed: {{ $dtNow('yyyy-MM-dd HH:mm', 'America/New_York', 'en_US') }} #}
+ *   	{{ $dtNow('EEEE d. MMMM yyyy HH:mm') }}
+ *   </time>
+ *
  *   <!-- Absolute URL from base_url -->
  *   <a href="{{ $url('/member/home.html') }}">Home</a>
  *
@@ -156,6 +183,10 @@ use LiteView\LiteView;
  *  {{{ $csrfField() }}}
  *  {{ $currentPath() }}
  *  {{ $txt('key', 'file', 'vendor/package') }}
+ *  {{ $dt($when, 'pattern') }}                          	{# tz/locale optional #}
+ *  {{ $dtNow('pattern') }}                              	{# tz/locale optional #}
+ *  {{ $dtMonth(1..12 [, 'full|short|narrow' [, locale]]) }}
+ *  {{ $dtWeekday(1..7 [, 'full|short|narrow' [, locale]]) }}
  *
  *
  * Notes:
@@ -329,6 +360,100 @@ class View extends BaseService {
 					);
 				}				
 				return $this->app->txt->get($key, $file, $layer, $default, $vars);
+			},
+
+			/**
+			 * Datetime: format a given moment using Intl patterns.
+			 *
+			 * Minimal example:
+			 *   {{ $dt('2025-10-25 16:30', 'yyyy-MM-dd HH:mm') }}
+			 *
+			 * Optional/extended examples:
+			 *   {{ $dt(null, 'yyyy-MM-dd', 'Europe/Copenhagen', 'da_DK') }}   {# now + explicit tz/locale #}
+			 *   {{ $dt(1735123456, 'EEEE d. MMMM yyyy') }}                    {# unix timestamp, defaults for tz/locale #}
+			 *   {{ $dt($myDateObj, 'HH:mm:ss', 'Pacific/Apia') }}             {# DateTimeInterface + tz override #}
+			 *
+			 * Notes:
+			 * - `when` may be null|string|int|\DateTimeInterface (null = now).
+			 * - Timezone and locale fall back to service/app configuration unless provided.
+			 */
+			'dt' => function (null|string|int|\DateTimeInterface $when, string $pattern, ?string $tzName = null, ?string $locale = null): string {
+				if (!$this->app->hasService('datetime')) {
+					throw new \RuntimeException(
+						"Datetime service not available. Ensure the Datetime provider is registered in /config/providers.php."
+					);
+				}
+				return $this->app->datetime->format($when, $pattern, $tzName, $locale);
+			},
+
+			/**
+			 * Datetime: format "now" using Intl patterns.
+			 *
+			 * Minimal example:
+			 *   {{ $dtNow('EEEE d. MMMM yyyy') }}
+			 *
+			 * Optional/extended examples:
+			 *   {{ $dtNow('yyyy-MM-dd HH:mm', 'Europe/Copenhagen', 'da_DK') }} {# explicit tz/locale #}
+			 *   {{ $dtNow('HH:mm:ssXXX', 'America/New_York') }}                {# tz override only #}
+			 *
+			 * Notes:
+			 * - Timezone and locale fall back to service/app configuration unless provided.
+			 */
+			'dtNow' => function (string $pattern, ?string $tzName = null, ?string $locale = null): string {
+				if (!$this->app->hasService('datetime')) {
+					throw new \RuntimeException(
+						"Datetime service not available. Ensure the Datetime provider is registered in /config/providers.php."
+					);
+				}
+				return $this->app->datetime->now($pattern, $tzName, $locale);
+			},
+
+			/**
+			 * Datetime: localized month name (1..12).
+			 *
+			 * Minimal example:
+			 *   {{ $dtMonth(10) }}                                           {# default form='full' #}
+			 *
+			 * Optional/extended examples:
+			 *   {{ $dtMonth(10, 'short') }}                                  {# "Oct" (locale-dependent) #}
+			 *   {{ $dtMonth(10, 'narrow') }}                                 {# "O" (locale-dependent) #}
+			 *   {{ $dtMonth(10, 'short', 'en_US') }}                         {# explicit locale #}
+			 *
+			 * Notes:
+			 * - Valid forms: 'full' (default), 'short', 'narrow'.
+			 * - Locale falls back to service/app configuration unless provided.
+			 */
+			'dtMonth' => function (int $month, ?string $form = null, ?string $locale = null): string {
+				if (!$this->app->hasService('datetime')) {
+					throw new \RuntimeException(
+						"Datetime service not available. Ensure the Datetime provider is registered in /config/providers.php."
+					);
+				}
+				return $this->app->datetime->month($month, $form, $locale);
+			},
+
+			/**
+			 * Datetime: localized weekday name (ISO 1=Mon..7=Sun).
+			 *
+			 * Minimal example:
+			 *   {{ $dtWeekday(6) }}                                          {# default form='full' (e.g., "Friday") #}
+			 *
+			 * Optional/extended examples:
+			 *   {{ $dtWeekday(6, 'short') }}                                 {# "Fri" #}
+			 *   {{ $dtWeekday(6, 'narrow') }}                                {# "F" #}
+			 *   {{ $dtWeekday(6, 'full', 'da_DK') }}                         {# explicit locale #}
+			 *
+			 * Notes:
+			 * - Valid forms: 'full' (default), 'short', 'narrow').
+			 * - Locale falls back to service/app configuration unless provided.
+			 */
+			'dtWeekday' => function (int $isoWeekday, ?string $form = null, ?string $locale = null): string {
+				if (!$this->app->hasService('datetime')) {
+					throw new \RuntimeException(
+						"Datetime service not available. Ensure the Datetime provider is registered in /config/providers.php."
+					);
+				}
+				return $this->app->datetime->weekday($isoWeekday, $form, $locale);
 			},
 
 			/**
