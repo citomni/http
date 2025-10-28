@@ -383,16 +383,44 @@ class View extends BaseService {
 		// Compile once per request
 		if ($this->compiledProviders === null) {
 			$this->compiledProviders = [];
+
 			foreach ($cfg as $row) {
-				$var  = (string)($row['var']  ?? '');
-				$call =         ($row['call'] ?? null);
-				if ($var === '' || $call === null) {
-					// Fail fast in dev; ignore silently in prod.
+				// 0) Skip non-arrays (e.g. '', 0, null) and empty arrays [].
+				if (!\is_array($row) || $row === []) {
+					continue;
+				}
+
+				$hasVar  = \array_key_exists('var',  $row);
+				$hasCall = \array_key_exists('call', $row);
+
+				// 1) If neither key is present, treat as a no-op row and skip.
+				if (!$hasVar && !$hasCall) {
+					continue;
+				}
+
+				// 2) If one is present without the other → only fail in dev; otherwise skip.
+				if (!$hasVar || !$hasCall) {
 					if (\defined('CITOMNI_ENVIRONMENT') && \CITOMNI_ENVIRONMENT === 'dev') {
-						throw new \RuntimeException("view.vars_providers: 'var' and 'call' are required.");
+						throw new \RuntimeException(
+							"view.vars_providers: each provider must define both 'var' and 'call'."
+						);
 					}
 					continue;
 				}
+
+				$var  = (string)($row['var']  ?? '');
+				$call =          ($row['call'] ?? null);
+
+				// 3) Empty/invalid values → same rule: strict in dev, skip otherwise.
+				if ($var === '' || $call === null) {
+					if (\defined('CITOMNI_ENVIRONMENT') && \CITOMNI_ENVIRONMENT === 'dev') {
+						throw new \RuntimeException(
+							"view.vars_providers: 'var' must be non-empty and 'call' must be a valid callable descriptor."
+						);
+					}
+					continue;
+				}
+
 				$inc = \array_values((array)($row['include'] ?? []));
 				$exc = \array_values((array)($row['exclude'] ?? []));
 
@@ -401,11 +429,12 @@ class View extends BaseService {
 					'call' => $call,
 					'inc' => $inc,
 					'exc' => $exc,
-					'ire' => \array_map($this->compilePathMatcher(...), $inc),
-					'ere' => \array_map($this->compilePathMatcher(...), $exc),
+					'ire' => \array_map([$this, 'compilePathMatcher'], $inc),
+					'ere' => \array_map([$this, 'compilePathMatcher'], $exc),
 				];
 			}
 		}
+
 
 		$out = [];
 		foreach ($this->compiledProviders as $p) {
