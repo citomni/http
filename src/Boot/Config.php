@@ -367,7 +367,33 @@ final class Config {
 			// Global variables for use in all templates.
 			// Any values placed here will automatically be available in every template rendered by the framework.
 			// Ideal for site-wide settings, company info, custom flags, or any data that needs to be accessible across all views.
-			'view_vars' => [],		
+			'view_vars' => [],
+			
+
+			/**
+			 * vars_providers: declarative, low-overhead dynamic view variables.
+			 *
+			 * Shape (list of maps):
+			 * - var     (string, required): template variable name (e.g., 'header').
+			 * - call    (string|array, required): callable to obtain the value.
+			 *           Supported forms:
+			 *             1) "FQCN::method" (static)
+			 *             2) ["class" => FQCN, "method" => "method"]  // instantiates with (App $app)
+			 *             3) ["service" => "id", "method" => "method"] // calls $app->id->method(...)
+			 * - include (string[] optional): URI matchers that ENABLE this var.
+			 * - exclude (string[] optional): URI matchers that DISABLE this var.
+			 *
+			 * URI matchers:
+			 * - If a pattern starts and ends with "~", it is treated as a raw regex (e.g., "~^/admin/~").
+			 * - Otherwise, it is treated as a glob-like prefix with "*" wildcard (converted once to regex).
+			 *   Examples: "/nyheder/*", "/sider/*", "/".
+			 *
+			 * Matching rules:
+			 * - If include is empty/missing => included by default (unless excluded).
+			 * - If include has entries => at least one must match AND not excluded.
+			 */
+			'vars_providers' => [],
+
 		],
 
 

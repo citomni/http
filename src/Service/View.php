@@ -203,6 +203,9 @@ class View extends BaseService {
 	/** @var array<string,mixed>|null Cached globals for this request (built once). */
 	private ?array $globals = null;
 	
+	/** @var array<int, array{var:string,call:mixed,inc?:array,exc?:array,ire:array,ere:array}>|null */
+	private ?array $compiledProviders = null;
+	
 	
 	/**
 	 * Service bootstrap hook.
@@ -290,12 +293,25 @@ class View extends BaseService {
 			? \CITOMNI_APP_PATH . '/templates'
 			: $this->resolveVendorTemplateRoot($layer);
 
-		// Build globals once per request; caller $data wins on key collisions.
-		$vars  = $this->globals ??= $this->buildGlobals();
-		$final = $data + $vars;
+		// 1) Build globals once
+		$vars = $this->globals ??= $this->buildGlobals();
 
-		$cacheDir = \CITOMNI_APP_PATH . '/var/cache'; // keep using your existing cache dir
+		// 2) Build dynamic vars from providers (only those matching current path)
+		$path = $this->appRelativePath($this->app->request->path());
+		$dyn  = $this->buildDynamicVars($path);
 
+		// 3) Precedence (left wins): controller $data > provider $dyn > global $vars
+		$final = $data + $dyn + $vars;
+
+		// 4) Set cache dir
+		$cacheDir = \CITOMNI_APP_PATH . '/var/cache';
+		
+		// 5) Optional (only on explicit query flag): Print view vars before template output.
+		if ($this->app->request->get('_viewvars') !== null) {
+			$this->printViewVars($final);
+		}
+
+		// 6) Render the template
 		LiteView::render(
 			$file,
 			$templateRoot,
@@ -307,6 +323,230 @@ class View extends BaseService {
 			(bool)$this->app->cfg->view->allow_php_tags
 		);
 	}
+
+
+	/**
+	 * Compile provider patterns once, then evaluate includes/excludes for current path.
+	 *
+	 * @param string $path Current request path (e.g., '/nyheder/foo-a123.html').
+	 * @return array<string,mixed> Map of var => value for matched providers.
+	 */
+	private function buildDynamicVars(string $path): array {
+		$cfg = (array)($this->app->cfg->view->vars_providers ?? []);
+		if ($cfg === []) {
+			return [];
+		}
+
+		// Compile once per request
+		if ($this->compiledProviders === null) {
+			$this->compiledProviders = [];
+			foreach ($cfg as $row) {
+				$var  = (string)($row['var']  ?? '');
+				$call =         ($row['call'] ?? null);
+				if ($var === '' || $call === null) {
+					// Fail fast in dev; ignore silently in prod.
+					if (\defined('CITOMNI_ENVIRONMENT') && \CITOMNI_ENVIRONMENT === 'dev') {
+						throw new \RuntimeException("view.vars_providers: 'var' and 'call' are required.");
+					}
+					continue;
+				}
+				$inc = \array_values((array)($row['include'] ?? []));
+				$exc = \array_values((array)($row['exclude'] ?? []));
+
+				$this->compiledProviders[] = [
+					'var' => $var,
+					'call' => $call,
+					'inc' => $inc,
+					'exc' => $exc,
+					'ire' => \array_map($this->compilePathMatcher(...), $inc),
+					'ere' => \array_map($this->compilePathMatcher(...), $exc),
+				];
+			}
+		}
+
+		$out = [];
+		foreach ($this->compiledProviders as $p) {
+			if (!$this->pathMatches($path, $p['ire'], $p['ere'])) {
+				continue;
+			}
+			// Compute value lazily only if matched
+			$out[$p['var']] = $this->invokeProvider($p['call'], $p['var']);
+		}
+		return $out;
+	}
+
+
+	/**
+	 * Convert a human-friendly matcher into a compiled regex (PCRE delimiter "/").
+	 * - "~...~" => treated as-is (without modification).
+	 * - Otherwise supports '*' wildcard with implicit "startsWith".
+	 */
+	private function compilePathMatcher(string $pat): string {
+		$pat = (string)$pat;
+
+		// Empty => match nothing
+		if ($pat === '') {
+			return '/^\b\B$/';
+		}
+
+		// Raw regex form: "~...~"
+		if ($pat[0] === '~' && \str_ends_with($pat, '~') && \strlen($pat) >= 2) {
+			return $pat;
+		}
+
+		// Normalize to app-relative style: ensure leading slash unless it's a pure "*"
+		if ($pat !== '*' && $pat[0] !== '/') {
+			$pat = '/' . $pat;
+		}
+
+		// Special case: exact frontpage "/"
+		if ($pat === '/') {
+			return '/^\/$/';
+		}
+
+		// Glob-like: '*' => '.*' ; prefix match anchored at start
+		$quoted = \preg_quote($pat, '/');
+		$quoted = \str_replace('\*', '.*', $quoted);
+
+		// Typical intents:
+		// "/foo/*"  => any under /foo/
+		// "/foo"    => any starting with "/foo" (prefix)
+		// "*"       => everything
+		return '/^' . $quoted . '/';
+	}
+
+
+	/**
+	 * Return true if $path is included and not excluded by provided regex lists.
+	 *
+	 * @param string   $path
+	 * @param string[] $incRes
+	 * @param string[] $excRes
+	 */
+	private function pathMatches(string $path, array $incRes, array $excRes): bool {
+		// If include is empty => included by default; otherwise require at least one match
+		$included = ($incRes === []);
+		if (!$included) {
+			foreach ($incRes as $re) {
+				if (\preg_match($re, $path) === 1) {
+					$included = true;
+					break;
+				}
+			}
+		}
+		if (!$included) {
+			return false;
+		}
+		// Exclusions take precedence
+		foreach ($excRes as $re) {
+			if (\preg_match($re, $path) === 1) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+
+	/**
+	 * appRelativePath: Strip the app base path from a raw request path.
+	 *
+	 * Examples:
+	 *  baseUrl() = "http://localhost/byensportal/byensportal.dk/"
+	 *  request->path() = "/byensportal/byensportal.dk/begivenheder/x.html"
+	 *  => "/begivenheder/x.html"
+	 *
+	 * @param string $rawPath Request::path() (always begins with "/").
+	 * @return string App-relative path beginning with "/", never empty ("/" for frontpage).
+	 */
+	private function appRelativePath(string $rawPath): string {
+		// 1) Find base path from the configured/public root URL
+		$base = $this->app->request->baseUrl(); // ends with "/"
+		$basePath = (string)\parse_url($base, \PHP_URL_PATH);
+		$basePath = $basePath !== '' ? '/' . \trim($basePath, '/') . '/' : '/';
+
+		// 2) Normalize raw path
+		$path = $rawPath !== '' ? $rawPath : '/';
+		if ($path[0] !== '/') {
+			$path = '/' . $path;
+		}
+
+		// 3) Strip prefix if present
+		if ($basePath !== '/' ) {
+			// Ensure basePath has single trailing slash; match strictly at start
+			$prefix = \rtrim($basePath, '/');
+			if ($prefix !== '' && \str_starts_with($path, $prefix . '/')) {
+				$path = \substr($path, \strlen($prefix));
+			}
+		}
+
+		// 4) Collapse any accidental '//' (defensive)
+		$path = \preg_replace('~/+~', '/', $path) ?? $path;
+
+		return $path === '' ? '/' : $path;
+	}
+
+
+	/**
+	 * Invoke a configured provider in a deterministic, minimal way.
+	 *
+	 * Supported forms:
+	 * - "FQCN::method" (static)
+	 * - ["class" => FQCN, "method" => "method"]         (instantiates with new Class($app))
+	 * - ["service" => "id", "method" => "method"]       (calls $app->id->method())
+	 *
+	 * @param mixed  $call
+	 * @param string $varName For error context only.
+	 * @return mixed
+	 */
+	private function invokeProvider(mixed $call, string $varName): mixed {
+		// Static "FQCN::method"
+		if (\is_string($call) && \strpos($call, '::') !== false) {
+			[$cls, $m] = \explode('::', $call, 2);
+			if (!\method_exists($cls, $m)) {
+				return $this->failOrNull("Provider method {$cls}::{$m} for var '{$varName}' does not exist.");
+			}
+			return $cls::$m($this->app);
+		}
+
+		// ["class" => FQCN, "method" => "m"]
+		if (\is_array($call) && isset($call['class'], $call['method'])) {
+			$cls = (string)$call['class'];
+			$m   = (string)$call['method'];
+			if (!\method_exists($cls, $m)) {
+				return $this->failOrNull("Provider method {$cls}::{$m} for var '{$varName}' does not exist.");
+			}
+			$inst = new $cls($this->app);
+			return $inst->{$m}();
+		}
+
+		// ["service" => "id", "method" => "m"]
+		if (\is_array($call) && isset($call['service'], $call['method'])) {
+			$id = (string)$call['service'];
+			$m  = (string)$call['method'];
+			if (!$this->app->hasService($id)) {
+				return $this->failOrNull("Service '{$id}' for var '{$varName}' is not available.");
+			}
+			$svc = $this->app->{$id};
+			if (!\method_exists($svc, $m)) {
+				return $this->failOrNull("Service method {$id}::{$m} for var '{$varName}' does not exist.");
+			}
+			return $svc->{$m}();
+		}
+
+		return $this->failOrNull("Unsupported 'call' definition for var '{$varName}'.");
+	}
+
+
+	/**
+	 * Fail fast in dev; degrade to null in prod.
+	 */
+	private function failOrNull(string $msg): mixed {
+		if (\defined('CITOMNI_ENVIRONMENT') && \CITOMNI_ENVIRONMENT === 'dev') {
+			throw new \RuntimeException($msg);
+		}
+		return null;
+	}
+
 
 	/**
 	 * Build a minimal, deterministic set of globals for templates.
@@ -362,6 +602,7 @@ class View extends BaseService {
 				return $this->app->txt->get($key, $file, $layer, $default, $vars);
 			},
 
+
 			/**
 			 * Datetime: format a given moment using Intl patterns.
 			 *
@@ -386,6 +627,7 @@ class View extends BaseService {
 				return $this->app->datetime->format($when, $pattern, $tzName, $locale);
 			},
 
+
 			/**
 			 * Datetime: format "now" using Intl patterns.
 			 *
@@ -407,6 +649,7 @@ class View extends BaseService {
 				}
 				return $this->app->datetime->now($pattern, $tzName, $locale);
 			},
+
 
 			/**
 			 * Datetime: localized month name (1..12).
@@ -432,6 +675,7 @@ class View extends BaseService {
 				return $this->app->datetime->month($month, $form, $locale);
 			},
 
+
 			/**
 			 * Datetime: localized weekday name (ISO 1=Mon..7=Sun).
 			 *
@@ -456,6 +700,7 @@ class View extends BaseService {
 				return $this->app->datetime->weekday($isoWeekday, $form, $locale);
 			},
 
+
 			/**
 			 * URL helper (joins base_url + path + optional query).
 			 * Usage: {{ $url('/member/home.html') }} or {{ url('path', {'a': 1}) }}
@@ -467,6 +712,7 @@ class View extends BaseService {
 				}
 				return \rtrim($baseUrl, '/') . $p;
 			},
+
 
 			/**
 			 * Asset helper with optional cache-busting.
@@ -482,6 +728,7 @@ class View extends BaseService {
 				return $ver !== '' ? $url . (str_contains($url, '?') ? '&' : '?') . 'v=' . \rawurlencode($ver) : $url;
 			},
 
+
 			/**
 			 * Does a service id exist?
 			 * Usage (logic blocks): {% if $hasService('auth') %} ... {% endif %}
@@ -490,6 +737,7 @@ class View extends BaseService {
 				return $this->app->hasService($id);
 			},
 
+
 			/**
 			 * Is a vendor/package effectively present (from services/routes)?
 			 * Usage: {% if $hasPackage('citomni/auth') %} ... {% endif %}
@@ -497,6 +745,7 @@ class View extends BaseService {
 			'hasPackage' => function (string $slug): bool {
 				return $this->app->hasPackage($slug);
 			},
+
 
 			/**
 			 * CSRF hidden input field (safe no-op if security service is absent).
@@ -509,6 +758,7 @@ class View extends BaseService {
 				}
 				return '';
 			},
+
 
 			/**
 			 * Current request path (lazy: only resolves if template asks).
@@ -550,6 +800,7 @@ class View extends BaseService {
 		];
 	}
 
+
 	/**
 	 * Resolve the absolute templates root for a given vendor/package layer.
 	 *
@@ -572,4 +823,69 @@ class View extends BaseService {
 		}
 		return \CITOMNI_APP_PATH . '/vendor/' . $slug . '/templates';
 	}
+	
+	
+	/**
+	 * printViewVars: Dump final template vars before output when invoked.
+	 *
+	 * Behavior:
+	 * - Only emits on dev/stage; noop in prod.
+	 * - Wrapped in HTML comments so the DOM ikke “forurenes”.
+	 * - Depth-limited normalization; closures/objects/resources markeres.
+	 *
+	 * @param array<string,mixed> $vars Final payload passed to LiteView.
+	 */
+	private function printViewVars(array $vars): void {
+		$env = \defined('CITOMNI_ENVIRONMENT') ? (string)\CITOMNI_ENVIRONMENT : 'prod';
+		if ($env !== 'dev' && $env !== 'stage') {
+			return;
+		}
+
+		$seen = new \SplObjectStorage();
+		$maxDepth = 10;
+
+		$normalize = function (mixed $v, int $depth = 0) use (&$normalize, $seen, $maxDepth) {
+			if ($depth >= $maxDepth) {
+				return '[depth-limit]';
+			}
+			if (\is_array($v)) {
+				$out = [];
+				foreach ($v as $k => $vv) {
+					$out[$k] = $normalize($vv, $depth + 1);
+				}
+				return $out;
+			}
+			if ($v instanceof \Closure) {
+				return '[closure]';
+			}
+			if (\is_object($v)) {
+				if ($seen->contains($v)) {
+					return '[' . \get_debug_type($v) . ' (seen)]';
+				}
+				$seen->attach($v);
+				$out = ['__class' => \get_class($v)];
+				$props = [];
+				foreach (\get_object_vars($v) as $k => $vv) {
+					$props[$k] = $normalize($vv, $depth + 1);
+				}
+				if ($props !== []) {
+					$out['props'] = $props;
+				}
+				return $out;
+			}
+			if (\is_resource($v)) {
+				return '[resource:' . \get_resource_type($v) . ']';
+			}
+			return $v;
+		};
+
+		$normalized = $normalize($vars);
+
+		echo "<!--\n=== CitOmni View Vars (environment: {$env}) ===\n";
+		\print_r($normalized);
+		echo "\n=== End View Vars ===\n-->\n";
+	}
+
+	
+	
 }
