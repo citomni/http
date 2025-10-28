@@ -29,6 +29,8 @@ use LiteView\LiteView;
  *   2) Environment flags (env.name, env.dev).
  *   3) View passthroughs (marketing_scripts, view_vars).
  *   4) Helpers: $txt, $url, $asset, $hasService, $hasPackage, $csrfField, $currentPath.
+ *   5) Dynamic view-vars providers (cfg:view.vars_providers) evaluated per request
+ *      using app-relative path matching (include/exclude).
  * - Keep logic lean and deterministic; avoid heavy abstractions or magic.
  *
  * Collaborators:
@@ -57,6 +59,7 @@ use LiteView\LiteView;
  * - security.honeypot_protection   (bool)   Informational flag for templates.
  * - security.form_action_switching (bool)   Informational flag for templates.
  * - security.captcha_protection    (bool)   Informational flag for templates.
+ * - view.vars_providers            (array)  List of providers with {var, call, include?, exclude?}.
  *
  * Behavior:
  * - Path resolution:
@@ -78,6 +81,19 @@ use LiteView\LiteView;
  *   1) Timezone and ICU locale default to service/app configuration.
  *   2) $dtMonth()/$dtWeekday(): $form defaults to 'full'; $locale is optional.
  *   3) Overriding tz/locale is supported per call for edge cases (e.g., audience-specific pages).
+ * - Dynamic vars providers:
+ *   1) App-relative path is computed from Request::baseUrl() and Request::path().
+ *   2) Each provider row = { var: string, call: mixed, include?: string[], exclude?: string[] }.
+ *   3) Path matching supports:
+ *      - "~...~"   raw PCRE (used as-is).
+ *      - "/foo/*"  glob-like prefix (anchored at start).
+ *      - "/"       exact frontpage only.
+ *      - "*"       match all.
+ *   4) Precedence when merging for render(): $data > dynamic($providers) > globals.
+ *
+ * - Diagnostic output (dev/stage only):
+ *   1) If query contains "?_viewvars", the service prints the final vars payload
+ *      before template output, wrapped in HTML comments (<!-- ... -->).
  *
  * Helpers exposed to templates (examples assume LiteView syntax):
  * - {{ $txt('key', 'file', 'layer', 'Default', ['NAME' => 'Alice']) }}
@@ -203,7 +219,15 @@ class View extends BaseService {
 	/** @var array<string,mixed>|null Cached globals for this request (built once). */
 	private ?array $globals = null;
 	
-	/** @var array<int, array{var:string,call:mixed,inc?:array,exc?:array,ire:array,ere:array}>|null */
+	/** @var array<int, array{
+	 *    var:string,
+	 *    call:mixed,
+	 *    inc:array<int,string>,  // original include patterns
+	 *    exc:array<int,string>,  // original exclude patterns
+	 *    ire:array<int,string>,  // compiled include regexes
+	 *    ere:array<int,string>   // compiled exclude regexes
+	 * }>|null
+	 */
 	private ?array $compiledProviders = null;
 	
 	
@@ -253,6 +277,14 @@ class View extends BaseService {
 	 * - callable currentPath(): string
 	 *
 	 * Caller-provided $data overrides globals on key collision.
+	 *
+	 * Dynamic vars providers:
+	 * - Evaluated per request based on the app-relative path.
+	 * - Merging precedence: $data (controller) > dynamic (providers) > globals.
+	 *
+	 * Dev/stage diagnostics:
+	 * - If the query string contains "_viewvars", prints the final vars payload
+	 *   before template output (wrapped in "<!-- -->").
 	 *
 	 * @param string $file   Relative template path (e.g. "public/login.html").
 	 * @param string $layer  "app" or "vendor/package" (e.g. "citomni/auth").
@@ -328,8 +360,19 @@ class View extends BaseService {
 	/**
 	 * Compile provider patterns once, then evaluate includes/excludes for current path.
 	 *
-	 * @param string $path Current request path (e.g., '/nyheder/foo-a123.html').
-	 * @return array<string,mixed> Map of var => value for matched providers.
+	 * Include/Exclude semantics:
+	 * - include=[]  => included by default (match-all) unless excluded.
+	 * - include!=[] => at least one include regex must match.
+	 * - exclude[]   => any match excludes (takes precedence over include).
+	 *
+	 * Pattern forms (human-friendly):
+	 * - "~...~" => raw PCRE, used as-is.
+	 * - "*"     => matches all paths.
+	 * - "/"     => matches only the exact frontpage (app-relative "/").
+	 * - "/foo/*" or "/foo" => anchored prefix (glob-like).
+	 *
+	 * @param string $path Current app-relative request path (e.g., "/nyheder/foo-a123.html").
+	 * @return array<string,mixed> Map of var => value for matched providers (lazy-invoked).
 	 */
 	private function buildDynamicVars(string $path): array {
 		$cfg = (array)($this->app->cfg->view->vars_providers ?? []);
@@ -377,9 +420,14 @@ class View extends BaseService {
 
 
 	/**
-	 * Convert a human-friendly matcher into a compiled regex (PCRE delimiter "/").
-	 * - "~...~" => treated as-is (without modification).
-	 * - Otherwise supports '*' wildcard with implicit "startsWith".
+	 * Convert a human-friendly matcher into an anchored PCRE.
+	 *
+	 * Supported forms:
+	 * - "~...~"       raw PCRE (returned unchanged).
+	 * - "*"           match all.
+	 * - "/"           exact frontpage only (app-relative).
+	 * - "/foo/*"      glob-like prefix (anchored at start).
+	 * - "/foo"        simple anchored prefix.
 	 */
 	private function compilePathMatcher(string $pat): string {
 		$pat = (string)$pat;
@@ -419,6 +467,9 @@ class View extends BaseService {
 	/**
 	 * Return true if $path is included and not excluded by provided regex lists.
 	 *
+	 * Include default:
+	 * - If $incRes is empty, the path is considered included unless excluded.
+	 *
 	 * @param string   $path
 	 * @param string[] $incRes
 	 * @param string[] $excRes
@@ -449,6 +500,10 @@ class View extends BaseService {
 
 	/**
 	 * appRelativePath: Strip the app base path from a raw request path.
+	 *
+	 * Notes:
+	 * - Respects CITOMNI_PUBLIC_ROOT_URL/http.base_url via Request::baseUrl().
+	 * - Always returns "/" for the frontpage (never an empty string).
 	 *
 	 * Examples:
 	 *  baseUrl() = "http://localhost/byensportal/byensportal.dk/"
@@ -490,9 +545,12 @@ class View extends BaseService {
 	 * Invoke a configured provider in a deterministic, minimal way.
 	 *
 	 * Supported forms:
-	 * - "FQCN::method" (static)
-	 * - ["class" => FQCN, "method" => "method"]         (instantiates with new Class($app))
-	 * - ["service" => "id", "method" => "method"]       (calls $app->id->method())
+	 * - "FQCN::method"                       (static; called as Class::method(App $app))
+	 * - ["class" => FQCN, "method" => "m"]   (instantiates new Class($this->app); calls ->m())
+	 * - ["service" => "id", "method" => "m"] (calls $this->app->id->m())
+	 *
+	 * Constructor contract:
+	 * - When instantiating a class provider, the constructor must be: __construct(App $app, array $options = [])
 	 *
 	 * @param mixed  $call
 	 * @param string $varName For error context only.
@@ -539,6 +597,10 @@ class View extends BaseService {
 
 	/**
 	 * Fail fast in dev; degrade to null in prod.
+	 *
+	 * Notes:
+	 * - Throws in "dev"; returns null in other environments (stage/prod).
+	 *
 	 */
 	private function failOrNull(string $msg): mixed {
 		if (\defined('CITOMNI_ENVIRONMENT') && \CITOMNI_ENVIRONMENT === 'dev') {
@@ -550,9 +612,11 @@ class View extends BaseService {
 
 	/**
 	 * Build a minimal, deterministic set of globals for templates.
+	 *
 	 * Notes:
 	 * - Keep logic lean; use closures for anything that might touch services.
 	 * - Caller-provided $data can override any of these keys in render().
+	 * - Exposes 'env' => {name, dev} for template-side environment checks.
 	 *
 	 * @return array<string,mixed>
 	 */
@@ -721,7 +785,7 @@ class View extends BaseService {
 			 */
 			'asset' => function (string $path, ?string $version = null) use ($baseUrl, $cfg): string {
 				if (\preg_match('~^https?://~i', $path)) {
-					return $path; // allerede absolut
+					return $path; // already absolute
 				}
 				$url = \rtrim($baseUrl, '/') . '/' . \ltrim($path, '/');
 				$ver = $version ?? (string)($cfg->view->asset_version ?? '');
@@ -830,8 +894,14 @@ class View extends BaseService {
 	 *
 	 * Behavior:
 	 * - Only emits on dev/stage; noop in prod.
-	 * - Wrapped in HTML comments so the DOM ikke “forurenes”.
-	 * - Depth-limited normalization; closures/objects/resources markeres.
+	 * - Wrapped in HTML comments so the DOM is not polluted.
+	 * - Depth-limited normalization; closures/objects/resources are annotated.
+	 *
+	 * Trigger:
+	 * - Only runs when the query string contains "_viewvars".
+	 *
+	 * Placement:
+	 * - Output is emitted before the template render to ensure visibility in HTML.
 	 *
 	 * @param array<string,mixed> $vars Final payload passed to LiteView.
 	 */
