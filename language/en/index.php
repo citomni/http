@@ -27,7 +27,7 @@ return [
 		'bodytext' => 'CitOmni is a powerful and flexible framework that makes development faster and more efficient.<br>
                With its modular architecture and modern tools, you can easily build scalable solutions.<br>
 			   CitOmni ensures lightning-fast loading, flexible customization, and a compact codebase that reduces energy consumption and lowers your website\'s environmental footprint.<br>
-               Read more at <a href="https://citomni.dk" target="_blank">CitOmni.dk</a>.<br>
+               Read more at <a href="https://citomni.com" target="_blank">CitOmni.com</a>.<br>
 			   Happy building!',
 		
 ];
