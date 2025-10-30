@@ -133,6 +133,29 @@ use LiteView\LiteView;
  *   service is present and exposes csrfHiddenInput(); otherwise returns "".
  *   Triple braces to avoid HTML escaping in the engine.
  *
+ * - {{ $role('is', 'admin') }}
+ *   True if the current user's role exactly matches "admin".
+ *
+ * - {{ $role('any', 'manager', 'operator') }}
+ *   True if the current user's role matches any of the provided names or ids.
+ *
+ * - {{ $role('atLeast', 'operator') }}
+ *   True if the current user's role is "operator or higher". This assumes
+ *   that your configured role ids are monotonic, e.g. admin=9 > manager=7 > operator=5.
+ *
+ * - {{ $role('rank') }}
+ *   Numeric tinyint role id of the current user (e.g. 9 for admin).
+ *
+ * - {{ $role('label') }}
+ *   Localized label for the current user's role (from user_roles.php).
+ *
+ * - {{ $role('labelOf', 9) }}
+ *   Localized label for role id 9.
+ *
+ * - {{ $role('labels') }}
+ *   Map of {id => localized label} for all configured roles. Handy for
+ *   building <select> without hardcoding.
+ *
  * Method contracts:
  * - render(string $file, string $layer = 'app', array $data = []): void
  *   Render $file from app templates (layer 'app') or a vendor layer; merges
@@ -204,6 +227,12 @@ use LiteView\LiteView;
  *  {{ $dtMonth(1..12 [, 'full|short|narrow' [, locale]]) }}
  *  {{ $dtWeekday(1..7 [, 'full|short|narrow' [, locale]]) }}
  *
+ *  {{ $role('is', 'admin') }}                           	{# true if exactly admin #}
+ *  {{ $role('any', 'manager','operator') }}             	{# OR check #}
+ *  {{ $role('atLeast', 'operator') }}                   	{# operator or higher #}
+ *  {{ $role('rank') }}                                  	{# numeric rank, e.g. 9 #}
+ *  {{ $role('label') }}                                 	{# localized label for current user #}
+ *
  *
  * Notes:
  * - Ensure http.base_url is absolute and stable across environments.
@@ -211,6 +240,8 @@ use LiteView\LiteView;
  *   exposed as public_root_url for templates that need absolute canonical links.
  * - Keep templates ASCII-only when possible; apply the configured charset when
  *   escaping values you embed manually (the engine typically handles escaping).
+ * - Role helper's atLeast() assumes higher-privilege roles have higher numeric
+ *   ids in cfg->auth->roles. Example: admin=9 > manager=7 > operator=5 > user=1.
  *
  * @throws \InvalidArgumentException If $templateLayer is not a valid "vendor/package" slug.
  */
@@ -691,7 +722,7 @@ class View extends BaseService {
 					throw new \RuntimeException(
 						"Text service not available. Install 'citomni/infrastructure' and ensure the 'txt' service provider is registered in /config/providers.php."
 					);
-				}				
+				}
 				return $this->app->txt->get($key, $file, $layer, $default, $vars);
 			},
 
@@ -864,24 +895,74 @@ class View extends BaseService {
 
 
 			/**
-			 * Role helper (property-style and labels).
-			 * Supports role checks and label lookups via RoleGate.
+			 * Role helper (property-style checks, threshold checks, and labels).
+			 * Thin proxy to RoleGate.
 			 *
 			 * Usage in template:
-			 *   {{ $role('is', 'admin') }}         // true if current user is admin
-			 *   {{ $role('any', 'manager','op') }} // true if current role matches any
-			 *   {{ $role('label') }}               // localized label for current user
-			 *   {{ $role('labelOf', 9) }}          // label for specific id
-			 *   {{ $role('labels') }}              // map of id => label
+			 *
+			 *   {{ $role('is', 'admin') }}
+			 *   True if current user exactly matches the named role.
+			 *   (Equivalent to $this->app->role->admin in PHP.)
+			 *
+			 *   {{ $role('any', 'manager', 'operator') }}
+			 *   True if the current role matches ANY of the provided roles
+			 *   (names or numeric ids).
+			 *
+			 *   {{ $role('atLeast', 'operator') }}
+			 *   True if the current user's role is operator-or-higher. Requires that
+			 *   higher-privilege roles use higher numeric ids in config.
+			 *
+			 *   {{ $role('rank') }}
+			 *   Returns the numeric role id (tinyint) of the current user,
+			 *   e.g. 9 for admin. Useful for debugging or if you want to do
+			 *   manual comparisons in the template (but prefer atLeast()).
+			 *
+			 *   {{ $role('label') }}
+			 *   Localized label for the current user's role (from user_roles.php).
+			 *
+			 *   {{ $role('labelOf', 9) }}
+			 *   Localized label for role id 9.
+			 *
+			 *   {{ $role('labels') }}
+			 *   Map of {id => localized label} for all configured roles.
+			 *
+			 * Notes:
+			 * - In dev, unknown helper names throw \InvalidArgumentException.
+			 * - In other environments, unknown helper names return false.
 			 */
 			'role' => function (string $fn, mixed ...$args) {
+				
+				if (!$this->app->hasService('role') || !$this->app->hasPackage('citomni/auth')) {
+					throw new \RuntimeException(
+						"Role service not available. Install 'citomni/auth' and ensure the 'RoleGate' service provider is registered as 'role'."
+					);
+				}
+				
 				$gate = $this->app->role;
+
 				switch ($fn) {
-					case 'label':   return $gate->label(...$args);           // $role('label')
-					case 'labelOf': return $gate->labelOf(...$args);         // $role('labelOf', 9)
-					case 'labels':  return $gate->labels(...$args);          // $role('labels')
-					case 'is':      return $gate->__get((string)$args[0]);   // $role('is','admin')
-					case 'any':     return $gate->any(...$args);             // $role('any','manager','operator')
+					// Labels / metadata
+					case 'label':
+						return $gate->label(...$args);         // $role('label')
+					case 'labelOf':
+						return $gate->labelOf(...$args);       // $role('labelOf', 9)
+					case 'labels':
+						return $gate->labels(...$args);        // $role('labels')
+
+					// Boolean checks
+					case 'is':
+						return $gate->__get((string)$args[0]); // $role('is','admin')
+					case 'any':
+						return $gate->any(...$args);           // $role('any','manager','operator')
+
+					// Threshold / hierarchy check
+					case 'atLeast':
+						return $gate->atLeast(...$args);       // $role('atLeast','operator')
+
+					// Numeric rank (tinyint role id)
+					case 'rank':
+						return $gate->rank();                  // $role('rank')
+
 					default:
 						if (\defined('CITOMNI_ENVIRONMENT') && \CITOMNI_ENVIRONMENT === 'dev') {
 							throw new \InvalidArgumentException("Unknown role helper '{$fn}'.");
@@ -889,6 +970,7 @@ class View extends BaseService {
 						return false;
 				}
 			},
+
 
 		];
 	}
