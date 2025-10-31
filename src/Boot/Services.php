@@ -40,7 +40,8 @@ final class Services {
 		'flash'			=> \CitOmni\Http\Service\Flash::class,
 		'datetime'		=> \CitOmni\Http\Service\Datetime::class,
 		'cookie'		=> \CitOmni\Http\Service\Cookie::class,
-		'view'			=> \CitOmni\Http\Service\View::class,
+		'view'			=> \CitOmni\Http\Service\View::class,  // Replaced by TemplateEngine, but kept for now for back compat
+		'tplEngine'		=> \CitOmni\Http\Service\TemplateEngine::class,
 		'security'		=> \CitOmni\Http\Service\Security::class,
 		'nonce'			=> \CitOmni\Http\Service\Nonce::class,
 		'maintenance'	=> \CitOmni\Http\Service\Maintenance::class,

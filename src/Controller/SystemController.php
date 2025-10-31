@@ -110,10 +110,10 @@ final class SystemController extends BaseController {
 		// - allowlist includes 'header_signature' (a header name, not a secret)
 		// - includeEnvMerged = true to synthesize merged cfg for dev|stage|prod
 		$g = $this->appinfoGenerator(
-			false,							// $unredacted
-			['header_signature'],			// $allowlistKeys
-			true,							// $includeEnvMerged
-			['dev', 'stage', 'prod']		// $envs
+			false,									// $unredacted
+			['header_signature','secret_file','citomni/auth'],	// $allowlistKeys
+			true,									// $includeEnvMerged
+			['dev', 'stage', 'prod']				// $envs
 		);
 
 		// Robots + no-cache
@@ -262,7 +262,7 @@ final class SystemController extends BaseController {
 		// Single source of truth for all data (including per-env merged cfg)
 		$g = $this->appinfoGenerator(
 			$unredacted,  // $unredacted (disable masking when true)
-			['header_signature','secret_file'],  // $allowlistKeys
+			['header_signature','secret_file','citomni/auth'],  // $allowlistKeys
 			true,  // $includeEnvMerged
 			['dev', 'stage', 'prod']  // $envs
 		);

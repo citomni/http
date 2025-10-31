@@ -343,58 +343,157 @@ final class Config {
 			'form_action_switching'	=> true, // true | false; Enables dynamic form action switching to prevent bot submissions.
 		],
 
+
 		
 		/*
 		 *------------------------------------------------------------------
 		 * VIEW / CONTENT / TEMPLATE ENGINE
 		 *------------------------------------------------------------------
 		 */
-		 
 		'view' => [
-		
-			// Cache		
-			'cache_enabled'			=> true,   // Cache enabled
 
-			// Optimize HTML-output
-			'trim_whitespace'		=> false, // Removes linebreaks and tabs
-			'remove_html_comments'	=> false, // Removes HTML-comments from HTML-output
-			
-			'allow_php_tags'		=> true,
+			// -------------------------------------------------
+			// Template roots / layers
+			// -------------------------------------------------
+			//
+			// Each key is a "layer" slug used in template refs like:
+			//   "member/home.html@app"
+			//   "admin/layout.html@citomni/admin"
+			//
+			// Each value is an absolute directory path where that layer's
+			// templates live (no trailing slash required; we'll rtrim it).
+			//
+			// NOTE: You MUST provide at least 'app' here in the final app config,
+			// otherwise nothing can render. Core/provider layers (citomni/auth etc.)
+			// are registered by those packages.
+			//
+			'template_layers' => [			
+				'app' 			=> \CITOMNI_APP_PATH . '/templates',
+				'citomni/http'	=> \CITOMNI_APP_PATH . '/vendor/citomni/http/templates',
+			],
 
-			// Marketing scripts (to be inserted in <HEAD> of templates)
-			'marketing_scripts' 	=>	'',
 
-			// Global variables for use in all templates.
-			// Any values placed here will automatically be available in every template rendered by the framework.
-			// Ideal for site-wide settings, company info, custom flags, or any data that needs to be accessible across all views.
-			'view_vars' => [],
-			
+			// -------------------------------------------------
+			// Cache / compilation
+			// -------------------------------------------------
+			//
+			// cache_enabled:
+			//   true  = compile template -> write to /var/cache -> reuse if fresh
+			//   false = always recompile (dev convenience, slower)
+			//
+			'cache_enabled'         => true,
 
-			/**
-			 * vars_providers: declarative, low-overhead dynamic view variables.
-			 *
-			 * Shape (list of maps):
-			 * - var     (string, required): template variable name (e.g., 'header').
-			 * - call    (string|array, required): callable to obtain the value.
-			 *           Supported forms:
-			 *             1) "FQCN::method" (static)
-			 *             2) ["class" => FQCN, "method" => "method"]  // instantiates with (App $app)
-			 *             3) ["service" => "id", "method" => "method"] // calls $app->id->method(...)
-			 * - include (string[] optional): URI matchers that ENABLE this var.
-			 * - exclude (string[] optional): URI matchers that DISABLE this var.
-			 *
-			 * URI matchers:
-			 * - If a pattern starts and ends with "~", it is treated as a raw regex (e.g., "~^/admin/~").
-			 * - Otherwise, it is treated as a glob-like prefix with "*" wildcard (converted once to regex).
-			 *   Examples: "/nyheder/*", "/sider/*", "/".
-			 *
-			 * Matching rules:
-			 * - If include is empty/missing => included by default (unless excluded).
-			 * - If include has entries => at least one must match AND not excluded.
-			 */
-			'vars_providers' => [],
+			// trim_whitespace:
+			//   Collapse redundant whitespace in the FINAL HTML output
+			//   (outside <pre>, <code>, <textarea>, <script>, <style>).
+			//   Good for prod if you like "pretty lean markup".
+			//
+			'trim_whitespace'       => false,
+
+			// remove_html_comments:
+			//   Strip <!-- ... --> comments from the FINAL HTML output
+			//   (but keep IE conditional comments etc.).
+			//
+			'remove_html_comments'  => false,
+
+			// allow_php_tags:
+			//   Controls `{? ... ?}` and `{?= ... ?}` inline PHP in templates.
+			//   We default to true. Set false for paranoid deployments.
+			//
+			'allow_php_tags'        => true,
+
+
+			// -------------------------------------------------
+			// Asset/versioning helpers
+			// -------------------------------------------------
+			//
+			// asset_version:
+			//   Cache-buster token used by $asset('/css/app.css') -> /css/app.css?v=123
+			//   Can be commit hash, build id, timestamp string, whatever.
+			//
+			'asset_version'         => '',
+
+
+			// -------------------------------------------------
+			// Global head/scripts snippet
+			// -------------------------------------------------
+			//
+			// marketing_scripts:
+			//   Raw HTML/JS snippet injected into templates via the global var
+			//   `marketing_scripts`. Typical use: analytics tags, marketing pixels,
+			//   cookie consent loader, etc.
+			//
+			'marketing_scripts'     => '',
+
+
+			// -------------------------------------------------
+			// Global variables across ALL templates
+			// -------------------------------------------------
+			//
+			// view_vars:
+			//   Arbitrary scalar/array data you want available everywhere.
+			//   Example:
+			//     'view_vars' => [
+			//         'company_phone' => '+45 12 34 56 78',
+			//         'company_name'  => 'Aserno ApS',
+			//     ],
+			//
+			// Those keys become available in templates under `view_vars`.
+			// (You still also get `app_name`, `base_url`, `$url()`, etc.)
+			//
+			'view_vars'             => [],
+
+
+			// -------------------------------------------------
+			// Dynamic per-request vars (vars_providers)
+			// -------------------------------------------------
+			//
+			// vars_providers:
+			//   Declarative "auto inject this var into views IF the current request path matches X".
+			//
+			// Shape per entry:
+			//   [
+			//     'var'     => 'headerMenu', // required, becomes $headerMenu in template scope
+			//     'call'    => ['service' => 'sitewide', 'method' => 'headerMenu'], // required
+			//     'include' => ['/member/*', '/account/*'], // optional
+			//     'exclude' => ['/member/login', '/member/register'], // optional
+			//   ],
+			// 
+			//	[
+			//		'var'     => 'accountMenu',
+			//		'call'    => ['class' => \CitOmni\Auth\Ui\AccountMenuProvider::class, 'method' => 'menu'],
+			//		'include' => ['/member/*'],
+			//		'exclude' => [],
+			//	],
+			//
+			// Matching rules:
+			//   - include empty/missing  => include by default (unless excluded)
+			//   - include non-empty      => path must match at least one include pattern
+			//   - exclude always wins    => if path matches exclude => skip var
+			//
+			// Supported 'call' forms:
+			//   1) "FQCN::method"                  // static, called as FQCN::method(App $app)
+			//   2) ['class' => FQCN, 'method' => 'payload'] // new FQCN($app)->payload()
+			//   3) ['service' => 'id', 'method' => 'payload'] // $this->app->id->payload()
+			//
+			// Patterns:
+			//   - "/foo/*" => prefix/glob
+			//   - "/"      => only frontpage
+			//   - "*"      => everything
+			//   - "~^/admin/~" => raw regex if it starts+ends with "~"
+			//
+			'vars_providers'        => [
+				// Example:
+				// [
+				//     'var'     => 'header',
+				//     'call'    => ['service' => 'sitewide', 'method' => 'headerPayload'],
+				//     'include' => ['*'],           // everywhere
+				//     'exclude' => ['/login', '/reset-password/*'],
+				// ],
+			],
 
 		],
+
 
 
 		/**
