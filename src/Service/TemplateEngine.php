@@ -36,20 +36,46 @@ use CitOmni\Kernel\Service\BaseService;
  *   incorporate both "path" and "layer".
  *
  * Configuration keys read (cfg->view):
- * - template_layers              (array<string,string>) map of layer => absolute dir.
- * - cache_enabled                (bool)   enable compiled PHP cache reuse.
- * - trim_whitespace              (bool)   collapse redundant whitespace in non-sensitive regions.
- * - remove_html_comments         (bool)   strip `<!-- ... -->` HTML comments.
- * - allow_php_tags               (bool)   allow `{? ... ?}` syntax in templates.
- * - asset_version                (string) cache-busting token for $asset().
- * - marketing_scripts            (string) passthrough into all templates.
- * - view_vars                    (array)  passthrough into all templates.
- * - vars_providers               (array<int,array{
- *                                    var:string,
- *                                    call:mixed,
- *                                    include?:string[],
- *                                    exclude?:string[]
- *                               }> ) dynamic vars per request path.
+ *
+ * - template_layers (array<string,string>)
+ *     Map of logical layer => absolute template dir.
+ *     Example:
+ *       'app'             => '/var/www/app/templates'
+ *       'citomni/admin'   => '/var/www/app/vendor/citomni/admin/templates'
+ *
+ * - cache_enabled (bool)
+ *     Reuse compiled templates between requests if mtimes haven't changed.
+ *
+ * - trim_whitespace (bool)
+ *     Collapse redundant whitespace outside of sensitive tags (<pre>, <code>, etc.).
+ *
+ * - remove_html_comments (bool)
+ *     Strip ordinary HTML comments ("<!-- ... -->") from final output.
+ *
+ * - allow_php_tags (bool)
+ *     Allow `{? ... ?}` / `{?= ... ?}` inline-php blocks in templates.
+ *
+ * - asset_version (string)
+ *     Global cache-busting token appended by $asset().
+ *
+ * - marketing_scripts (string)
+ *     Raw HTML (analytics, tracking) injected into globals as $marketing_scripts.
+ *
+ * - icons (array<string,string>)
+ *     Map icon name => inline SVG string. Used by $icon('name').
+ *
+ * - vars (array<int,array>)
+ *     Declarative, path-scoped view variables.
+ *     Each entry decides:
+ *       - which var name to expose in templates (`var`),
+ *       - whether it's 'static' or 'dynamic' (`type`),
+ *       - where the data comes from (`source`),
+ *       - and which request paths it should apply to (`include` / `exclude`).
+ *
+ *     We compile this into $this->compiledVars with ready-to-use regexes so that,
+ *     for a given request path, we can cheaply inject:
+ *       - static data blobs (menus, etc.)
+ *       - dynamic provider output (header models, etc.).
  *
  * Behavior:
  * - render() prints final HTML; renderToString() returns it as string.
@@ -106,151 +132,236 @@ final class TemplateEngine extends BaseService {
 	/** @var string */
 	private string $assetVersion = '';
 
-	/** @var string */
+	/** @var array<string,string> Inline SVG icons (iconId => '<svg...>') */
+	private array $icons = [];
+
+	/** @var string Raw HTML snippet (analytics, marketing tags) injected globally */
 	private string $marketingScripts = '';
 
-	/** @var array<string,mixed> */
-	private array $baseViewVars = [];
-
 	/**
+	 * Precompiled, path-scoped template vars from cfg->view->vars.
+	 *
+	 * Each entry:
+	 * - var   : string   Final variable name in template scope (e.g. "admin_nav").
+	 * - type  : 'static'|'dynamic'
+	 *           static  => inject literal "data"
+	 *           dynamic => invoke "call" provider
+	 * - data  : mixed    Present if static
+	 * - call  : mixed    Present if dynamic (FQCN::method / ['class'=>..] / ['service'=>..])
+	 * - ire   : string[] Compiled include regexes
+	 * - ere   : string[] Compiled exclude regexes
+	 *
 	 * @var array<int, array{
 	 *    var:string,
-	 *    call:mixed,
-	 *    inc:array<int,string>,
-	 *    exc:array<int,string>,
+	 *    type:'static'|'dynamic',
+	 *    data?:mixed,
+	 *    call?:mixed,
 	 *    ire:array<int,string>,
 	 *    ere:array<int,string>,
 	 * }>
 	 */
-	private array $compiledProviders = [];
+	private array $compiledVars = [];
 
-	/** @var array<string,mixed>|null Cached globals for this request */
+	/** @var array<string,mixed>|null Cached global vars+helpers for this request */
 	private ?array $globals = null;
+
 
 
 	/**
 	 * One-time initialization for this request/process.
 	 *
 	 * Behavior:
-	 * - Reads cfg->view (and related cfg nodes like http.identity etc.).
-	 * - Normalizes `view.template_layers` into $layersMap (validated layer slugs,
-	 *   stripped trailing slash). Keys are layer names ("app" or "vendor/package"),
-	 *   values are absolute template root directories.
-	 * - Resolves flags for whitespace trimming, HTML comment stripping, and
-	 *   inline-PHP allowance.
-	 * - Pre-compiles `view.vars_providers[*].include` / `exclude` patterns into
-	 *   anchored regexes for path matching.
-	 * - Memoizes cacheDir (CITOMNI_APP_PATH . "/var/cache").
+	 * - Reads relevant `cfg->view` nodes and snapshots them into cheap local scalars/arrays.
+	 *   We do this up front so later hot paths do not keep walking the cfg wrapper.
+	 * - Normalizes associative cfg maps (template_layers, vars, icons) into plain arrays.
+	 *   CitOmni config wrappers internally expose data under "CitOmni\Kernel\Cfgdata", so we
+	 *   flatten that here. After this step we can safely do $this->icons['home'] at runtime.
+	 * - Pre-compiles cfg->view->vars (static + dynamic scoped vars) into $this->compiledVars
+	 *   with ready-to-use regex filters (include/exclude).
+	 * - Captures feature flags (whitespace trimming, comment stripping, etc.).
+	 * - Resolves deterministic cache dir.
 	 *
 	 * Notes:
-	 * - We intentionally copy cfg scalars/arrays into private properties to avoid
-	 *   walking the cfg wrapper repeatedly in hot paths.
+	 * - We do not realpath() template layer dirs here. Boundary checks happen in loadSource()
+	 *   at file-read time. That keeps init() cheap and lets providers mount templates via
+	 *   symlinks without us "helpfully" rewriting paths.
 	 *
 	 * @return void
 	 */
 	protected function init(): void {
+		
+		// Snapshot cfg root for the view layer.
+		// If cfg->view is missing, fall back to an empty stdClass-like object for convenience.
 		$viewCfg = $this->app->cfg->view ?? (object)[];
 
-		// Snapshot and clear options (service-map overrides)
+		// Snapshot and clear service options.
+		// Rationale:
+		// - The service can be constructed with "options" from the service map.
+		// - We read them once here (they override cfg values).
+		// - Then we drop $this->options to avoid carrying mutable state.
 		$opt = $this->options;
 		$this->options = [];
-		
 
-		// 1) layersMap: Required config node view.template_layers (layer => absolute dir)
 
-		// Step 1a: pull template_layers out of cfg in a predictable plain array form
-		$tplLayersNode = $viewCfg->template_layers ?? [];
-
-		// If it's our config wrapper object, try to get raw array out of it.
-		// We assume the wrapper has either ->toArray() or behaves like iterable public props.
-		// Fallback: cast to array and unwrap one level if needed.
-		if (\is_object($tplLayersNode)) {
-			// Prefer an explicit toArray() if available
-			if (\method_exists($tplLayersNode, 'toArray')) {
-				$rawLayers = (array)$tplLayersNode->toArray();
-			} else {
-				// Generic fallback: cast and flatten one level if it looks like
-				// ["Some\\Internal\\Cfgdata" => [ real stuff ]]
-				$tmp = (array)$tplLayersNode;
-				if (\count($tmp) === 1) {
-					$firstVal = \reset($tmp);
-					if (\is_array($firstVal)) {
-						$rawLayers = $firstVal;
-					} else {
-						$rawLayers = $tmp;
-					}
-				} else {
-					$rawLayers = $tmp;
-				}
-			}
-		} else {
-			// Normal case: already array in plain PHP config
-			$rawLayers = (array)$tplLayersNode;
-		}
-
-		// Step 1b: validate + store each layer
+		// ---------------------------------------------------------------------------------
+		// 1) Template layers map (layer => absolute dir)
+		//
+		// - view.template_layers is expected to be something like:
+		//     [
+		//       'app'              => '/var/www/myapp/templates',
+		//       'citomni/admin'    => '/var/www/myapp/vendor/citomni/admin/templates',
+		//       'aserno/byportal'  => '/var/www/myapp/vendor/aserno/byportal-core/templates',
+		//     ]
+		//
+		// - BUT: CitOmni config wrappers don't always give us a flat array. They wrap data
+		//   under "CitOmni\Kernel\Cfgdata", plus some cache metadata. normalizeCfgMap()
+		//   strips that so we end with a clean associative array we can iterate directly.
+		//
+		// - We validate each layer slug now (fail fast). "app" is allowed as a special case.
+		//   Everything else must look like "vendor/package".
+		//
+		// - We do NOT realpath() here; loadSource() enforces that templates can't escape
+		//   their configured root using ../ tricks. Doing it lazily keeps init() cheap.
+		// ---------------------------------------------------------------------------------
+		$rawLayers = $this->normalizeCfgMap($viewCfg->template_layers ?? []);
 		foreach ($rawLayers as $layerKey => $pathVal) {
 			$layer = (string)$layerKey;
 
-			// Validate layer slug: either "app" or "vendor/package"
+			// Validate layer slug: "app" or "vendor/package" (letters, digits, dot, dash, underscore).
 			if ($layer !== 'app' && !\preg_match('~^[a-z0-9._-]+/[a-z0-9._-]+$~i', $layer)) {
 				throw new \InvalidArgumentException("TemplateEngine: Invalid layer slug '{$layer}'.");
 			}
 
-			// Must be a non-empty string dir
+			// The configured dir must be a non-empty string.
 			if (!\is_string($pathVal) || $pathVal === '') {
 				throw new \InvalidArgumentException(
 					"TemplateEngine: template_layers['{$layer}'] must be a non-empty string (absolute directory)."
 				);
 			}
 
-			$abs = \rtrim($pathVal, "/\\"); // now it's guaranteed string
-
-			// We do not realpath() up front; loadSource() enforces boundary later.
+			// We just trim trailing slashes here. We do NOT resolve symlinks at this stage.
+			$abs = \rtrim($pathVal, "/\\");
 			$this->layersMap[$layer] = $abs;
 		}
 
 
-		// 2) Cache / flags (options can override cfg if present)
+		// ---------------------------------------------------------------------------------
+		// 2) Rendering / compilation flags & toggles
+		//
+		// - Some flags can be overridden via service-map options when wiring the service.
+		//   Options win over cfg->view (predictable "last wins" semantics).
+		//
+		// - We coerce to bool so later checks are cheap.
+		//   This avoids repeatedly touching cfg->view in hot render paths.
+		// ---------------------------------------------------------------------------------
 		$this->cacheEnabled       = (bool)($opt['cache_enabled']        ?? $viewCfg->cache_enabled        ?? false);
 		$this->trimWhitespace     = (bool)($opt['trim_whitespace']      ?? $viewCfg->trim_whitespace      ?? false);
 		$this->removeHtmlComments = (bool)($opt['remove_html_comments'] ?? $viewCfg->remove_html_comments ?? false);
 		$this->allowPhpTags       = (bool)($opt['allow_php_tags']       ?? $viewCfg->allow_php_tags       ?? true);
 
-		// 3) Other view config / passthroughs
-		$this->assetVersion       = (string)($opt['asset_version']      ?? $viewCfg->asset_version      ?? '');
-		$this->marketingScripts   = (string)($viewCfg->marketing_scripts  ?? '');
-		$this->baseViewVars       = (array)($viewCfg->view_vars           ?? []);
 
-		// 4) Pre-compile vars_providers (include/exclude rules -> regex)
-		$provCfg = (array)($viewCfg->vars_providers ?? []);
-		foreach ($provCfg as $row) {
+		// ---------------------------------------------------------------------------------
+		// 3) Passthrough view config (asset versioning, marketing snippets, globals)
+		//
+		// - assetVersion is used by the $asset() helper for cache-busting (?v=...).
+		// - marketingScripts is dumped into all templates (e.g. analytics tags).
+		// - icons is also normalized into a flat associative array (id => raw <svg>).
+		//   This feeds the $icon('home') helper exposed in buildGlobals().
+		// ---------------------------------------------------------------------------------
+		$this->assetVersion     = (string)($opt['asset_version']      ?? $viewCfg->asset_version      ?? '');
+		$this->marketingScripts = (string)($viewCfg->marketing_scripts ?? '');
+
+		// Inline SVG icons (string id => SVG markup). Used by $icon('foo') in templates.
+		$this->icons            = $this->normalizeCfgMap($viewCfg->icons ?? []);
+
+
+		// 4) Pre-compile scoped view vars (static + dynamic)
+		//
+		// cfg->view->vars is a list of rows. Each row decides:
+		// - which var name to expose in templates,
+		// - whether it is "static" or "dynamic",
+		// - which request paths it applies to (include/exclude),
+		// - and where its value comes from ("source").
+		//
+		// Example rows (see your proposal):
+		//   type=dynamic: call a provider for each request
+		//   type=static:  reuse a predefined array structure (cheap, no call)
+		//
+		// We normalize that into $this->compiledVars so runtime resolution is cheap.
+		$this->compiledVars = [];
+
+		$varsCfg = (array)($viewCfg->vars ?? []);
+		foreach ($varsCfg as $row) {
 			if (!\is_array($row) || $row === []) {
 				continue;
 			}
-			$var  = (string)($row['var']  ?? '');
-			$call = $row['call'] ?? null;
-			if ($var === '' || $call === null) {
-				// Dev philosophy: Fail fast. Prod will blow too, that's fine.
+
+			$varName = (string)($row['var'] ?? '');
+			$type    = (string)($row['type'] ?? '');
+			$source  = $row['source'] ?? null;
+
+			if ($varName === '' || $type === '' || $source === null) {
 				throw new \RuntimeException(
-					"TemplateEngine: vars_providers entries require non-empty 'var' and 'call'."
+					"TemplateEngine: view.vars entries require non-empty 'var', 'type', and 'source'."
 				);
 			}
+
+			// Normalize include/exclude lists (can be explicit PCRE "~^...~" or globs "/foo/*")
 			$inc = \array_values((array)($row['include'] ?? []));
 			$exc = \array_values((array)($row['exclude'] ?? []));
-			$this->compiledProviders[] = [
-				'var'  => $var,
-				'call' => $call,
-				'inc'  => $inc,
-				'exc'  => $exc,
-				'ire'  => \array_map([$this, 'compilePathMatcher'], $inc),
-				'ere'  => \array_map([$this, 'compilePathMatcher'], $exc),
-			];
+
+			// Precompile patterns now so runtime only does preg_match on anchored regex.
+			$ire = \array_map([$this, 'compilePathMatcher'], $inc);
+			$ere = \array_map([$this, 'compilePathMatcher'], $exc);
+
+			if ($type === 'static') {
+				// Here 'source' is literal data (array/string/whatever),
+				// and we will inject it directly at request time.
+				$this->compiledVars[] = [
+					'var'   => $varName,
+					'type'  => 'static',
+					'data'  => $source,
+					'ire'   => $ire,
+					'ere'   => $ere,
+				];
+				continue;
+			}
+
+			if ($type === 'dynamic') {
+				// Here 'source' must describe a callable:
+				// - "FQCN::method"
+				// - ['class' => FQCN, 'method' => 'm']
+				// - ['service' => 'id', 'method' => 'm']
+				//
+				// We'll just store it as 'call' and reuse invokeProvider() at runtime.
+				$this->compiledVars[] = [
+					'var'   => $varName,
+					'type'  => 'dynamic',
+					'call'  => $source,
+					'ire'   => $ire,
+					'ere'   => $ere,
+				];
+				continue;
+			}
+
+			throw new \RuntimeException(
+				"TemplateEngine: Unsupported view.vars type '{$type}' for var '{$varName}'."
+			);
+
 		}
 
-		// 5) Cache dir (deterministic)
+
+		// ---------------------------------------------------------------------------------
+		// 5) Cache dir
+		//
+		// - All compiled templates are written to CITOMNI_APP_PATH . '/var/cache'.
+		// - We don't allow overriding this via config because predictable layout
+		//   is part of CitOmni's "no guessing" philosophy (and deploy tooling
+		//   assumes this location).
+		// ---------------------------------------------------------------------------------
 		$this->cacheDir = \CITOMNI_APP_PATH . '/var/cache';
 	}
+
 
 
 	/**
@@ -313,7 +424,7 @@ final class TemplateEngine extends BaseService {
 	 *
 	 * Precedence (left wins on key collision):
 	 * - $data  (controller-supplied vars) >
-	 * - $dyn   (dynamic per-request vars from vars_providers) >
+	 * - $scoped   (dynamic per-request vars from cfg.view.vars) >
 	 * - $glb   (globals)
 	 *
 	 * @param array<string,mixed> $data
@@ -323,9 +434,9 @@ final class TemplateEngine extends BaseService {
 		$glb = $this->globals ??= $this->buildGlobals();
 
 		$pathRel = $this->appRelativePath($this->app->request->path());
-		$dyn = $this->buildDynamicVars($pathRel);
+		$scoped  = $this->buildScopedVarsForPath($pathRel);
 
-		return $data + $dyn + $glb;
+		return $data + $scoped + $glb;
 	}
 
 
@@ -334,7 +445,7 @@ final class TemplateEngine extends BaseService {
 	 *
 	 * Exposes (keys in the template scope):
 	 * - Scalars: app_name, base_url, public_root_url, language, charset,
-	 *   marketing_scripts, view_vars.
+	 *   marketing_scripts, vars.
 	 * - Security flags: csrf_protection, honeypot_protection,
 	 *   form_action_switching, captcha_protection.
 	 * - Environment info: env => { name: string, dev: bool }.
@@ -370,7 +481,6 @@ final class TemplateEngine extends BaseService {
 			// --- View passthroughs (global marketing snippets etc.)
 
 			'marketing_scripts'=> $this->marketingScripts,
-			'view_vars'        => $this->baseViewVars,
 
 			// --- Security feature flags (informational for UI text, badges, warnings etc.)
 
@@ -635,6 +745,38 @@ final class TemplateEngine extends BaseService {
 
 
 			/**
+			 * $icon: Inline SVG icon lookup.
+			 *
+			 * Typical usage (TRIPLE braces for raw HTML):
+			 *   {{{ $icon('home') }}}
+			 *   <button class="nav-btn" aria-label="Profile">{{{ $icon('user') }}}</button>
+			 *
+			 * Behavior:
+			 * - Returns a `<svg ...>` string with no wrapper span/div.
+			 * - SVGs are shipped with `stroke="currentColor"` (or fill), so you can
+			 *   tint via CSS `color:` on the parent.
+			 *
+			 * Errors:
+			 * - In dev/stage, unknown icon keys throw \RuntimeException (fail fast).
+			 * - In prod, unknown icon keys return '' (quietly hide the icon instead
+			 *   of nuking the whole page for a missing cosmetic asset).
+			 */
+			'icon' => function (string $name): string {
+				
+				$key = (string)$name;
+				if (isset($this->icons[$key])) {
+					return $this->icons[$key];
+				}
+
+				$isDev = \defined('CITOMNI_ENVIRONMENT') && (\CITOMNI_ENVIRONMENT === 'dev' || \CITOMNI_ENVIRONMENT === 'stage');
+				if ($isDev) {
+					throw new \RuntimeException("Icon '{$key}' not found in view.icons.");
+				}
+				return '';
+			},
+
+
+			/**
 			 * $role: Role/permission helper for templates (proxy to RoleGate).
 			 *
 			 * Typical usage:
@@ -709,7 +851,9 @@ final class TemplateEngine extends BaseService {
 						return $gate->rank();
 
 					default:
-						if (\defined('CITOMNI_ENVIRONMENT') && \CITOMNI_ENVIRONMENT === 'dev') {
+						$isDevLike = \defined('CITOMNI_ENVIRONMENT')
+							&& (\CITOMNI_ENVIRONMENT === 'dev' || \CITOMNI_ENVIRONMENT === 'stage');
+						if ($isDevLike) {
 							throw new \InvalidArgumentException("Unknown role helper '{$fn}'.");
 						}
 						return false;
@@ -717,43 +861,86 @@ final class TemplateEngine extends BaseService {
 			},
 		];
 	}
-
-
+	
+	
 	/**
-	 * Build dynamic vars by evaluating matched providers for the current request path.
+	 * buildScopedVarsForPath: Resolve all configured view vars (static+dynamic)
+	 * that apply to the current request path.
 	 *
-	 * @param string $relPath App-relative path like "/nyheder/foo-a123.html".
-	 * @return array<string,mixed>
+	 * @param string $relPath Normalized app-relative path (e.g. "/admin/users.html").
+	 * @return array<string,mixed> Map of varName => value for this request.
 	 */
-	private function buildDynamicVars(string $relPath): array {
-		if ($this->compiledProviders === []) {
+	private function buildScopedVarsForPath(string $relPath): array {
+		if ($this->compiledVars === []) {
 			return [];
 		}
+
 		$out = [];
-		foreach ($this->compiledProviders as $p) {
-			if (!$this->pathMatches($relPath, $p['ire'], $p['ere'])) {
+
+		foreach ($this->compiledVars as $v) {
+			// Check if this var applies on this path
+			if (!$this->pathMatches($relPath, $v['ire'], $v['ere'])) {
 				continue;
 			}
-			$out[$p['var']] = $this->invokeProvider($p['call'], $p['var']);
+
+			if ($v['type'] === 'static') {
+				// Just copy the data directly
+				$out[$v['var']] = $v['data'];
+				continue;
+			}
+
+			// dynamic
+			$out[$v['var']] = $this->invokeProvider($v['call'], $v['var']);
 		}
+
 		return $out;
-	}
+	}	
 
 
 	/**
 	 * Invoke a configured provider call deterministically.
 	 *
-	 * Supported forms:
+	 * This is how we resolve "dynamic" vars from cfg->view->vars.
+	 * In cfg->view->vars each row can declare:
+	 *
+	 *   [
+	 *     'var'    => 'header',        // becomes $header in template scope
+	 *     'type'   => 'dynamic',       // <- this path goes through invokeProvider()
+	 *     'source' => ['service' => 'sitewide', 'method' => 'header'],
+	 *     ... include/exclude ...
+	 *   ]
+	 *
+	 * During init(), we normalize that row into $this->compiledVars[]:
+	 *
+	 *   [
+	 *     'var'  => 'header',
+	 *     'type' => 'dynamic',
+	 *     'call' => ['service' => 'sitewide', 'method' => 'header'],
+	 *     'ire'  => [...compiled include regexes...],
+	 *     'ere'  => [...compiled exclude regexes...],
+	 *   ]
+	 *
+	 * Then at request time, buildScopedVarsForPath() says:
+	 *   $out['header'] = $this->invokeProvider($v['call'], 'header');
+	 *
+	 * Supported forms for $call:
+	 *
 	 * - "FQCN::method"
-	 *     Static call. We call ClassName::method($app). The method must exist and is
-	 *     expected to accept the App as its only parameter (or at least be callable with it).
+	 *     Static call.
+	 *     We call ClassName::method($app).
+	 *     The method must exist and is expected to accept the App as its only parameter
+	 *     (or at least be callable with it).
 	 *
 	 * - ['class' => FQCN, 'method' => 'm']
-	 *     Instance call. We instantiate new FQCN($app) and then call ->m() on it.
+	 *     Instance call.
+	 *     We instantiate new FQCN($this->app) and then call ->m() on that instance.
+	 *     The method must exist on that class.
 	 *
 	 * - ['service' => 'id', 'method' => 'm']
-	 *     Service call. We grab $this->app->{id} (must be an existing Service in the app)
-	 *     and then call ->m() on that object.
+	 *     Service call.
+	 *     We grab $this->app->{id} (must be a registered Service on the App),
+	 *     then call ->m() on that object.
+	 *     The method must exist on that service.
 	 *
 	 * Behavior:
 	 * - Validates that the referenced class/service and method actually exist.
@@ -761,18 +948,24 @@ final class TemplateEngine extends BaseService {
 	 * - Throws \RuntimeException if the definition is malformed, the class/service
 	 *   doesn't exist, or the method is missing.
 	 * - The provider is assumed to be read-only / side effect free. It is only called
-	 *   if vars_providers says it should run for the current request path.
+	 *   if cfg->view->vars says it should run for the current request path
+	 *   (include/exclude patterns already matched before we get here).
 	 *
 	 * Notes:
-	 * - This is called once per provider per request (not per render() call per se),
-	 *   so work done here should still be reasonably cheap.
+	 * - This is called once per applicable dynamic var per request (not once per render()),
+	 *   so provider work should still be reasonably cheap.
 	 * - We deliberately do not guess or "best effort" unknown shapes; unsupported
 	 *   definitions fail fast so the developer sees the misconfiguration.
 	 *
-	 * @param mixed  $call    Provider call definition from cfg->view->vars_providers[*]['call'].
-	 * @param string $varName Name of the dynamic variable we are trying to populate (for error text).
+	 * @param mixed  $call    Callable definition for a dynamic var.
+	 *                        Originally comes from cfg->view->vars[*]['source']
+	 *                        for entries where type === 'dynamic', and was copied
+	 *                        to 'call' in $this->compiledVars during init().
 	 *
-	 * @return mixed Whatever the provider method returns.
+	 * @param string $varName Name of the dynamic variable we are trying to populate
+	 *                        (used only for clearer error messages).
+	 *
+	 * @return mixed          Whatever the provider method returns.
 	 *
 	 * @throws \RuntimeException On unknown call shape or missing class/method/service.
 	 */
@@ -1632,7 +1825,8 @@ final class TemplateEngine extends BaseService {
 		$seen = [];
 		foreach ($matches as $match) {
 			$name    = $match[1];
-			$content = \trim($match[2]);
+			// $content = \trim($match[2]);
+			$content = $match[2];
 
 			// Disallow duplicate block definitions in the same child template.
 			if (isset($seen[$name])) {
@@ -1718,6 +1912,7 @@ final class TemplateEngine extends BaseService {
 	 *                           its layer root.
 	 */
 	private function processIncludes(string $code, int $depth): string {
+		
 		if (\strpos($code, '{% include') === false) {
 			return $code;
 		}
@@ -1726,6 +1921,11 @@ final class TemplateEngine extends BaseService {
 		}
 
 		// Strip comments in the caller BEFORE scanning for includes, so commented-out includes are ignored
+		//
+		// Note: We intentionally run removeTemplateComments() again inside this method,
+		//       even though compile() already stripped comments earlier, because we ALSO
+		//       want to ignore commented-out includes INSIDE included partials. That way
+		//       `{# {% include "debug/panel@app" %} #}` never keeps a cache dependency alive.
 		$clean = $this->removeTemplateComments($code);
 
 		return \preg_replace_callback(
@@ -1909,5 +2109,68 @@ final class TemplateEngine extends BaseService {
 
 		return $deps;
 	}
+
+
+	/**
+	 * normalizeCfgMap: Convert a cfg node (which may be a CitOmni\Kernel\Cfgdata wrapper)
+	 * into a plain associative array<string,mixed>.
+	 *
+	 * Behavior:
+	 * - If $node is an object with toArray(), we trust that.
+	 * - Else cast to array and unwrap common ["CitOmni\\Kernel\\Cfgdata" => [...], "CitOmni\\Kernel\\Cfgcache" => []] shape.
+	 * - Else if it's already an array, also unwrap that shape.
+	 *
+	 * Note:
+	 * - This is intentionally scoped for config nodes that represent maps
+	 *   (id => value). Do not use this blindly on cfg trees that you expect
+	 *   to behave like objects with properties.
+	 *
+	 * @param mixed $node
+	 * @return array<string,mixed>
+	 */
+	private function normalizeCfgMap(mixed $node): array {
+		// 1) Object case
+		if (\is_object($node)) {
+			if (\method_exists($node, 'toArray')) {
+				$tmp = (array)$node->toArray();
+				return $this->unwrapCfgWrapperArray($tmp);
+			}
+
+			$tmp = (array)$node;
+			return $this->unwrapCfgWrapperArray($tmp);
+		}
+
+		// 2) Array case
+		if (\is_array($node)) {
+			return $this->unwrapCfgWrapperArray($node);
+		}
+
+		// 3) Fallback
+		return [];
+	}
+
+	/**
+	 * unwrapCfgWrapperArray: Strip CitOmni\Kernel\Cfgdata / Cfgcache wrapping.
+	 *
+	 * @param array<mixed> $tmp
+	 * @return array<string,mixed>
+	 */
+	private function unwrapCfgWrapperArray(array $tmp): array {
+		// Prefer explicit Cfgdata bucket if present
+		if (isset($tmp['CitOmni\\Kernel\\Cfgdata']) && \is_array($tmp['CitOmni\\Kernel\\Cfgdata'])) {
+			return $tmp['CitOmni\\Kernel\\Cfgdata'];
+		}
+
+		// Generic "single-element contains real data" pattern
+		if (\count($tmp) === 1) {
+			$firstVal = \reset($tmp);
+			if (\is_array($firstVal)) {
+				return $firstVal;
+			}
+		}
+
+		return $tmp;
+	}
+
 
 }

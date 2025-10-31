@@ -427,69 +427,192 @@ final class Config {
 
 
 			// -------------------------------------------------
-			// Global variables across ALL templates
+			// Scoped per-request view vars
 			// -------------------------------------------------
 			//
-			// view_vars:
-			//   Arbitrary scalar/array data you want available everywhere.
-			//   Example:
-			//     'view_vars' => [
-			//         'company_phone' => '+45 12 34 56 78',
-			//         'company_name'  => 'Aserno ApS',
-			//     ],
+			// 'vars' is a list of declarative rules that say:
+			//   "Inject this variable into the template scope
+			//    IF AND ONLY IF the current request path matches."
 			//
-			// Those keys become available in templates under `view_vars`.
-			// (You still also get `app_name`, `base_url`, `$url()`, etc.)
-			//
-			'view_vars'             => [],
-
-
-			// -------------------------------------------------
-			// Dynamic per-request vars (vars_providers)
-			// -------------------------------------------------
-			//
-			// vars_providers:
-			//   Declarative "auto inject this var into views IF the current request path matches X".
+			// Each entry describes:
+			//   - the variable name (becomes $<name> in templates),
+			//   - how/where to get its value,
+			//   - which request paths it applies to.
 			//
 			// Shape per entry:
-			//   [
-			//     'var'     => 'headerMenu', // required, becomes $headerMenu in template scope
-			//     'call'    => ['service' => 'sitewide', 'method' => 'headerMenu'], // required
-			//     'include' => ['/member/*', '/account/*'], // optional
-			//     'exclude' => ['/member/login', '/member/register'], // optional
-			//   ],
-			// 
-			//	[
-			//		'var'     => 'accountMenu',
-			//		'call'    => ['class' => \CitOmni\Auth\Ui\AccountMenuProvider::class, 'method' => 'menu'],
-			//		'include' => ['/member/*'],
-			//		'exclude' => [],
-			//	],
+			// [
+			//     'var'     => 'header',        // required
+			//                                   // becomes $header in the template scope
 			//
-			// Matching rules:
-			//   - include empty/missing  => include by default (unless excluded)
-			//   - include non-empty      => path must match at least one include pattern
-			//   - exclude always wins    => if path matches exclude => skip var
+			//     'type'    => 'dynamic',       // required, either "dynamic" or "static"
 			//
-			// Supported 'call' forms:
-			//   1) "FQCN::method"                  // static, called as FQCN::method(App $app)
-			//   2) ['class' => FQCN, 'method' => 'payload'] // new FQCN($app)->payload()
-			//   3) ['service' => 'id', 'method' => 'payload'] // $this->app->id->payload()
+			//     'include' => ['*'],           // optional
+			//                                   // list of allowed path patterns
+			//                                   // (see "Path matching rules" below)
 			//
-			// Patterns:
-			//   - "/foo/*" => prefix/glob
-			//   - "/"      => only frontpage
-			//   - "*"      => everything
-			//   - "~^/admin/~" => raw regex if it starts+ends with "~"
+			//     'exclude' => ['~^/admin/~'],  // optional
+			//                                   // list of forbidden path patterns
 			//
-			'vars_providers'        => [
-				// Example:
-				// [
-				//     'var'     => 'header',
-				//     'call'    => ['service' => 'sitewide', 'method' => 'headerPayload'],
-				//     'include' => ['*'],           // everywhere
-				//     'exclude' => ['/login', '/reset-password/*'],
-				// ],
+			//     'source'  => [
+			//         // For type "dynamic":
+			//         //   - how to compute the value at request time.
+			//         //
+			//         // Supported callable forms:
+			//         //   1) "FQCN::method"
+			//         //        Static call. Will be invoked as:
+			//         //        FQCN::method(App $app)
+			//         //
+			//         //   2) ['class' => FQCN, 'method' => 'm']
+			//         //        We construct: new FQCN($app), then call ->m()
+			//         //
+			//         //   3) ['service' => 'id', 'method' => 'm']
+			//         //        We reuse an existing service:
+			//         //          $this->app->id->m()
+			//         //
+			//         // For type "static":
+			//         //   - literal data structure to inject directly (array/scalar/etc.).
+			//         //
+			//
+			//         // Example for "dynamic":
+			//         'service' => 'sitewide',
+			//         'method'  => 'headerPayload',
+			//
+			//         // Example for "static":
+			//         // 'sidebar' => [
+			//         //     [ 'title' => 'Main', 'items' => [...]],
+			//         //     [ 'title' => 'System', 'items' => [...]],
+			//         // ],
+			//     ],
+			// ],
+			//
+			//
+			// Path matching rules:
+			// - We evaluate the *app-relative* request path, e.g. "/admin/users" or "/".
+			//
+			// - 'include':
+			//     * If 'include' is missing or empty => "included by default".
+			//     * If 'include' has patterns        => path must match at least one.
+			//
+			// - 'exclude':
+			//     * If path matches ANY exclude pattern => var is NOT injected.
+			//
+			// Pattern syntax:
+			//   "*"           => match everything
+			//   "/"           => only the frontpage "/"
+			//   "/foo/*"      => prefix/glob match
+			//   "news"        => treated as "/news" (for convenience)
+			//   "~^/admin/~"  => raw PCRE if it starts and ends with "~"
+			//
+			//
+			// Runtime behavior:
+			// - For each request, TemplateEngine picks all entries whose include/exclude
+			//   rules match the current path.
+			//
+			// - For "static" entries:
+			//     The 'source' block is injected directly, e.g.
+			//     $admin_nav = [ 'sidebar' => [...] ] in that template render only.
+			//
+			// - For "dynamic" entries:
+			//     TemplateEngine calls the described provider and injects the return
+			//     value. The provider is expected to be read-only / cheap. If it is
+			//     missing or invalid, we fail fast (RuntimeException).
+			//
+			// - Result: Templates just do `{{ $header['title'] }}` or loop `$admin_nav['sidebar']`,
+			//   and those vars only exist on pages where they are relevant.
+			//
+			// Example usage:
+			// [
+			//     // Dynamic header model for most public pages
+			//     'var'     => 'header',
+			//     'type'    => 'dynamic',
+			//     'include' => ['*'],
+			//     'exclude' => ['~^/admin/~'],
+			//     'source'  => [
+			//         'service' => 'sitewide',
+			//         'method'  => 'header',
+			//     ],
+			// ],
+			//
+			// [
+			//     // Static admin sidebar, only on /admin/*
+			//     'var'     => 'admin_nav',
+			//     'type'    => 'static',
+			//     'include' => ['~^/admin/~'],
+			//     'exclude' => [],
+			//     'source'  => [
+			//         'sidebar' => [
+			//             [
+			//                 'title' => 'System',
+			//                 'items' => [
+			//                     [
+			//                         'label' => 'Users',
+			//                         'icon'  => 'user',
+			//                         'url'   => 'admin/users.html',
+			//                         'match' => ['admin/users', 'admin/users.html'],
+			//                     ],
+			//                 ],
+			//             ],
+			//         ],
+			//     ],
+			// ],
+			//
+			'vars' => [
+				// (your rules go here)
+			],
+
+			
+			
+			/*
+			 *------------------------------------------------------------------
+			 * ICONS (global inline SVG registry)
+			 *------------------------------------------------------------------
+			 * Deterministic map of symbolic icon ids to inline SVG markup.
+			 *
+			 * Purpose:
+			 * - Provide a shared visual language ("home", "user", "settings", etc.)
+			 *   across status-card screens, member area, and admin dashboards.
+			 * - Allow providers to contribute new icons, and allow the app layer
+			 *   to override or brand-swap any icon without subclassing services.
+			 *
+			 * Behavior:
+			 * - Keys are stable string ids (e.g. 'home', 'settings', 'power').
+			 * - Values are raw <svg>...</svg> strings (no width/height inline).
+			 * - Icons are assumed to be safe, trusted markup from the codebase.
+			 *   They are NOT user input and should be echoed directly.
+			 *
+			 * Merge rules:
+			 * - Provider CFG_HTTP arrays are merged (first providers, then app cfg,
+			 *   then env overlay) using last-wins semantics.
+			 * - This means the application can replace any icon or add new ones
+			 *   in /config/citomni_http_cfg.php without touching vendor code.
+			 *
+			 * Usage:
+			 *   // Direct via cfg (raw array, because 'icons' is in RAW_ARRAY_SET)
+			 *   $svg = $this->app->cfg->icons['home'] ?? '';
+			 *   echo $svg;
+			 *
+			 *   // Or via a tiny IconRegistry service:
+			 *   echo $this->app->icon->get('home');
+			 *
+			 * Notes:
+			 * - Keep stroke/fill/style inline in the SVG so the icon is self-contained.
+			 * - Do not embed xmlns/width/height here; let CSS size and color them.
+			 */
+			'icons' => [
+				'home' => '<svg viewBox="0 0 24 24" fill="none"><path d="M4 10.5 12 4l8 6.5V20a1 1 0 0 1-1 1h-5v-6H10v6H5a1 1 0 0 1-1-1v-9.5Z" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+				'home_alt' => '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10.5L12 3l9 7.5"/><path d="M5 10v9a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-9"/><path d="M10 21v-6h4v6"/></svg>',
+				'settings' => '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.09a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09c0 .69.4 1.3 1 1.51.61.21 1.3.05 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06c-.38.52-.54 1.21-.33 1.82.21.61.82 1 1.51 1H21a2 2 0 1 1 0 4h-.09c-.69 0-1.3.4-1.51 1Z"/></svg>',
+				'user' => '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="7" r="4"/><path d="M4.5 20a7.5 7.5 0 0 1 15 0"/></svg>',
+				'user_alt' => '<svg viewBox="0 0 24 24" fill="none"><path d="M17 19v-1a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v1" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="10" cy="7" r="3.5" stroke="currentColor" stroke-width="1.6"/></svg>',
+				'user_delete' => '<svg viewBox="0 0 24 24" fill="none"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M6 6l1 14a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-14" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><circle cx="12" cy="13" r="2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M9.5 18a3 3 0 0 1 5 0" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+				'log' => '<svg viewBox="0 0 24 24" fill="none"><path d="M5 4h9a3 3 0 0 1 3 3v13l-4.5-2.5L8 20V7a3 3 0 0 1 3-3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+				'orders' => '<svg viewBox="0 0 24 24" fill="none"><path d="M3 5h18M7 5v14a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M9 9h6M9 13h6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>',
+				'products' => '<svg viewBox="0 0 24 24" fill="none"><path d="M3 7l9-4 9 4-9 4-9-4Z" stroke="currentColor" stroke-width="1.6"/><path d="M3 7v10l9 4 9-4V7" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+				'circle' => '<svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="1.6"/></svg>',
+				'heart' => '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 1 0-7.78 7.78L12 21.23l8.84-8.84a5.5 5.5 0 0 0 0-7.78z"/></svg>',
+				'menu' => '<svg viewBox="0 0 24 24" fill="none"><path d="M3 6h18M3 12h18M3 18h18" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+				'power' => '<svg viewBox="0 0 24 22" fill="none"><path d="M12 3v7.5" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/><path d="M6.2 5.6a8 8 0 1 0 11.6 0" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>',
+				'search' => '<svg viewBox="0 0 24 24" fill="none"><path d="M21 21l-4.35-4.35M10.5 18a7.5 7.5 0 1 1 0-15 7.5 7.5 0 0 1 0 15Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>',
 			],
 
 		],
@@ -635,6 +758,7 @@ final class Config {
 			'header_timestamp' => 'HTTP_X_CITOMNI_TIMESTAMP',
 			'header_nonce' => 'HTTP_X_CITOMNI_NONCE',
 		],
+
 
 
 		/*

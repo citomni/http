@@ -27,7 +27,7 @@ use CitOmni\Kernel\Controller\BaseController;
  * - Provide safe runtime snapshots (sysinfo, packages, config export).
  *
  * Collaborators:
- * - Reads: Request, Response, View, ErrorHandler, Maintenance, WebhooksAuth, App cfg wrapper.
+ * - Reads: Request, Response, TemplateEngine, ErrorHandler, Maintenance, WebhooksAuth, App cfg wrapper.
  * - Writes: Response (JSON/text/HTML), Maintenance state, cache files (reset/warmup).
  *
  * Security note:
@@ -83,7 +83,7 @@ final class SystemController extends BaseController {
 	 *   sysinfo, packages, cfg tree/flat, PHP export blocks, and (optionally)
 	 *   merged configuration per environment (dev/stage/prod).
 	 * - Sends robots noindex + strong no-cache headers.
-	 * - Renders a small LiteView template with canonical metadata.
+	 * - Renders a small template with canonical metadata.
 	 *
 	 * Notes:
 	 * - No DB or remote I/O; everything is local and deterministic.
@@ -128,7 +128,7 @@ final class SystemController extends BaseController {
 
 		// Render using the exact same variables/values/fallbacks as before,
 		// plus the three per-env JSON blocks produced by the generator.
-		$this->app->view->render($this->routeConfig['template_file'], $this->routeConfig['template_layer'], [
+		$this->app->tplEngine->render($this->routeConfig['template_file'] . "@" . $this->routeConfig['template_layer'], [
 
 			// Controls whether to add <meta name="robots" content="noindex"> in the template (1 = add, 0 = do not add)
 			'noindex'               => 1,
@@ -669,7 +669,7 @@ final class SystemController extends BaseController {
 	 * - Computes sysinfo metrics and encodes compact JSON payloads.
 	 * - Lists Composer packages (if InstalledVersions is available).
 	 * - Exposes cfg snapshots (tree, flat, routes) with secret masking.
-	 * - Renders a small LiteView template with canonical metadata.
+	 * - Renders a small template with canonical metadata.
 	 *
 	 * Notes:
 	 * - Read-only operation; no DB or remote I/O.
@@ -980,7 +980,7 @@ final class SystemController extends BaseController {
 		
 
 		// Render the home page
-		$this->app->view->render($this->routeConfig["template_file"], $this->routeConfig["template_layer"], [
+		$this->app->tplEngine->render($this->routeConfig["template_file"] . "@" . $this->routeConfig["template_layer"], [
 		
 			// Controls whether to add <meta name="robots" content="noindex"> in the template (1 = add, 0 = do not add)
 			'noindex' 				=> 1,

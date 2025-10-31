@@ -87,7 +87,7 @@ class PublicController extends BaseController {
 
 
 		// Render the home page
-		$this->app->view->render($this->routeConfig["template_file"], $this->routeConfig["template_layer"], [
+		$this->app->tplEngine->render($this->routeConfig["template_file"] . "@" . $this->routeConfig["template_layer"], [
 		
 			// Controls whether to add <meta name="robots" content="noindex"> in the template (1 = add, 0 = do not add)
 			'noindex' 				=> 0,
