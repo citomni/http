@@ -261,9 +261,14 @@ class WebhooksAuth extends BaseService {
 
 		// nonce_dir: prefer explicit option; fallback to cfg->webhooks->nonce_dir; else empty (validated below if enabled)
 		$nonceDir = $get($opts, 'nonce_dir', null);
-		if ($nonceDir === null && isset($this->app->cfg->webhooks->nonce_dir)) {
-			$nonceDir = $this->app->cfg->webhooks->nonce_dir;
+
+		if ($nonceDir === null) {
+			// use ArrayAccess so we don't blow up if 'webhooks' node doesn't exist at all
+			if (isset($this->app->cfg['webhooks']) && isset($this->app->cfg['webhooks']['nonce_dir'])) {
+				$nonceDir = $this->app->cfg['webhooks']['nonce_dir'];
+			}
 		}
+
 		$this->nonceDir = (string)$nonceDir;
 		
 		// Pick up secret_file (defaulting to baseline path if desired)

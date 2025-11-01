@@ -224,9 +224,9 @@ class Router extends BaseService {
 		}
 
 		// 2) Load routes (must be array)
-		$routes = $this->app->cfg->routes ?? null;
+		$routes = $this->app->routes ?? null;
 		if (!\is_array($routes)) {
-			throw new \RuntimeException('Config node "routes" must be an array.');
+			throw new \RuntimeException('App routes must be an array.');
 		}
 
 		// 2a) If case-insensitive, build a lowered exact-route map (leave 'regex' as-is)

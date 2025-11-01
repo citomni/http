@@ -24,6 +24,10 @@ use CitOmni\Kernel\Service\BaseService;
  * boundary (POST -> Redirect -> GET). Uses the Session service exclusively and
  * keeps init() side-effect free for predictable boot cost.
  *
+ * Data lives in Session and survives exactly one redirect boundary unless
+ * you call keep(). Designed for predictable UX after validation failures,
+ * login attempts, etc.
+ *
  * Behavior:
  * - Session keys:
  *   1) _flash.msg  : array<string, string|array> (message buckets by key)
@@ -42,6 +46,26 @@ use CitOmni\Kernel\Service\BaseService;
  * - Messages can be either strings or arrays; arrays are accepted as-is.
  * - All interaction with session state goes through the Session service API.
  * - No catch-all exception handling; failures bubble to global ErrorHandler.
+ *
+ * Validation notes:
+ * - add() appends to a bucket and auto-promotes single strings to list form.
+ * - error()/success()/info()/warning() are convenience wrappers around add().
+ *
+ * Safety / limits:
+ * - Hard caps on number of buckets, number of items per bucket, and byte length
+ *   of each string payload (UTF-8 safe trim).
+ * - Old input is also capped on number of keys.
+ *
+ * Lifecycle:
+ * - pullAll():
+ *     returns ['msg'=>..., 'old'=>...]
+ *     clears both, unless keep() had been set (then it just consumes keep()).
+ * - keep():
+ *     tells Flash "do not clear on the next pullAll(); clear on the one after".
+ *
+ * Zero coupling:
+ * - This service does not depend on $app->cfg or $app->routes.
+ * - Only depends on $app->session.
  *
  * Typical usage:
  *   // POST handler
@@ -288,6 +312,7 @@ final class Flash extends BaseService {
 	 *   old: array<string, mixed>
 	 * }
 	 */
+	/*
 	public function pullAll(): array {
 		$this->ensureBags();
 
@@ -310,6 +335,34 @@ final class Flash extends BaseService {
 		$this->app->session->remove(self::KEY_OLD);
 		return $out;
 	}
+	*/
+	public function pullAll(): array {
+		$this->ensureBags();
+
+		$msg  = (array)$this->app->session->get(self::KEY_MSG);
+		$old  = (array)$this->app->session->get(self::KEY_OLD);
+		$keep = (bool)$this->app->session->get(self::KEY_KEEP);
+
+		$out = ['msg' => $msg, 'old' => $old];
+
+		if ($keep) {
+			// Persist once more:
+			$this->app->session->set(self::KEY_MSG, $msg);
+			$this->app->session->set(self::KEY_OLD, $old);
+			$this->app->session->remove(self::KEY_KEEP);
+			return $out;
+		}
+
+		// Normal "consume and clear" path:
+		$this->app->session->remove(self::KEY_MSG);
+		$this->app->session->remove(self::KEY_OLD);
+		$this->app->session->remove(self::KEY_KEEP); // <--- add this line
+
+		return $out;
+	}
+
+	
+	
 
 	/**
 	 * Mark current flash data to persist across the next pullAll().

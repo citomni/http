@@ -17,11 +17,34 @@ namespace CitOmni\Http\Controller;
 
 use CitOmni\Kernel\Controller\BaseController;
 
+
 /**
- * Public-facing pages (home and generic error pages).
+ * PublicController: Public-facing pages (home, legal pages).
  *
- * Lean controller intended for minimal startup logic and simple view rendering.
- * Templates + layer are provided via route config. No "magic", no global state.
+ * Routing:
+ * - A route in $app->routes points at this controller + action.
+ * - The Router resolves that route and injects its config into $this->routeConfig
+ *   before calling the action. The controller never reads $app->cfg->routes.
+ *
+ * Templates:
+ * - We expect each route entry to define 'template_file' and 'template_layer'.
+ *   Example:
+ *     [
+ *       'controller'      => \CitOmni\Http\Controller\PublicController::class,
+ *       'action'          => 'index',
+ *       'template_file'   => 'public/welcome.html',
+ *       'template_layer'  => 'citomni/http',
+ *       'methods'         => ['GET'],
+ *     ]
+ *
+ * Config vs Routes:
+ * - Brand / owner / locale / etc. come from $this->app->cfg (deep read-only Cfg).
+ * - The final HTTP route table is exposed separately as $this->app->routes (plain array),
+ *   assembled by \CitOmni\Kernel\App using vendor baseline + providers + app overrides.
+ *
+ * Performance policy:
+ * - Keep controller logic lean. Heavy lifting (DB, mail, auth, etc.) lives in services.
+ * - No global state, no static singletons.
  */
 class PublicController extends BaseController {
 	
@@ -35,15 +58,19 @@ class PublicController extends BaseController {
  * 
  */
 
+
 	/**
-	 * Lightweight initialization for public routes.
+	 * Lightweight per-request bootstrap for public routes.
 	 *
-	 * Keep this fast and side-effect free; heavy lifting belongs in services.
+	 * Runs before each action on this controller.
+	 * Keep this fast and side-effect free. Do not perform expensive I/O here;
+	 * push that work into dedicated services and call them lazily in the action
+	 * that actually needs them.
 	 *
 	 * @return void
 	 */
 	protected function init(): void {
-		// Do start-up stuff
+		// Cheap pre-action setup (if any)
 	}
 
 
@@ -59,10 +86,21 @@ class PublicController extends BaseController {
 
 
 	/**
-	 * Displays the public home page (root url).
+	 * GET /
 	 *
-	 * Renders the main public landing page using the configured template and template layer.
-	 * Passes login status and other view data to the template.
+	 * Renders the public home page.
+	 *
+	 * Data flow:
+	 * - Route match has already happened. Router injected the matched route
+	 *   definition into $this->routeConfig. That definition tells us which
+	 *   template file + template layer to render.
+	 *
+	 * - We DO NOT look up routes in $this->app->cfg (routes don't live there).
+	 *   $this->app->cfg is now purely settings / identity / locale / etc.
+	 *
+	 * View model:
+	 * - We pass a small diagnostic block ($details) with runtime/env info.
+	 * - We also pass SEO-ish metadata (canonical URL, title/description, robot hint).
 	 *
 	 * @return void
 	 */
@@ -128,26 +166,24 @@ class PublicController extends BaseController {
 
 
 
-
-
-
-
-
-
-
-
-
 	/**
-	 * Render /legal/website-license (content terms; NOT code license).
+	 * GET /legal/website-license/
+	 *
+	 * Outputs a simple "Website Content License" page.
 	 *
 	 * Behavior:
-	 * - Pulls owner/app metadata from $this->app->cfg->identity
-	 * - Sends "noindex" and no-cache headers (via Response::noIndex())
-	 * - Optionally sets a canonical Link header if CITOMNI_PUBLIC_ROOT_URL is defined
-	 * - Emits deterministic HTML via Response::html() (which exits)
+	 * - Pulls legal/branding info from $this->app->cfg->identity (owner_name,
+	 *   owner_email, owner_url, etc.). That info lives in config, not in routes.
+	 *
+	 * - Sends "noindex" and no-cache headers using Response::noIndex().
+	 *
+	 * - If CITOMNI_PUBLIC_ROOT_URL is defined, we also emit a Link: rel="canonical"
+	 *   header and can use that for redirects from alternative URLs.
 	 *
 	 * @return void
-	 * @throws \RuntimeException If neither identity.owner_name nor identity.app_name is set.
+	 *
+	 * @throws \RuntimeException if we cannot determine an owner name at all
+	 *                           (identity.owner_name or identity.app_name should exist).
 	 */
 	public function websiteLicense(): void {
 		$cfg = $this->app->cfg;
@@ -201,7 +237,11 @@ class PublicController extends BaseController {
 
 
 	/**
-	 * Redirect any alternate URLs to the canonical URL.
+	 * 301 redirect helper for alternate license URLs to the canonical one.
+	 *
+	 * Assumes CITOMNI_PUBLIC_ROOT_URL is defined in the runtime environment
+	 * (typical for stage/prod). If it's not defined in your app, consider
+	 * overriding this action.
 	 *
 	 * @return never
 	 */

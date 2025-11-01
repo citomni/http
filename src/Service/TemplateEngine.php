@@ -64,10 +64,10 @@ use CitOmni\Kernel\Service\BaseService;
  * - icons (array<string,string>)
  *     Map icon name => inline SVG string. Used by $icon('name').
  *
- * - vars (array<int,array>)
+ * - vars (array<string,array>)
  *     Declarative, path-scoped view variables.
- *     Each entry decides:
- *       - which var name to expose in templates (`var`),
+ *     Each key is the final variable name that will appear in templates
+ *     (e.g. "header", "admin_nav", ...). Each entry decides:
  *       - whether it's 'static' or 'dynamic' (`type`),
  *       - where the data comes from (`source`),
  *       - and which request paths it should apply to (`include` / `exclude`).
@@ -186,9 +186,11 @@ final class TemplateEngine extends BaseService {
 	 * Behavior:
 	 * - Reads relevant `cfg->view` nodes and snapshots them into cheap local scalars/arrays.
 	 *   We do this up front so later hot paths do not keep walking the cfg wrapper.
-	 * - Normalizes associative cfg maps (template_layers, vars, icons) into plain arrays.
-	 *   CitOmni config wrappers internally expose data under "CitOmni\Kernel\Cfgdata", so we
-	 *   flatten that here. After this step we can safely do $this->icons['home'] at runtime.
+	 * - Normalizes associative cfg maps (`template_layers`, `vars`, `icons`) into plain arrays.
+	 *   App::buildConfig() in the kernel already produced one merged config array
+	 *   (vendor -> providers -> app -> env; last wins). Each subtree (like cfg->view)
+	 *   is exposed through CitOmni\Kernel\Cfg, and we flatten those nodes here so we
+	 *   can access them with simple array lookups at runtime.
 	 * - Pre-compiles cfg->view->vars (static + dynamic scoped vars) into $this->compiledVars
 	 *   with ready-to-use regex filters (include/exclude).
 	 * - Captures feature flags (whitespace trimming, comment stripping, etc.).
@@ -226,9 +228,9 @@ final class TemplateEngine extends BaseService {
 		//       'aserno/byportal'  => '/var/www/myapp/vendor/aserno/byportal-core/templates',
 		//     ]
 		//
-		// - BUT: CitOmni config wrappers don't always give us a flat array. They wrap data
-		//   under "CitOmni\Kernel\Cfgdata", plus some cache metadata. normalizeCfgMap()
-		//   strips that so we end with a clean associative array we can iterate directly.
+		// - normalizeCfgMap() just flattens either a plain PHP array or a Cfg node
+		//   (i.e. something with ->toArray()) into a regular associative array.
+		//   We want a raw ['layer' => '/abs/path'] map here so runtime lookups are cheap.
 		//
 		// - We validate each layer slug now (fail fast). "app" is allowed as a special case.
 		//   Everything else must look like "vendor/package".
@@ -298,31 +300,12 @@ final class TemplateEngine extends BaseService {
 		//     'source'  => ... (literal data OR callable descriptor)
 		//   ]
 		//
-		// Example:
-		//   'header' => [
-		//     'type'    => 'dynamic',
-		//     'include' => ['*'],
-		//     'exclude' => ['~^/admin/~'],
-		//     'source'  => ['class' => \Aserno\ByportalCore\Model\SitewideModel::class, 'method' => 'header'],
-		//   ],
-		//
-		//   'admin_nav' => [
-		//     'type'    => 'static',
-		//     'include' => ['~^/admin/~'],
-		//     'exclude' => [],
-		//     'source'  => [ ... menu array ... ],
-		//   ],
-		//
-		// We normalize that into $this->compiledVars[$varName] with:
-		// - precompiled include/exclude regexes,
-		// - either 'data' (for static) or 'call' (for dynamic).
-		//
-		// Because $this->compiledVars uses varName as the array key, later providers
-		// can overwrite the same varName ("last wins") in a deterministic way.
-		
+		// We normalize that map up front and compile it into $this->compiledVars
+		// so that at request time we only do cheap preg_match() and (maybe) a single
+		// provider call per var.
 		$this->compiledVars = []; // array<string,array{...}>
 
-		// unwrap CitOmni\Kernel\Cfgdata etc. into a clean assoc array
+		// Flatten cfg->view->vars (Cfg node or plain array) into a plain associative array
 		$varsCfg = $this->normalizeCfgMap($viewCfg->vars ?? []);
 		
 		foreach ($varsCfg as $varName => $row) {
@@ -1743,7 +1726,7 @@ final class TemplateEngine extends BaseService {
 	/**
 	 * processExtendsAndBlocks: Resolve layout inheritance (`{% extends %}`) and block overrides.
 	 *
-	 * This method applies child→parent template inheritance and returns a "flattened"
+	 * This method applies child->parent template inheritance and returns a "flattened"
 	 * template string with all `{% block %}` / `{% yield %}` pairs resolved.
 	 * After this step, the result is a single concrete template where:
 	 *
@@ -2146,64 +2129,28 @@ final class TemplateEngine extends BaseService {
 
 
 	/**
-	 * normalizeCfgMap: Convert a cfg node (which may be a CitOmni\Kernel\Cfgdata wrapper)
-	 * into a plain associative array<string,mixed>.
+	 * normalizeCfgMap: Convert a cfg node (expected to behave like an associative map)
+	 * into a plain PHP array<string,mixed>.
 	 *
-	 * Behavior:
-	 * - If $node is an object with toArray(), we trust that.
-	 * - Else cast to array and unwrap common ["CitOmni\\Kernel\\Cfgdata" => [...], "CitOmni\\Kernel\\Cfgcache" => []] shape.
-	 * - Else if it's already an array, also unwrap that shape.
-	 *
-	 * Note:
-	 * - This is intentionally scoped for config nodes that represent maps
-	 *   (id => value). Do not use this blindly on cfg trees that you expect
-	 *   to behave like objects with properties.
-	 *
-	 * @param mixed $node
-	 * @return array<string,mixed>
+	 * Accepts:
+	 * - plain array
+	 * - CitOmni\Kernel\Cfg (or any object with toArray())
+	 * - null / scalar => returns []
 	 */
 	private function normalizeCfgMap(mixed $node): array {
-		// 1) Object case
-		if (\is_object($node)) {
-			if (\method_exists($node, 'toArray')) {
-				$tmp = (array)$node->toArray();
-				return $this->unwrapCfgWrapperArray($tmp);
-			}
-
-			$tmp = (array)$node;
-			return $this->unwrapCfgWrapperArray($tmp);
-		}
-
-		// 2) Array case
+		// Already an array? great.
 		if (\is_array($node)) {
-			return $this->unwrapCfgWrapperArray($node);
+			return $node;
 		}
 
-		// 3) Fallback
+		// Cfg node (or similar) with toArray():
+		if (\is_object($node) && \method_exists($node, 'toArray')) {
+			$out = $node->toArray(); // Cfg::toArray() returns its raw $data
+			return \is_array($out) ? $out : [];
+		}
+
+		// Anything else (null, string, etc.) -> treat as empty map
 		return [];
-	}
-
-	/**
-	 * unwrapCfgWrapperArray: Strip CitOmni\Kernel\Cfgdata / Cfgcache wrapping.
-	 *
-	 * @param array<mixed> $tmp
-	 * @return array<string,mixed>
-	 */
-	private function unwrapCfgWrapperArray(array $tmp): array {
-		// Prefer explicit Cfgdata bucket if present
-		if (isset($tmp['CitOmni\\Kernel\\Cfgdata']) && \is_array($tmp['CitOmni\\Kernel\\Cfgdata'])) {
-			return $tmp['CitOmni\\Kernel\\Cfgdata'];
-		}
-
-		// Generic "single-element contains real data" pattern
-		if (\count($tmp) === 1) {
-			$firstVal = \reset($tmp);
-			if (\is_array($firstVal)) {
-				return $firstVal;
-			}
-		}
-
-		return $tmp;
 	}
 
 

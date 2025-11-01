@@ -21,6 +21,12 @@ use CitOmni\Kernel\Service\BaseService;
 /**
  * Request: Deterministic HTTP request facade (method, URI, headers, input, JSON, IP).
  *
+ * NOTE:
+ * - This service does not perform or know about route matching.
+ *   The effective routing table is assembled by \CitOmni\Kernel\App
+ *   into $app->routes (vendor + providers + app + env, last-wins).
+ *   Request's job is only "what came in from the client", not "which controller did we pick".
+ *
  * Responsibilities:
  * - Provide a lean, read-only API over PHP SAPI globals for controllers/services.
  *   1) Method and URI resolution (front controller owns routing; no rewriting here).

@@ -35,11 +35,16 @@ use CitOmni\Kernel\Controller\BaseController;
  *   CITOMNI_APP_PATH . '/var/secrets/webhooks.secret.php'
  * - The actual secret file must not be committed; keep only the `.tpl` template in VCS.
  *
- * Configuration keys:
- * - webhooks.secret_file (string) - Filesystem path to a side-effect-free PHP file
- *   that returns ['secret' => <hex>, 'algo' => 'sha256'|'sha512' (optional)].
- * - http.base_url (string) - Fallback for canonical links when CITOMNI_PUBLIC_ROOT_URL is unset.
- * - routes (array) - Listed but not echoed in flat cfg snapshot by default.
+ * Configuration keys (via $this->app->cfg):
+ * - webhooks.secret_file (string) - absolute path to side-effect-free PHP file
+ *   returning ['secret' => <hex>, 'algo' => 'sha256'|'sha512' (optional)].
+ * - http.base_url (string) - fallback for canonical links when CITOMNI_PUBLIC_ROOT_URL is unset.
+ * - webhooks.allowed_ips (array<string>) - explicit allowlist for webhookDebug().
+ *
+ * Routing:
+ * - Route definitions no longer live under cfg.
+ *   They are merged separately by App::buildRoutes() and exposed as $this->app->routes.
+ *   SystemController will include route data in diagnostics using $this->app->routes.
  *
  * Error handling:
  * - Fail-fast: Errors bubble to the global error handler.
@@ -120,7 +125,7 @@ final class SystemController extends BaseController {
 		$this->app->response->noIndex();
 		$this->app->response->setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
 
-		// Robust canonical: prefer constant, else fall back to cfg->http->base_url
+		// Canonical: Prefer constant, else fallback to cfg->http->base_url
 		$canonicalBase = \defined('CITOMNI_PUBLIC_ROOT_URL')
 			? (string)\CITOMNI_PUBLIC_ROOT_URL
 			: (string)($this->app->cfg->http->base_url ?? '');
@@ -134,7 +139,7 @@ final class SystemController extends BaseController {
 			'noindex'               => 1,
 
 			// Canonical URL
-			'canonical'             => \CITOMNI_PUBLIC_ROOT_URL . "/appinfo.html",			
+			'canonical'             => $canonical,
 			
 			'meta_title'            => 'Application information',
 			'meta_description'      => 'CitOmni HTTP is installed and running. You are seeing the default welcome page.',
@@ -220,8 +225,8 @@ final class SystemController extends BaseController {
 	 *     "cfg_by_env": <array>,       // merged cfg per env (dev/stage/prod), masked unless unredacted
 	 *     // optionally:
 	 *     "cfg_flat":   <array>,       // dot.notation => value (no routes)
-	 *     "cfg_php_export_excl_routes": "<string>",  // PHP short array export (no 'routes')
-	 *     "routes_php_export":          "<string>"   // PHP short array export for 'routes' only
+	 *     "cfg_php_export_excl_routes": "<string>",  // PHP short array export of cfg (routes omitted / not part of cfg)
+	 *     "routes_php_export":          "<string>"   // PHP short array export of the merged $app->routes map
 	 *   }
 	 *
 	 * Notes:
@@ -483,7 +488,7 @@ final class SystemController extends BaseController {
 		$startNs = \defined('CITOMNI_START_NS') ? (int)\CITOMNI_START_NS : $nowNs;
 		$elapsed = (float)\sprintf('%.3f', ($nowNs - $startNs) / 1_000_000_000);
 
-		$routesCount = (isset($this->app->cfg->routes) && \is_array($this->app->cfg->routes)) ? \count($this->app->cfg->routes) : 0;
+		$routesCount = \is_array($this->app->routes ?? null) ? \count($this->app->routes) : 0;
 
 		$baseUrl = \defined('CITOMNI_PUBLIC_ROOT_URL')
 			? \CITOMNI_PUBLIC_ROOT_URL
@@ -611,13 +616,14 @@ final class SystemController extends BaseController {
 		$noRoutes = $__orderTop($noRoutes, ['identity']);
 		$cfgPhpExRoutesBody = $__exportPhpBody($noRoutes);  // body-only for <pre>
 
-		// B) Routes only (from artifact env), sorted by path.
-		$routesOnly = [];
-		if (isset($artifactArr['routes']) && \is_array($artifactArr['routes'])) {
-			$routesOnly = $artifactArr['routes'];
-		}
+		// B) Routes only (live routes map from $this->app->routes), sorted by path.
+		// Routes are no longer part of cfg; they're exposed separately by the App.
+		$routesOnly = \is_array($this->app->routes ?? null)
+			? $this->app->routes
+			: [];
 		\ksort($routesOnly);
 		$routesPhpBody = $__exportPhpBody(['routes' => $routesOnly]);
+
 
 		// ---------------------- Optional: per-env merged cfg ------------------------
 		$byEnvRaw  = [];
@@ -907,7 +913,7 @@ final class SystemController extends BaseController {
 		$startNs = \defined('CITOMNI_START_NS') ? (int)\CITOMNI_START_NS : $nowNs;
 		$elapsed = (float)\sprintf('%.3f', ($nowNs - $startNs) / 1_000_000_000);
 
-		$routesCount = (isset($this->app->cfg->routes) && \is_array($this->app->cfg->routes)) ? \count($this->app->cfg->routes) : 0;
+		$routesCount = \is_array($this->app->routes ?? null) ? \count($this->app->routes) : 0;
 
 		$baseUrl = \defined('CITOMNI_PUBLIC_ROOT_URL')
 			? \CITOMNI_PUBLIC_ROOT_URL
@@ -960,16 +966,13 @@ final class SystemController extends BaseController {
 
 		// A) Everything except routes, with identity first, rest A-Z
 		$noRoutes = $cfgTree;
-		unset($noRoutes['routes']);
+		// Routes no longer live in cfg; keeping unset() commented as legacy noise control.
+		// if (is_array($noRoutes)) { unset($noRoutes['routes']); }
 		$noRoutes = $__orderTop($noRoutes, ['identity']);
-		// $detailsPhpExRoutesFull  = $__exportPhp($noRoutes);     // with [ ... ] (body-only for compact template inclusion)
-		$cfgPhpExRoutesBody  = $__exportPhpBody($noRoutes); // NO [ ... ], ideal for <pre>
+		$cfgPhpExRoutesBody = $__exportPhpBody($noRoutes);
 
 		// B) Routes only (sorted by path) - guard if cfgTree isn't an array
-		$routesOnly = [];
-		if (\is_array($cfgTreeArr) && isset($cfgTreeArr['routes']) && \is_array($cfgTreeArr['routes'])) {
-			$routesOnly = $cfgTreeArr['routes'];
-		}
+		$routesOnly = \is_array($this->app->routes ?? null) ? $this->app->routes : [];
 		\ksort($routesOnly);
 		$routesPhpBody = $__exportPhpBody(['routes' => $routesOnly]);
 
@@ -977,6 +980,10 @@ final class SystemController extends BaseController {
 		$this->app->response->noIndex();
 		
 		$this->app->response->setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+		
+		// build canonical first in appinfo(), same as in appinfoHtml():
+		$canonicalBase = \defined('CITOMNI_PUBLIC_ROOT_URL') ? (string)\CITOMNI_PUBLIC_ROOT_URL : (string)($this->app->cfg->http->base_url ?? '');
+		$canonical = \rtrim($canonicalBase, '/') . '/appinfo.html';
 		
 
 		// Render the home page
@@ -986,7 +993,7 @@ final class SystemController extends BaseController {
 			'noindex' 				=> 1,
 			
 			// Canonical URL
-			'canonical' 			=> \CITOMNI_PUBLIC_ROOT_URL . "/appinfo.html",
+			'canonical' 			=> $canonical,
 			
 			'meta_title'       		=> 'Application information',
 			'meta_description' 		=> 'CitOmni HTTP is installed and running. You are seeing the default welcome page.',
@@ -1010,7 +1017,7 @@ final class SystemController extends BaseController {
 		    'tertiary_href'			=> 'https://github.com/citomni/http/issues/new/choose',
 		    'tertiary_target'		=> '_blank', // _self
 		    'tertiary_label'		=> 'Report issue',
-		    'year'                  => date('Y'),
+		    'year'                  => \date('Y'),
 		    'owner'                 => 'CitOmni.com',			
 			
 			'sysinfoJson'			=> $sysinfoJson ?? 'System information not found.',
@@ -1228,8 +1235,10 @@ final class SystemController extends BaseController {
 		$this->app->response->noCache();
 
 		// Only allow this to run in dev and stage
-		if (\CITOMNI_ENVIRONMENT !== 'dev' && \CITOMNI_ENVIRONMENT !== 'stage') {
+		$env = \defined('CITOMNI_ENVIRONMENT') ? \CITOMNI_ENVIRONMENT : 'prod';
+		if ($env !== 'dev' && $env !== 'stage') {
 			$this->app->errorHandler->httpError(404, ['title' => 'Not Found']);
+			return;
 		}
 
 		$server = $_SERVER; // read-only dump, filtered below
@@ -1256,8 +1265,8 @@ final class SystemController extends BaseController {
 	 * - Verifies HMAC via WebhooksAuth; unauthorized returns 404.
 	 * - OPcache: try opcache_reset(); also invalidate known cache files if any.
 	 *   (performs a global opcache_reset() best-effort).
-	 * - Files: remove var/cache/{cfg.http.php,services.http.php} if they exist.
-	 *          For legacy layouts, also try /var/cfg.http.php and /var/services.http.php.
+	 * - Files: remove var/cache/{cfg.http.php,routes.http.php,services.http.php} if they exist.
+	 *          (Legacy layouts may not have routes.http.php.)
 	 * - Accepts optional JSON body with absolute file paths to invalidate:
 	 *   Body:
 	 *     (optional) JSON { "paths": ["/abs/extra/file1.php", ...] } to invalidate files.
@@ -1293,6 +1302,7 @@ final class SystemController extends BaseController {
 		// Known cache file candidates (HTTP mode).
 		$candidates = [
 			\CITOMNI_APP_PATH . '/var/cache/cfg.http.php',
+			\CITOMNI_APP_PATH . '/var/cache/routes.http.php',
 			\CITOMNI_APP_PATH . '/var/cache/services.http.php',
 		];
 
@@ -1564,6 +1574,7 @@ final class SystemController extends BaseController {
 		// Deny-by-default: empty/missing list -> 404 (conceal the endpoint)
 		if ($allowedList === [] || !\in_array($clientIp, $allowedList, true)) {
 			$this->app->errorHandler->httpError(404, ['title' => 'Not Found']);
+			return;
 		}
 
 		// Read raw once; HMAC must verify against the exact bytes
@@ -1662,6 +1673,8 @@ final class SystemController extends BaseController {
 					],
 				]
 			);
+
+			return ''; // hard stop / satisfy analysis
 		}
 
 		return $raw;
