@@ -141,17 +141,30 @@ final class TemplateEngine extends BaseService {
 	/**
 	 * Precompiled, path-scoped template vars from cfg->view->vars.
 	 *
-	 * Each entry:
-	 * - var   : string   Final variable name in template scope (e.g. "admin_nav").
-	 * - type  : 'static'|'dynamic'
-	 *           static  => inject literal "data"
-	 *           dynamic => invoke "call" provider
-	 * - data  : mixed    Present if static
-	 * - call  : mixed    Present if dynamic (FQCN::method / ['class'=>..] / ['service'=>..])
-	 * - ire   : string[] Compiled include regexes
-	 * - ere   : string[] Compiled exclude regexes
+	 * Shape:
+	 *   [
+	 *     'header' => [
+	 *       'var'   => 'header',
+	 *       'type'  => 'dynamic',
+	 *       'call'  => ['class' => \Foo\Model\SitewideModel::class, 'method' => 'header'],
+	 *       'ire'   => ['/^\/$/', '/^\/nyheder\/.*\/'], // compiled include regexes
+	 *       'ere'   => ['/^\/admin\//'],               // compiled exclude regexes
+	 *     ],
+	 *     'admin_nav' => [
+	 *       'var'   => 'admin_nav',
+	 *       'type'  => 'static',
+	 *       'data'  => [...],
+	 *       'ire'   => ['/^\/admin\//'],
+	 *       'ere'   => [],
+	 *     ],
+	 *     ...
+	 *   ]
 	 *
-	 * @var array<int, array{
+	 * Notes:
+	 * - Keys are the final template variable names ("header", "footer", "admin_nav", ...).
+	 * - Last provider wins on key collision (deterministic CitOmni merge semantics).
+	 *
+	 * @var array<string, array{
 	 *    var:string,
 	 *    type:'static'|'dynamic',
 	 *    data?:mixed,
@@ -277,32 +290,54 @@ final class TemplateEngine extends BaseService {
 
 		// 4) Pre-compile scoped view vars (static + dynamic)
 		//
-		// cfg->view->vars is a list of rows. Each row decides:
-		// - which var name to expose in templates,
-		// - whether it is "static" or "dynamic",
-		// - which request paths it applies to (include/exclude),
-		// - and where its value comes from ("source").
+		// cfg->view->vars is expected to be an associative map:
+		//   varName => [
+		//     'type'    => 'static' | 'dynamic',
+		//     'include' => [...],
+		//     'exclude' => [...],
+		//     'source'  => ... (literal data OR callable descriptor)
+		//   ]
 		//
-		// Example rows (see your proposal):
-		//   type=dynamic: call a provider for each request
-		//   type=static:  reuse a predefined array structure (cheap, no call)
+		// Example:
+		//   'header' => [
+		//     'type'    => 'dynamic',
+		//     'include' => ['*'],
+		//     'exclude' => ['~^/admin/~'],
+		//     'source'  => ['class' => \Aserno\ByportalCore\Model\SitewideModel::class, 'method' => 'header'],
+		//   ],
 		//
-		// We normalize that into $this->compiledVars so runtime resolution is cheap.
-		$this->compiledVars = [];
+		//   'admin_nav' => [
+		//     'type'    => 'static',
+		//     'include' => ['~^/admin/~'],
+		//     'exclude' => [],
+		//     'source'  => [ ... menu array ... ],
+		//   ],
+		//
+		// We normalize that into $this->compiledVars[$varName] with:
+		// - precompiled include/exclude regexes,
+		// - either 'data' (for static) or 'call' (for dynamic).
+		//
+		// Because $this->compiledVars uses varName as the array key, later providers
+		// can overwrite the same varName ("last wins") in a deterministic way.
+		
+		$this->compiledVars = []; // array<string,array{...}>
 
-		$varsCfg = (array)($viewCfg->vars ?? []);
-		foreach ($varsCfg as $row) {
+		// unwrap CitOmni\Kernel\Cfgdata etc. into a clean assoc array
+		$varsCfg = $this->normalizeCfgMap($viewCfg->vars ?? []);
+		
+		foreach ($varsCfg as $varName => $row) {
 			if (!\is_array($row) || $row === []) {
 				continue;
 			}
 
-			$varName = (string)($row['var'] ?? '');
+			// We trust the array key as the var name
+			$varName = (string)$varName;
 			$type    = (string)($row['type'] ?? '');
 			$source  = $row['source'] ?? null;
 
 			if ($varName === '' || $type === '' || $source === null) {
 				throw new \RuntimeException(
-					"TemplateEngine: view.vars entries require non-empty 'var', 'type', and 'source'."
+					"TemplateEngine: view.vars['{$varName}'] requires non-empty 'type' and 'source'."
 				);
 			}
 
@@ -317,7 +352,7 @@ final class TemplateEngine extends BaseService {
 			if ($type === 'static') {
 				// Here 'source' is literal data (array/string/whatever),
 				// and we will inject it directly at request time.
-				$this->compiledVars[] = [
+				$this->compiledVars[$varName] = [
 					'var'   => $varName,
 					'type'  => 'static',
 					'data'  => $source,
@@ -334,10 +369,10 @@ final class TemplateEngine extends BaseService {
 				// - ['service' => 'id', 'method' => 'm']
 				//
 				// We'll just store it as 'call' and reuse invokeProvider() at runtime.
-				$this->compiledVars[] = [
+				$this->compiledVars[$varName] = [
 					'var'   => $varName,
 					'type'  => 'dynamic',
-					'call'  => $source,
+					'call'  => $source, // <- shapes: "FQCN::m", ['class'=>..], ['service'=>..]
 					'ire'   => $ire,
 					'ere'   => $ere,
 				];
@@ -347,7 +382,6 @@ final class TemplateEngine extends BaseService {
 			throw new \RuntimeException(
 				"TemplateEngine: Unsupported view.vars type '{$type}' for var '{$varName}'."
 			);
-
 		}
 
 
@@ -877,24 +911,24 @@ final class TemplateEngine extends BaseService {
 
 		$out = [];
 
-		foreach ($this->compiledVars as $v) {
-			// Check if this var applies on this path
+		foreach ($this->compiledVars as $varName => $v) {
+			// Does this var apply on this path?
 			if (!$this->pathMatches($relPath, $v['ire'], $v['ere'])) {
 				continue;
 			}
 
 			if ($v['type'] === 'static') {
 				// Just copy the data directly
-				$out[$v['var']] = $v['data'];
+				$out[$varName] = $v['data'];
 				continue;
 			}
 
 			// dynamic
-			$out[$v['var']] = $this->invokeProvider($v['call'], $v['var']);
+			$out[$varName] = $this->invokeProvider($v['call'] ?? null, $varName);
 		}
 
 		return $out;
-	}	
+	}
 
 
 	/**
