@@ -125,7 +125,7 @@ use CitOmni\Kernel\Service\BaseService;
  *     Does not consult cfg->security->csrf_protection; controllers should gate usage.
  *
  * @method void logFailedCsrf(string $action, array $extra = [])
- *     Append a compact JSON entry to "csrf_failures.json" with IP, user agent, timestamp, action, URI, and extra meta.
+ *     Append a compact JSON entry to "csrf_failures.jsonl" with IP, user agent, timestamp, action, URI, and extra meta.
  */
 class Security extends BaseService {
 
@@ -327,7 +327,7 @@ class Security extends BaseService {
 
 		if ($this->app->hasService('log') && $this->app->hasPackage('citomni/infrastructure')) {
 			$this->app->log->write(
-				'csrf_failures.json',
+				'csrf_failures.jsonl',
 				'warning',
 				'Failed CSRF verification',
 				$logData
