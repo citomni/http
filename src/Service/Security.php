@@ -292,6 +292,30 @@ class Security extends BaseService {
 
 
 	/**
+	 * Read the CSRF token from the current request using the configured field name.
+	 *
+	 * Looks up the POST parameter matching {@see csrfFieldName()} and returns its value.
+	 * This method does not perform any validation or normalization beyond a string cast.
+	 *
+	 * Notes:
+	 * - Returns an empty string if the field is missing.
+	 * - Respects custom CSRF field names set in config (security.csrf_field_name).
+	 * - Use {@see verifyCsrf()} to actually validate the token.
+	 *
+	 * Example:
+	 *  $csrf = $this->app->security->readCsrfFromRequest();
+	 *  if (!$this->app->security->verifyCsrf($csrf)) {
+	 *      // handle invalid/missing token...
+	 *  }
+	 *
+	 * @return string CSRF token from POST, or '' if absent.
+	 */
+	public function readCsrfFromRequest(): string {
+		return (string)($this->app->request->post($this->csrfFieldName()) ?? '');
+	}
+
+
+	/**
 	 * Record a failed CSRF verification attempt to application logs (or PHP error log).
 	 *
 	 * Behavior:
