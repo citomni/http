@@ -1315,73 +1315,61 @@ final class TemplateEngine extends BaseService {
 
 
 	/**
-	 * compileSyntax: Transform templating syntax ({{ }}, {% %}, etc.) into executable PHP.
+	 * compileSyntax: Transform templating syntax ({{ }}, {{{ }}}, {% %}, {? ?}) into plain PHP.
 	 *
-	 * Converts the high-level template language into plain PHP code. This is the
-	 * final transformation step before the compiled template is written to cache.
-	 * The resulting string is valid PHP and will later be included via `require`.
+	 * Converts the high-level template language into executable PHP. This runs
+	 * after layout/partials have been resolved and just before the compiled code
+	 * is written to cache. The returned string is valid PHP, later loaded with `require`.
 	 *
 	 * Behavior:
-	 * - Variable echo:
-	 *   1) `{{ expr }}` becomes `echo htmlspecialchars(expr, ENT_QUOTES | ENT_SUBSTITUTE, "UTF-8");`
-	 *      which is HTML-escaped by default.
-	 *   2) `{{{ expr }}}` becomes `echo expr;` (raw, no escaping).
-	 *      Use this only for trusted HTML (e.g. CSRF fields).
+	 * - Echo:
+	 *   1) `{{ expr }}`  -> `echo htmlspecialchars(expr ?? "", ENT_QUOTES | ENT_SUBSTITUTE, $charset ?? "UTF-8");`
+	 *      (escaped by default; `$charset` comes from globals built by TemplateEngine).
+	 *   2) `{{{ expr }}}` -> `echo expr;` (raw, no escaping). Use only for trusted HTML (e.g., CSRF field).
 	 *
-	 * - Logic / flow:
-	 *   1) `{% if (...) %} ... {% endif %}`
-	 *   2) `{% elseif (...) %}`, `{% else %}`
-	 *   3) `{% foreach (...) %} ... {% endforeach %}`
-	 *   These map directly to native PHP `if (...) {}`, `elseif`, `else`, and `foreach`.
+	 * - Control flow (strict subset):
+	 *   1) `{% if (expr) %} ... {% endif %}`
+	 *   2) `{% elseif (expr) %}`, `{% else %}`
+	 *   3) `{% foreach (expr) %} ... {% endforeach %}`   // parentheses required
+	 *   These map 1:1 to native PHP `if/elseif/else/foreach` constructs.
 	 *
-	 * - Layout blocks:
-	 *   1) `{% block name %}...{% endblock %}` is stripped here because block
-	 *      resolution is already handled in `processExtendsAndBlocks()`.
-	 *   2) `{% yield name %}` is also stripped for the same reason.
-	 *   3) `{% extends "file@layer" %}` is stripped because parent/child merge
-	 *      is handled before this step.
+	 * - Variable assignment:
+	 *   - `{% set $name = expr %}` assigns to a local PHP variable. `$` prefix is required.
+	 *     (Forms without `$` are not supported.)
 	 *
-	 * - Inline PHP:
-	 *   1) `{? some raw php ?}` becomes `<?php some raw php ?>`
-	 *   2) `{?= expr ?}` becomes `<?php echo expr; ?>`
-	 *   This is only emitted if `$this->allowPhpTags === true`. If inline PHP
-	 *   is disabled, those tokens are replaced by an empty string.
+	 * - Layout markers:
+	 *   - `{% block %}`, `{% endblock %}`, `{% yield %}`, `{% extends "file@layer" %}`
+	 *     are resolved earlier by `processExtendsAndBlocks()`; any leftovers are stripped here.
+	 *   - `{% include "file@layer" %}` is expanded earlier by `processIncludes()`.
 	 *
-	 * Security / escaping rules:
-	 * - `{{ ... }}` is always escaped via `htmlspecialchars(..., ENT_QUOTES | ENT_SUBSTITUTE, "UTF-8")`.
-	 * - `{{{ ... }}}` is never escaped. The template author is responsible for
-	 *   ensuring the content is safe and already sanitized.
-	 * - `{? ... ?}` can output arbitrary PHP (including echo, loops, etc.).
-	 *   This is powerful and should be considered trusted-only surface; templates
-	 *   are expected to be controlled by the application/provider developer, not
-	 *   end users. (If an attacker can edit templates, you have bigger problems.)
+	 * - Inline PHP (optional):
+	 *   - `{? php ... ?}`    -> `<?php ... ?>`
+	 *   - `{?= expr ?}`      -> `<?php echo expr; ?>`
+	 *   Emitted only if `$this->allowPhpTags === true`; otherwise removed.
+	 *
+	 * Security & escaping:
+	 * - `{{ ... }}` is always HTML-escaped using the runtime charset if available, else "UTF-8".
+	 * - `{{{ ... }}}` is never escaped; template authors are responsible for safety.
+	 * - Inline PHP is powerful and should only appear in trusted templates.
 	 *
 	 * Notes:
-	 * - The method does not perform any filesystem I/O.
-	 * - The method assumes `processExtendsAndBlocks()` and `processIncludes()`
-	 *   have already inlined layouts/partials and removed all structural tags
-	 *   (extends / block / yield / include), so it can safely strip those tokens.
-	 * - `allowPhpTags` is a runtime toggle sourced from config/options. It lets
-	 *   you globally forbid `{? ... ?}` in hardened deployments, but by default
-	 *   we allow it (developer convenience).
+	 * - No filesystem I/O is performed here.
+	 * - Assumes `processExtendsAndBlocks()` and `processIncludes()` have already run.
+	 * - On PCRE failure during replacement, the caller throws a RuntimeException (fail-fast).
 	 *
 	 * Typical usage:
-	 *   $code = $this->compileSyntax($mergedTemplateSource);
-	 *   // $code now contains valid PHP with `<?php ... ?>` and `echo ...;`
-	 *   // and is about to be persisted to a cache file, then required.
+	 *   $php = $this->compileSyntax($mergedTemplateSource);
+	 *   // $php now contains valid PHP and will be persisted to cache, then required.
 	 *
-	 * @param string $code Raw template code after layout inheritance and includes
-	 *                     have already been resolved. May still contain `{{ }}`,
-	 *                     `{? ?}`, `{% if %}`, etc.
-	 *
-	 * @return string PHP source code that can be written directly to a cache file
-	 *                and later executed with `require`. The returned code does
-	 *                not include the leading `<?php class_exists(...)` guard;
-	 *                that wrapper is added by compile().
+	 * @param string $code Raw template code after inheritance/includes; may still contain
+	 *                     `{{ ... }}`, `{{{ ... }}}`, `{? ... ?}`, `{% if %}`, `{% foreach %}`, etc.
+	 * @return string PHP source suitable for writing to a cache file; the outer guard/header
+	 *                is added by compile().
 	 */
 	private function compileSyntax(string $code): string {
-		// We expand patterns dynamically so `{? ... ?}` can be nuked if allowPhpTags=false
+
 		$patterns = [
+		
 			// Raw PHP echo
 			'/{\?=\s*(.+?)\s*\?}/s' => $this->allowPhpTags ? '<?php echo $1; ?>' : '',
 			// Raw PHP block
@@ -1391,46 +1379,39 @@ final class TemplateEngine extends BaseService {
 			'/\{\{\{\s*(.+?)\s*\}\}\}/s'
 				=> '<?php echo $1; ?>',
 
-			// Double curlies => escaped echo
+			// Double curlies => escaped echo (use runtime charset if available)
 			'/\{\{\s*(.+?)\s*\}\}/s'
-				=> '<?php echo htmlspecialchars($1 ?? "", ENT_QUOTES | ENT_SUBSTITUTE, "UTF-8"); ?>',
+				=> '<?php echo htmlspecialchars($1 ?? "", ENT_QUOTES | ENT_SUBSTITUTE, $charset ?? "UTF-8"); ?>',
+
+			// {% set $var = expr %}  (requires $)
+			'/{%\s*set\s+\$([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+?)\s*%}/s'
+				=> '<?php $$1 = $2; ?>',
 
 			// Control structures
-			'/{%\s*if\s*(.+?)\s*%}/'
-				=> '<?php if ($1): ?>',
-			'/{%\s*elseif\s*(.+?)\s*%}/'
-				=> '<?php elseif ($1): ?>',
-			'/{%\s*else\s*%}/'
-				=> '<?php else: ?>',
-			'/{%\s*endif\s*%}/'
-				=> '<?php endif; ?>',
+			'/{%\s*if\s*(.+?)\s*%}/'     => '<?php if ($1): ?>',
+			'/{%\s*elseif\s*(.+?)\s*%}/' => '<?php elseif ($1): ?>',
+			'/{%\s*else\s*%}/'           => '<?php else: ?>',
+			'/{%\s*endif\s*%}/'          => '<?php endif; ?>',
 
-			'/{%\s*foreach\s*\((.+?)\)\s*%}/'
-				=> '<?php foreach ($1): ?>',
-			'/{%\s*endforeach\s*%}/'
-				=> '<?php endforeach; ?>',
+			// Only foreach with parentheses
+			'/{%\s*foreach\s*\((.+?)\)\s*%}/' => '<?php foreach ($1): ?>',
+			'/{%\s*endforeach\s*%}/'          => '<?php endforeach; ?>',
 
-			// Blocks/yields are already resolved by processExtendsAndBlocks(),
-			// so we just strip any leftover markers gracefully:
-			'/{%\s*block\s+([\w-]+)\s*%}/'
-				=> '',
-			'/{%\s*endblock\s*%}/'
-				=> '',
-			'/{%\s*yield\s*([\w-]+)\s*%}/'
-				=> '',
-			
-			// Any stray `{% extends ... %}` should be gone already after processExtendsAndBlocks(),
-			// but strip just in case:
-			'/{%\s*extends\s+["\'](.+?)["\']\s*%}/'
-				=> '',
+			// Blocks/yields/extends should be resolved earlier — strip leftovers defensively
+			'/{%\s*block\s+([\w-]+)\s*%}/'         => '',
+			'/{%\s*endblock\s*%}/'                 => '',
+			'/{%\s*yield\s*([\w-]+)\s*%}/'         => '',
+			'/{%\s*extends\s+["\'](.+?)["\']\s*%}/' => '',
 		];
 
-		return (string)\preg_replace(
-			\array_keys($patterns),
-			\array_values($patterns),
-			$code
-		);
+		$replaced = \preg_replace(\array_keys($patterns), \array_values($patterns), $code);
+		if ($replaced === null) {
+			throw new \RuntimeException('TemplateEngine: PCRE error during compileSyntax().');
+		}
+		return (string)$replaced;
 	}
+
+
 
 
 	/**
