@@ -1331,7 +1331,8 @@ final class TemplateEngine extends BaseService {
 	 *   1) `{% if (expr) %} ... {% endif %}`
 	 *   2) `{% elseif (expr) %}`, `{% else %}`
 	 *   3) `{% foreach (expr) %} ... {% endforeach %}`   // parentheses required
-	 *   These map 1:1 to native PHP `if/elseif/else/foreach` constructs.
+	 *   4) `{% continue %}`, `{% continue N %}`, `{% break %}`, `{% break N %}`  // optional level + optional semicolon
+	 *   These map 1:1 to native PHP `if/elseif/else/foreach/continue/break` constructs.
 	 *
 	 * - Variable assignment:
 	 *   - `{% set $name = expr %}` assigns to a local PHP variable. `$` prefix is required.
@@ -1393,9 +1394,13 @@ final class TemplateEngine extends BaseService {
 			'/{%\s*else\s*%}/'           => '<?php else: ?>',
 			'/{%\s*endif\s*%}/'          => '<?php endif; ?>',
 
-			// Only foreach with parentheses
+			// foreach (parentheses required)
 			'/{%\s*foreach\s*\((.+?)\)\s*%}/' => '<?php foreach ($1): ?>',
 			'/{%\s*endforeach\s*%}/'          => '<?php endforeach; ?>',
+
+			// Continue / Break (optional numeric level + optional semicolon)
+			'/{%\s*continue\s*((?:\s+\d+)?)\s*;?\s*%}/' => '<?php continue$1; ?>',
+			'/{%\s*break\s*((?:\s+\d+)?)\s*;?\s*%}/'    => '<?php break$1; ?>',
 
 			// Blocks/yields/extends should be resolved earlier — strip leftovers defensively
 			'/{%\s*block\s+([\w-]+)\s*%}/'         => '',
@@ -1410,8 +1415,6 @@ final class TemplateEngine extends BaseService {
 		}
 		return (string)$replaced;
 	}
-
-
 
 
 	/**
