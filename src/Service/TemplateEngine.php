@@ -1246,7 +1246,9 @@ final class TemplateEngine extends BaseService {
 			// because commented-out includes should NOT keep the cache hot.
 			$scanCode = $this->removeTemplateComments($srcCode);
 
-			$deps = $this->collectDependencies($scanCode, $layer, $visited = []);
+			$visited = [];
+			$deps = $this->collectDependencies($scanCode, $layer, $visited);
+
 			$maxMtime = \filemtime($srcPath);
 
 			foreach ($deps as [$depRel, $depLayer]) {

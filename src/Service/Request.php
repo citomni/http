@@ -266,6 +266,18 @@ class Request extends BaseService {
 	}
 
 
+	/** True if a POST key exists (even if empty string). */
+	public function hasPost(string $key): bool {
+		return \array_key_exists($key, $_POST);
+	}
+
+
+	/** True if a file was uploaded for $key (not UPLOAD_ERR_NO_FILE). */
+	public function hasFile(string $key): bool {
+		return $this->app->files->has($key);
+	}
+
+
 	/**
 	 * Whitelist subset from GET/POST (auto source).
 	 * @param array<int,string> $keys
@@ -320,21 +332,19 @@ class Request extends BaseService {
  */
 
 	/**
-	 * Single uploaded file entry (or null).
-	 * @return array<string,mixed>|null
+	 * Uploaded file wrapper (or null).
+	 *
+	 * @param string $key
+	 * @return \CitOmni\Http\Service\UploadedFile|null
 	 */
-	public function file(string $key): ?array {
-		$val = $_FILES[$key] ?? null;
-		return \is_array($val) ? $val : null;
+	public function file(string $key): ?\CitOmni\Http\Service\UploadedFile {
+		return $this->app->files->get($key);
 	}
 
 
-	/**
-	 * All uploaded files.
-	 * @return array<string,mixed>
-	 */
+	/** All uploaded files as value objects. */
 	public function files(): array {
-		return $_FILES;
+		return $this->app->files->all();
 	}
 
 
@@ -734,10 +744,35 @@ class Request extends BaseService {
 
 
 	/**
+	 * Path with app base trimmed, e.g. "/subdir/admin/x.html" -> "/admin/x.html".
+	 */
+	public function pathWithBaseTrimmed(): string {
+		$path = $this->path();
+		$base = (string)\parse_url($this->baseUrl(), \PHP_URL_PATH);
+		$base = \rtrim($base, '/');
+		if ($base !== '' && \str_starts_with($path, $base)) {
+			$trimmed = \substr($path, \strlen($base));
+			return $trimmed !== '' ? $trimmed : '/';
+		}
+		return $path;
+	}
+
+
+	/**
 	 * Query string without '?' or empty string.
 	 */
 	public function queryString(): string {
 		return (string)($_SERVER['QUERY_STRING'] ?? '');
+	}
+
+
+	/**
+	 * Return all query parameters (shallow copy of $_GET).
+	 *
+	 * @return array<string,mixed>
+	 */
+	public function queryAll(): array {
+		return $_GET;
 	}
 
 
@@ -1086,4 +1121,9 @@ class Request extends BaseService {
 	protected function isPublicIp(string $ip): bool {
 		return (bool)\filter_var($ip, \FILTER_VALIDATE_IP, \FILTER_FLAG_NO_PRIV_RANGE | \FILTER_FLAG_NO_RES_RANGE);
 	}
+		
+		
+
+
+	
 }
