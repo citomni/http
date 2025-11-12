@@ -48,6 +48,14 @@ final class Services {
 		'webhooksAuth'	=> \CitOmni\Http\Service\WebhooksAuth::class,
 		'slugger'		=> \CitOmni\Http\Service\Slugger::class,
 		'tags'			=> \CitOmni\Http\Service\Tags::class,
+		
+		// 'url'			=> \CitOmni\Http\Service\Url::class,
+		// 'files' 		=> \CitOmni\Http\Service\Files::class,
+		
+		'upload' 		=> \CitOmni\Http\Service\Upload::class,
+		
+		// Test service
+		// 'winProbe'		=> \CitOmni\Http\Service\WinProbe::class,
 	];
 
 }
