@@ -56,175 +56,395 @@ final class Upload extends BaseService {
 	}
 
 	/**
-	 * Save a single file for a CRUD column (image|file), optionally re-encoding (images) and creating thumbnails.
+	 * Save a single "column upload" (image/file) with deterministic naming and cleanup.
 	 *
-	 * @param string $fieldName The input name in $_FILES (e.g., 'cover_path').
-	 * @param array<string,mixed> $uploadCfg Configuration: dir, accept, maxBytes, maxMegapixel, rename, overwrite, deleteOld, encoding{format,quality}, thumbnails[].
-	 * @param array<string,mixed> $payload Effective normalized payload (used for {col:...} tokens).
-	 * @param array<string,mixed>|null $currentRow Current DB row (to locate/delete old files if deleteOld=true).
-	 * @param int|null $recordId Optional FK/PK for context (not required by the writer itself).
-	 * @param string|null $currentPath Explicit current public path for deletion (overrides heuristic when provided).
-	 * @param string|null $columnName Column name for deterministic cleanup of old file/thumbnail set.
-	 * @return array{status:bool,path:?string,thumbs:array<string,string>,error:array<int,string>,deleted:array<int,string>}
+	 * Behavior:
+	 * - Validates file, dir and MIME per config.
+	 * - For images:
+	 *   - Decodes original once to a GdImage (optionally EXIF-orients for JPEG).
+	 *   - Generates FULLSIZE directly from original when (w,h) are specified (always resample).
+	 *   - Applies fullsize suffix (if provided) before extension.
+	 *   - Generates all THUMBNAILS directly from the same original (no double-resampling).
+	 * - For non-images:
+	 *   - Moves file or auto-suffixes to avoid collisions (no thumbs).
+	 * - On any thumbnail failure, deletes fullsize + already-written thumbs atomically.
+	 * - When deleteOld=true, deletes previous column file and its thumbs.
+	 *
+	 * Notes:
+	 * - Fullsize keys at root of $uploadCfg: w, h, fit ('crop'|'stretch'), suffix (string).
+	 * - Thumbnails are configured under $uploadCfg['thumbnails'] as before.
+	 *
+	 * @param string      $fieldName   Input name in $_FILES.
+	 * @param array       $uploadCfg   Upload configuration (see docs).
+	 * @param array       $payload     POST payload (for rename pattern {col:...}).
+	 * @param array|null  $currentRow  Current DB row for cleanup (may be null on create).
+	 * @param int|null    $recordId    DB record id (optional, not required here).
+	 * @param string|null $currentPath Current public path for this column (optional).
+	 * @param string|null $columnName  Column name (required for deterministic cleanup).
+	 * @return array{status:bool,path:?string,thumbs:array,error:array,deleted:array}
 	 */
 	public function saveColumnUpload(string $fieldName, array $uploadCfg, array $payload, ?array $currentRow, ?int $recordId = null, ?string $currentPath = null, ?string $columnName = null): array {
 
-		$none = ['status' => false, 'path' => null, 'thumbs' => [], 'error' => [], 'deleted' => []];
+		// \var_dump(
+			// ['$fieldName' => $fieldName],
+			// ['$uploadCfg' => $uploadCfg],
+			// ['$payload' => $payload],
+			// ['$currentRow' => $currentRow],
+			// ['$recordId' => $recordId],
+			// ['$currentPath' => $currentPath],
+			// ['$columnName' => $columnName],
+			// ['$_FILES' => $_FILES],
+			// ['extension_loaded("gd")' => extension_loaded('gd')],
+			// ['function_exists("imagewebp")' =>function_exists('imagewebp')],
+			// ['class_exists("Imagick")' => class_exists('Imagick')],
+			// ['function_exists("imagecreatefromjpeg")' => function_exists('imagecreatefromjpeg')],
+			// ['function_exists("imagecreatefromwebp")' => function_exists('imagecreatefromwebp')]
+		// );		
+		// exit;
 
+
+		// Fail-fast on missing deterministic column name (used for cleanup)
 		if ($columnName === null || $columnName === '') {
-			return $none + ['error' => [$this->t('err_missing_column_name', 'Column name is required for deterministic cleanup.')]];
+			return [
+				'status'	=> false,
+				'path'		=> null,
+				'thumbs'	=> [],
+				'error'		=> [$this->t('err_missing_column_name', 'Column name is required for deterministic cleanup.')],
+				'deleted'	=> []
+			];
 		}
-
+		
+		// Do we have any file input?
 		if (!isset($_FILES[$fieldName])) {
-			return $none + ['error' => [$this->t('err_no_file', 'No file provided.')]];
+			return [
+				'status'	=> false,
+				'path'		=> null,
+				'thumbs'	=> [],
+				'error'		=> [$this->t('err_no_file', 'No file provided.')],
+				'deleted'	=> []
+			];
 		}
-
+		
+		// Second check for presence of file input
 		$f = $this->normalizeOneFile($_FILES[$fieldName]);
 		if ($f === null) {
-			return $none + ['error' => [$this->t('err_no_file', 'No file provided.')]];
-		}
-		if ($f['error'] !== \UPLOAD_ERR_OK) {
-			return $none + ['error' => [$this->errorFromUploadCode($f['error'])]];
-		}
-		if ($f['size'] <= 0) {
-			return $none + ['error' => [$this->t('err_empty_file', 'File is empty.')]];
+			return [
+				'status'	=> false,
+				'path'		=> null,
+				'thumbs'	=> [],
+				'error'		=> [$this->t('err_no_file', 'No file provided.')],
+				'deleted'	=> []
+			];
 		}
 
-		// Validate size limits (cfg clamped to php.ini)
+
+		// Get safe orig filename for the following error-messages
+		$orig = $this->safeOrigName($f['name'] ?? '');
+
+
+		// Low-level upload error?
+		if ($f['error'] !== \UPLOAD_ERR_OK) {
+			$msg = $this->errorFromUploadCode($f['error']);
+			if ($orig !== '') { $msg .= ' (' . $orig . ')'; }
+			return [
+				'status'	=> false,
+				'path'		=> null,
+				'thumbs'	=> [],
+				'error'		=> [$msg],
+				'deleted'	=> []
+			];
+		}
+		
+		// Empty file?
+		if ($f['size'] <= 0) {
+			$msg = $this->t('err_empty_file','File is empty.');
+			if ($orig !== '') { $msg .= ' (' . $orig . ')'; }
+			return [
+				'status'	=> false,
+				'path'		=> null,
+				'thumbs'	=> [],
+				'error'		=> [$msg],
+				'deleted'	=> []
+			];
+		}
+
+		// Enforce max size (clamped by ini)
 		// 0 means "no service-level cap" (only PHP ini caps apply via UPLOAD_ERR_* and finfo checks)
 		$maxBytesCfg = (int)($uploadCfg['maxBytes'] ?? 0);
 		$maxBytes = $this->clampMaxBytesByIni($maxBytesCfg);
 		if ($maxBytes > 0 && $f['size'] > $maxBytes) {
-			return $none + ['error' => [$this->t('err_too_large_bytes', 'File is too large.')]];
+			$msg = $this->t('err_too_large_bytes','File is too large.');
+			if ($orig !== '') { $msg .= ' (' . $orig . ')'; }
+			return [
+				'status'	=> false,
+				'path'		=> null,
+				'thumbs'	=> [],
+				'error'		=> [$msg],
+				'deleted'	=> []
+			];
 		}
 
 		// Resolve target dir
 		$dir = $this->normalizeDir((string)($uploadCfg['dir'] ?? ''));
 		if ($dir === '') {
-			return $none + ['error' => [$this->t('err_cfg_dir_missing', 'Upload directory is missing in configuration.')]];
+			return [
+				'status'	=> false,
+				'path'		=> null,
+				'thumbs'	=> [],
+				'error'		=> [$this->t('err_cfg_dir_missing','Upload directory is missing in configuration.')],
+				'deleted'	=> []
+			];
 		}
 		$absDir = $this->absUploadsDir($dir);
 		$this->ensureDir($absDir);
 
-		// MIME detection
-		$mime = $this->detectMime($f['tmp_name']);
+		// MIME + accept
+		$mime   = $this->detectMime($f['tmp_name']);
 		$accept = (array)($uploadCfg['accept'] ?? []);
 		if ($accept !== [] && !\in_array($mime, $accept, true)) {
-			return $none + ['error' => [$this->t('err_invalid_mime', 'File type not allowed.')]];
+			$msg = $this->t('err_invalid_mime','File type not allowed.');
+			if ($orig !== '') { $msg .= ' (' . $orig . ')'; }
+			return [
+				'status'	=> false,
+				'path'		=> null,
+				'thumbs'	=> [],
+				'error'		=> [$msg],
+				'deleted'	=> []
+			];
 		}
 
-		// Build final basename (without extension), then choose extension from encoding or mime.
+		// Basename and extension
 		$rename = (array)($uploadCfg['rename'] ?? []);
 		$base = $this->buildBasenameFromPattern(
-			(string)($rename['pattern'] ?? ''),
-			$payload,
-			(string)$f['name'],
-			(bool)($rename['rand'] ?? true),
-			(int)($rename['max'] ?? 80)
+			(string)($rename['pattern'] ?? ''), $payload, (string)$f['name'],
+			(bool)($rename['rand'] ?? true), (int)($rename['max'] ?? 80)
 		);
-
 		$overwrite = (bool)($uploadCfg['overwrite'] ?? false);
 		$deleteOld = (bool)($uploadCfg['deleteOld'] ?? true);
 		$deleted = [];
 
-		$isImg = $this->isImageMime($mime);
-		$encoding = (array)($uploadCfg['encoding'] ?? []);
-		$targetFormat = $isImg ? (string)($encoding['format'] ?? $this->extFromMime($mime)) : $this->extFromMime($mime);
-		$targetQuality = (int)($encoding['quality'] ?? 82);
-		$ext = $this->normalizeExt($targetFormat);
+		$isImg          = $this->isImageMime($mime);
+		$encoding       = (array)($uploadCfg['encoding'] ?? []);
+		$targetFormat   = $isImg ? (string)($encoding['format'] ?? $this->extFromMime($mime)) : $this->extFromMime($mime);
+		$targetQuality  = (int)($encoding['quality'] ?? 82);
+		$ext            = $this->normalizeExt($targetFormat);
 
-		$targetPath = $absDir . $base . '.' . $ext;
+		// Fullsize controls (always resize when both > 0)
+		$fullW      = (int)($uploadCfg['w'] ?? 0);
+		$fullH      = (int)($uploadCfg['h'] ?? 0);
+		$fullFit    = (string)($uploadCfg['fit'] ?? 'crop');   // 'crop' | 'stretch'
+		$fullSuffix = (string)($uploadCfg['suffix'] ?? '');    // added before extension
 
-		// Images: extra validation (dimensions, megapixel, optional re-encode)
+		// Compose final fullsize target path (suffix before extension)
+		$fullBaseName = $base . ($fullSuffix !== '' ? $fullSuffix : '');
+		$targetPath   = $absDir . $fullBaseName . '.' . $ext;
+
+		// Images: Decode once, then make fullsize + thumbs from the original
 		if ($isImg) {
 			[$w, $h] = $this->readImageDimensions($f['tmp_name']);
 			if ($w <= 0 || $h <= 0) {
-				return $none + ['error' => [$this->t('err_invalid_image', 'Invalid image.')]];
+				$msg = $this->t('err_invalid_image','Invalid image.');
+				if ($orig !== '') { $msg .= ' (' . $orig . ')'; }
+				return [
+					'status'	=> false,
+					'path'		=> null,
+					'thumbs'	=> [],
+					'error'		=> [$msg],
+					'deleted'	=> []
+				];
 			}
 			$maxMP = (int)($uploadCfg['maxMegapixel'] ?? 0);
 			if ($maxMP > 0) {
 				$mp = (int)\ceil(($w * $h) / 1_000_000);
 				if ($mp > $maxMP) {
-					return $none + ['error' => [$this->t('err_too_large_megapixel', 'Image exceeds megapixel limit.')]];
+					$msg = $this->t('err_too_large_megapixel','Image exceeds megapixel limit.');
+					if ($orig !== '') { $msg .= ' (' . $orig . ')'; }
+					return [
+						'status'	=> false,
+						'path'		=> null,
+						'thumbs'	=> [],
+						'error'		=> [$msg],
+						'deleted'	=> []
+					];
 				}
 			}
-
-			$ramCap = (int)($uploadCfg['maxImageRamBytes'] ?? ($this->options['maxImageRamBytes'] ?? (128 * 1024 * 1024)));
+			$ramCap   = (int)($uploadCfg['maxImageRamBytes'] ?? ($this->options['maxImageRamBytes'] ?? (128 * 1024 * 1024)));
 			$estimated = (int)($w * $h * 5);
 			if ($ramCap > 0 && $estimated > $ramCap) {
-				return $none + ['error' => [$this->t('err_image_memory', 'Image is too large to process safely.')]];
+				$msg = $this->t('err_image_memory','Image is too large to process safely.');
+				if ($orig !== '') { $msg .= ' (' . $orig . ')'; }
+				return [
+					'status'	=> false,
+					'path'		=> null,
+					'thumbs'	=> [],
+					'error'		=> [$msg],
+					'deleted'	=> []
+				];
 			}
 
+			// Collision handling (ensure uniqueness) for fullsize (final name)
 			if (!$overwrite && \is_file($targetPath)) {
 				$targetPath = $this->resolveUniqueTargetPath($targetPath);
 			}
 
-			// Re-encode if requested or container differs; otherwise move file as-is (fast path).
-			$needReencode = ($encoding !== []) || !$this->sameFamily($mime, $ext);
-
-			$exifOn = (bool)($uploadCfg['exifOrient'] ?? false);
-			if ($needReencode) {
-				$ok = $this->reencodeImage($f['tmp_name'], $targetPath, $ext, $targetQuality, $exifOn && $mime === 'image/jpeg');
-			} else {
-				$ok = $this->moveUploadedFile($f['tmp_name'], $targetPath, $overwrite, false);
+			// Decode original once
+			$src = $this->imageLoad($f['tmp_name']);
+			if (!$src) {
+				$msg = $this->t('err_invalid_image','Invalid image.');
+				if ($orig !== '') { $msg .= ' (' . $orig . ')'; }
+				return [
+					'status'	=> false,
+					'path'		=> null,
+					'thumbs'	=> [],
+					'error'		=> [$msg],
+					'deleted'	=> []
+				];
 			}
 
-			if (!$ok) {
-				return $none + ['error' => [$this->t('err_write_failed', 'Failed to write file.')]];
+			// Optional EXIF orientation (JPEG only)
+			$exifOn = (bool)($uploadCfg['exifOrient'] ?? false);
+			if ($exifOn && $mime === 'image/jpeg' && \function_exists('exif_read_data')) {
+				$oriented = $this->applyExifOrientation($src, $f['tmp_name']);
+				if ($oriented) { $src = $oriented; }
+			}
+
+			// --- Fullsize (from original, obviously) ---
+			$fullOk = false;
+			if ($fullW > 0 && $fullH > 0) {
+				$dst = ($fullFit === 'stretch')
+					? $this->imageResizeStretch($src, $fullW, $fullH)
+					: $this->imageResizeCropCenter($src, $fullW, $fullH);
+				if ($dst) {
+					$fullOk = $this->imageSave($dst, $targetPath, $ext, $targetQuality);
+					\imagedestroy($dst);
+				}
+			} else {
+				// No explicit fullsize (w,h) -> reencode if format differs/encoding set; else move file.
+				$needReencode = ($encoding !== []) || !$this->sameFamily($mime, $ext);
+				if ($needReencode) {
+					$fullOk = $this->imageSave($src, $targetPath, $ext, $targetQuality);
+				} else {
+					// We still want single decode for thumbs, but moving the uploaded tmp is OK now.
+					// Make sure targetPath uniqueness was handled above.
+					\imagedestroy($src); // free decoded; thumbs will not be created below in this branch (since no thumbs require src)
+					$fullOk = $this->moveUploadedFile($f['tmp_name'], $targetPath, $overwrite, false);
+					// Reload original if thumbs exist (so we keep the "from original" guarantee)
+					if (($uploadCfg['thumbnails'] ?? []) !== []) {
+						$src = $this->imageLoad($targetPath);
+					}
+				}
+			}
+
+			if (!$fullOk) {
+				if ($src) { \imagedestroy($src); }
+				$msg = $this->t('err_write_failed','Failed to write file.');
+				if ($orig !== '') { $msg .= ' (' . $orig . ')'; }
+				return [
+					'status'	=> false,
+					'path'		=> null,
+					'thumbs'	=> [],
+					'error'		=> [$msg],
+					'deleted'	=> []
+				];
 			}
 
 			$this->tryChmodPublic($targetPath);
 
-
-			// Thumbnails (optional)
+			// --- Thumbnails (also from original/same $src) ---
 			$thumbsCfg = (array)($uploadCfg['thumbnails'] ?? []);
 			$thumbCols = [];
-			if ($thumbsCfg !== []) {
-				$thumbCols = $this->makeThumbnails($targetPath, $thumbsCfg);
-				
-				if (!empty($thumbCols['_errors'])) {
-					$this->deleteIfFile($targetPath);
-					foreach ((array)($thumbCols['_paths'] ?? []) as $pub) {
-						$this->deleteIfFile($this->fromPublicPath((string)$pub));
-					}
-					foreach ($thumbCols as $k => $v) {
-						if ($k === '_errors' || $k === '_paths') { continue; }
-						$this->deleteIfFile($this->fromPublicPath((string)$v));
-					}
-					return [
-						'status' => false,
-						'path' => null,
-						'thumbs' => [],
-						'error' => (array)$thumbCols['_errors'],
-						'deleted' => []
-					];
-				}
+			$writtenThumbAbs = [];
 
-				unset($thumbCols['_errors'], $thumbCols['_paths']);
+			if ($thumbsCfg !== []) {
+				$piFull = \pathinfo($targetPath);
+				$dirAbs = (string)($piFull['dirname'] ?? $absDir);
+				$baseNoExtForThumbSeed = $base; // thumbs typically use their own suffix; base is the pattern root
+
+				foreach ($thumbsCfg as $tCfg) {
+					$tw = (int)($tCfg['w'] ?? 0);
+					$th = (int)($tCfg['h'] ?? 0);
+					if ($tw <= 0 || $th <= 0) {
+						$err = $this->t('err_thumb_wh','Invalid thumbnail width/height.');
+						$writtenThumbAbs[] = null; // mark attempt
+						$thumbCols['_errors'][] = $err;
+						continue;
+					}
+					$tfit   = (string)($tCfg['fit'] ?? 'crop');
+					$tfmt   = $this->normalizeExt((string)($tCfg['format'] ?? $ext));
+					$tqual  = (int)($tCfg['quality'] ?? 82);
+					$tsuf   = (string)($tCfg['suffix'] ?? ('_' . $tw . 'x' . $th));
+					$tcol   = (string)($tCfg['column'] ?? '');
+
+					$thumbAbs = $dirAbs . DIRECTORY_SEPARATOR . $baseNoExtForThumbSeed . $tsuf . '.' . $tfmt;
+
+					// Create from original (no cascading resample)
+					$ti = ($tfit === 'stretch')
+						? $this->imageResizeStretch($src, $tw, $th)
+						: $this->imageResizeCropCenter($src, $tw, $th);
+					if (!$ti || !$this->imageSave($ti, $thumbAbs, $tfmt, $tqual)) {
+						if ($ti) { \imagedestroy($ti); }
+						$thumbCols['_errors'][] = $this->t('err_thumb_write','Failed to write thumbnail.');
+						$writtenThumbAbs[] = null;
+						continue;
+					}
+					\imagedestroy($ti);
+					$this->tryChmodPublic($thumbAbs);
+					$writtenThumbAbs[] = $thumbAbs;
+
+					$pub = $this->toPublicPath($thumbAbs);
+					$thumbCols['_paths'][] = $pub;
+					if ($tcol !== '') {
+						$thumbCols[$tcol] = $pub;
+					}
+				}
 			}
 
-			// Delete old (only after successful new write+thumbs)
+			// Cleanup + error handling for thumbs
+			if (!empty($thumbCols['_errors'])) {
+				
+				// Delete fullsize and any thumbs we managed to write
+				$this->deleteIfFile($targetPath);
+				foreach ((array)($thumbCols['_paths'] ?? []) as $pub) {
+					$this->deleteIfFile($this->fromPublicPath((string)$pub));
+				}
+				if ($src) { \imagedestroy($src); }
+				$errs = (array)$thumbCols['_errors'];
+				if ($orig !== '') { $errs = \array_map(fn($e) => (string)$e . ' (' . $orig . ')', $errs); }
+				return ['status'=>false,'path'=>null,'thumbs'=>[],'error'=>$errs,'deleted'=>[]];
+			}
+			if ($src) { \imagedestroy($src); }
+			unset($thumbCols['_errors'], $thumbCols['_paths']);
+
+			// Delete old files after successful write
 			if ($deleteOld && ($currentRow !== null || $currentPath !== null)) {
-				$deleted = \array_merge($deleted,$this->deleteOldColumnFiles($currentRow, $uploadCfg, $currentPath, $columnName));
+				$deleted = \array_merge($deleted, $this->deleteOldColumnFiles($currentRow, $uploadCfg, $currentPath, $columnName));
 			}
 
 			return [
-				'status' => true,
-				'path' => $this->toPublicPath($targetPath),
-				'thumbs' => $thumbCols,
-				'error' => [],
-				'deleted' => $deleted
+				'status'	=> true,
+				'path'		=> $this->toPublicPath($targetPath),
+				'thumbs'	=> $thumbCols,
+				'error'		=> [],
+				'deleted'	=> $deleted
 			];
 		}
 
-		// Non-image: plain move, no re-encode, no thumbs (mirror image-collision strategy)
+		// NON-IMAGES: Simple move (no thumbs)
+		$targetPath = $absDir . $base . '.' . $ext; // Suffix only applies to fullsize images
 		if (!$overwrite) {
 			$targetPath = $this->resolveUniqueTargetPath($targetPath);
 		}
 		if (!$this->moveUploadedFile($f['tmp_name'], $targetPath, $overwrite, false)) {
-			return $none + ['error' => [$this->t('err_write_failed', 'Failed to write file.')]];
+			$msg = $this->t('err_write_failed', 'Failed to write file.');
+			if ($orig !== '') { $msg .= ' (' . $orig . ')'; }
+			return [
+				'status'	=> false,
+				'path'		=> null,
+				'thumbs'	=> [],
+				'error'		=> [$msg],
+				'deleted'	=> []
+			];
 		}
-
 		$this->tryChmodPublic($targetPath);
 
 		if ($deleteOld && ($currentRow !== null || $currentPath !== null)) {
@@ -232,98 +452,167 @@ final class Upload extends BaseService {
 		}
 
 		return [
-			'status' => true,
-			'path' => $this->toPublicPath($targetPath),
-			'thumbs' => [],
-			'error' => [],
-			'deleted' => $deleted
-		];
+			'status'	=> true,
+			'path'		=> $this->toPublicPath($targetPath),
+			'thumbs'	=> [],
+			'error'		=> [],
+			'deleted'	=> $deleted];
 	}
 
+
 	/**
-	 * Add attached images (multi) with optional re-encode & thumbnails; creates table rows in caller's code.
-	 * This method only writes files and returns per-file results; DB INSERTs are responsibility of the caller.
+	 * Add multiple attached images (gallery-like). Fullsize + thumbs are created from the original (single decode).
+																											
 	 *
-	 * @param array<string,mixed> $attachedCfg Expect keys: inputName, dir, accept, maxBytes, maxMegapixel, maxCount, rename, encoding, thumbnails.
-	 * @param array<string,mixed> $payload Effective normalized payload (for rename tokens).
-	 * @param int $fkId Foreign key id for context (not used directly by writer).
-	 * @param int $currentCount Current number of attachments already persisted (for maxCount enforcement).
-	 * @return array{status:bool, files:array<int,array{ok:bool,path?:string,thumbs?:array<string,string>,error?:string}>, error:array<int,string>}
+	 * Config (root of $attachedCfg):
+	 * - inputName: string (required)   Name in $_FILES (multiple allowed)
+	 * - dir: string (required)         Public uploads subdir (e.g. "/news/")
+	 * - accept: string[]               Allowed MIME types (e.g. ["image/webp","image/png","image/jpeg"])
+	 * - maxBytes: int                  Hard cap in bytes (clamped by PHP ini)
+	 * - maxMegapixel: int              Max megapixels (W*H / 1_000_000)
+	 * - maxImageRamBytes: int          Approx. RAM budget when decoding (W*H*5)
+	 * - maxCount: int                  Max number of attachments (0 = unlimited)
+	 * - rename: array{pattern?:string,rand?:bool,max?:int}
+	 * - encoding: array{format?:string,quality?:int}  Default "webp", 82
+	 * - exifOrient: bool               If true, apply EXIF orientation for JPEG inputs
+	 *
+	 * Fullsize controls at root (optional):
+	 * - w: int, h: int                 If both > 0, always resample fullsize
+	 * - fit: "crop"|"stretch"          Default "crop"
+	 * - suffix: string                 Added before extension for fullsize (e.g. "_1280x720")
+	 *
+	 * Thumbnails (as before) in $attachedCfg['thumbnails'][]:
+	 * - w:int, h:int, fit?:string, suffix?:string, format?:string, quality?:int
+	 * - column?:string                 If set, returned thumbs[$column] = public path
+	 *
+	 * Returns:
+	 * - ['status'=>bool, 'files'=>array{...}, 'error'=>array]
+	 *   Each entry in files[]:
+	 *     ['ok'=>true, 'path'=>string, 'thumbs'=>array<string,string>]
+	 *     Or on failure: ['ok'=>false, 'error'=>string]
+	 *
+	 * @param array $attachedCfg
+	 * @param array $payload
+	 * @param int   $fkId
+	 * @param int   $currentCount
+	 * @return array{status:bool,files:array,error:array}
 	 */
 	public function addAttachedImages(array $attachedCfg, array $payload, int $fkId, int $currentCount = 0): array {
 		$out = ['status' => false, 'files' => [], 'error' => []];
 
 		$input = (string)($attachedCfg['inputName'] ?? '');
 		if ($input === '' || !isset($_FILES[$input])) {
-			return $out + ['error' => [$this->t('err_no_file', 'No file provided.')]];
+			return ['status' => false, 'files' => [], 'error' => [$this->t('err_no_file', 'No file provided.')]];
 		}
+
 		$dir = $this->normalizeDir((string)($attachedCfg['dir'] ?? ''));
 		if ($dir === '') {
-			return $out + ['error' => [$this->t('err_cfg_dir_missing', 'Upload directory is missing in configuration.')]];
+			return ['status' => false, 'files' => [], 'error' => [$this->t('err_cfg_dir_missing', 'Upload directory is missing in configuration.')]];
 		}
 		$absDir = $this->absUploadsDir($dir);
 		$this->ensureDir($absDir);
 
 		$files = $this->normalizeMultiFiles($_FILES[$input]);
 		if ($files === []) {
-			return $out + ['error' => [$this->t('err_no_file', 'No file provided.')]];
+			return ['status' => false, 'files' => [], 'error' => [$this->t('err_no_file', 'No file provided.')]];
 		}
 
-		$accept = (array)($attachedCfg['accept'] ?? []);
+		$accept   = (array)($attachedCfg['accept'] ?? []);
 		$maxBytes = $this->clampMaxBytesByIni((int)($attachedCfg['maxBytes'] ?? 0));
-		$maxMP = (int)($attachedCfg['maxMegapixel'] ?? 0);
+		$maxMP    = (int)($attachedCfg['maxMegapixel'] ?? 0);
+		$ramCap   = (int)($attachedCfg['maxImageRamBytes'] ?? ($this->options['maxImageRamBytes'] ?? (128 * 1024 * 1024)));
 
 		$rename = (array)($attachedCfg['rename'] ?? []);
-		$enc = (array)($attachedCfg['encoding'] ?? []);
+		$enc    = (array)($attachedCfg['encoding'] ?? []);
 		$thumbsCfg = (array)($attachedCfg['thumbnails'] ?? []);
 
 		$targetFormat = (string)($enc['format'] ?? 'webp');
-		$quality = (int)($enc['quality'] ?? 82);
-		$ext = $this->normalizeExt($targetFormat);
+		$quality      = (int)($enc['quality'] ?? 82);
+		$ext          = $this->normalizeExt($targetFormat);
 
-		// Enforce maxCount using currentCount
-		$maxCount = (int)($attachedCfg['maxCount'] ?? 0);
-		$remaining = $maxCount > 0 ? \max(0, $maxCount - \max(0, $currentCount)) : 0;
-		$accepted = 0;
+		// Fullsize controls (optional). If both > 0, we ALWAYS resample.
+		$fullW      = (int)($attachedCfg['w'] ?? 0);
+		$fullH      = (int)($attachedCfg['h'] ?? 0);
+		$fullFit    = (string)($attachedCfg['fit'] ?? 'crop');      // 'crop' | 'stretch'
+		$fullSuffix = (string)($attachedCfg['suffix'] ?? '');       // added before extension
+		$exifOn     = (bool)($attachedCfg['exifOrient'] ?? false);
+
+		$maxCount   = (int)($attachedCfg['maxCount'] ?? 0);
+		$remaining  = $maxCount > 0 ? \max(0, $maxCount - \max(0, $currentCount)) : 0;
+		$accepted   = 0;
 
 		foreach ($files as $f) {
+   
+			$orig = $this->safeOrigName($f['name'] ?? '');
+
+			// Enforce max-count (if any)
 			if ($maxCount > 0 && $accepted >= $remaining) {
 				$out['files'][] = ['ok' => false, 'error' => $this->t('err_max_count_reached', 'Maximum number of attachments reached.')];
 				continue;
 			}
+
+			// Low-level upload issues
 			if ($f['error'] !== \UPLOAD_ERR_OK) {
-				$out['files'][] = ['ok' => false, 'error' => $this->errorFromUploadCode($f['error'])];
+				$msg = $this->errorFromUploadCode($f['error']);
+				if ($orig !== '') { $msg .= ' (' . $orig . ')'; }
+				$out['files'][] = ['ok' => false, 'error' => $msg];
 				continue;
 			}
 			if ($f['size'] <= 0) {
-				$out['files'][] = ['ok' => false, 'error' => $this->t('err_empty_file', 'File is empty.')];
+				$msg = $this->t('err_empty_file', 'File is empty.');
+				if ($orig !== '') { $msg .= ' (' . $orig . ')'; }
+				$out['files'][] = ['ok' => false, 'error' => $msg];
 				continue;
 			}
 			if ($maxBytes > 0 && $f['size'] > $maxBytes) {
-				$out['files'][] = ['ok' => false, 'error' => $this->t('err_too_large_bytes', 'File is too large.')];
+				$msg = $this->t('err_too_large_bytes', 'File is too large.');
+				if ($orig !== '') { $msg .= ' (' . $orig . ')'; }
+				$out['files'][] = ['ok' => false, 'error' => $msg];
 				continue;
 			}
-			$mime = $this->detectMime($f['tmp_name']);
+											 
 
+			$mime = $this->detectMime($f['tmp_name']);
+			
 			// Only enforce allowlist when provided
 			if ($accept !== [] && !\in_array($mime, $accept, true)) {
-				$out['files'][] = ['ok' => false, 'error' => $this->t('err_invalid_mime', 'File type not allowed.')];
+				$msg = $this->t('err_invalid_mime', 'File type not allowed.');
+				if ($orig !== '') { $msg .= ' (' . $orig . ')'; }
+				$out['files'][] = ['ok' => false, 'error' => $msg];
+				continue;
+			}
+			if (!$this->isImageMime($mime)) {
+				$msg = $this->t('err_invalid_mime', 'File type not allowed.');
+				if ($orig !== '') { $msg .= ' (' . $orig . ')'; }
+				$out['files'][] = ['ok' => false, 'error' => $msg];
 				continue;
 			}
 
 			[$w, $h] = $this->readImageDimensions($f['tmp_name']);
 			if ($w <= 0 || $h <= 0) {
-				$out['files'][] = ['ok' => false, 'error' => $this->t('err_invalid_image', 'Invalid image.')];
+				$msg = $this->t('err_invalid_image', 'Invalid image.');
+				if ($orig !== '') { $msg .= ' (' . $orig . ')'; }
+				$out['files'][] = ['ok' => false, 'error' => $msg];
 				continue;
 			}
 			if ($maxMP > 0) {
 				$mp = (int)\ceil(($w * $h) / 1_000_000);
 				if ($mp > $maxMP) {
-					$out['files'][] = ['ok' => false, 'error' => $this->t('err_too_large_megapixel', 'Image exceeds megapixel limit.')];
+					$msg = $this->t('err_too_large_megapixel', 'Image exceeds megapixel limit.');
+					if ($orig !== '') { $msg .= ' (' . $orig . ')'; }
+					$out['files'][] = ['ok' => false, 'error' => $msg];
 					continue;
 				}
 			}
+			$estimated = (int)($w * $h * 5);
+			if ($ramCap > 0 && $estimated > $ramCap) {
+				$msg = $this->t('err_image_memory', 'Image is too large to process safely.');
+				if ($orig !== '') { $msg .= ' (' . $orig . ')'; }
+				$out['files'][] = ['ok' => false, 'error' => $msg];
+				continue;
+			}
 
+			// Build deterministic base name
 			$base = $this->buildBasenameFromPattern(
 				(string)($rename['pattern'] ?? ''),
 				$payload,
@@ -332,37 +621,122 @@ final class Upload extends BaseService {
 				(int)($rename['max'] ?? 80)
 			);
 
-			$targetPath = $this->resolveUniqueTargetPath($absDir . $base . '.' . $ext);
+			// Compose fullsize target (suffix before extension), and ensure unique path
+			$fullBaseName = $base . ($fullSuffix !== '' ? $fullSuffix : '');
+			$fullAbsPath  = $this->resolveUniqueTargetPath($absDir . $fullBaseName . '.' . $ext);
 
-			$ok = $this->reencodeImage($f['tmp_name'], $targetPath, $ext, $quality);
-			if (!$ok) {
-				$out['files'][] = ['ok' => false, 'error' => $this->t('err_write_failed', 'Failed to write file.')];
+			// Decode original once
+			$src = $this->imageLoad($f['tmp_name']);
+			if (!$src) {
+				$msg = $this->t('err_invalid_image', 'Invalid image.');
+				if ($orig !== '') { $msg .= ' (' . $orig . ')'; }
+				$out['files'][] = ['ok' => false, 'error' => $msg];
 				continue;
 			}
 
-			$this->tryChmodPublic($targetPath);
-
-			$thumbCols = [];
-			if ($thumbsCfg !== []) {
-				$thumbCols = $this->makeThumbnails($targetPath, $thumbsCfg);
-				if (!empty($thumbCols['_errors'])) {
-					// Cleanup written original if thumb failed
-					if (\is_file($targetPath)) { @unlink($targetPath); }
-					$out['files'][] = ['ok' => false, 'error' => \implode(' ', (array)$thumbCols['_errors'])];
-					continue;
-				}
-				unset($thumbCols['_errors'], $thumbCols['_paths']);
+			// Optional EXIF orientation for JPEG source
+			if ($exifOn && $mime === 'image/jpeg' && \function_exists('exif_read_data')) {
+				$oriented = $this->applyExifOrientation($src, $f['tmp_name']);
+				if ($oriented) { $src = $oriented; }
 			}
 
-			// Bump accepted counter only on success
-			$accepted++;
+			// ---- Fullsize (from original) ----
+			$fullOk = false;
+			if ($fullW > 0 && $fullH > 0) {
+				$dst = ($fullFit === 'stretch')
+					? $this->imageResizeStretch($src, $fullW, $fullH)
+					: $this->imageResizeCropCenter($src, $fullW, $fullH);
+				if ($dst) {
+					$fullOk = $this->imageSave($dst, $fullAbsPath, $ext, $quality);
+					\imagedestroy($dst);
+				}
+			} else {
+				// No explicit size: reencode to target format/quality
+				$fullOk = $this->imageSave($src, $fullAbsPath, $ext, $quality);
+			}
 
-			$out['files'][] = ['ok' => true, 'path' => $this->toPublicPath($targetPath), 'thumbs' => $thumbCols];
+			if (!$fullOk) {
+				if ($src) { \imagedestroy($src); }
+				$msg = $this->t('err_write_failed', 'Failed to write file.');
+				if ($orig !== '') { $msg .= ' (' . $orig . ')'; }
+				$out['files'][] = ['ok' => false, 'error' => $msg];
+				continue;
+			}
+			$this->tryChmodPublic($fullAbsPath);
+
+			// ---- Thumbnails (also from original) ----
+			$thumbCols = [];
+			$writtenThumbAbs = [];
+			if ($thumbsCfg !== []) {
+				$piFull = \pathinfo($fullAbsPath);
+				$dirAbs = (string)($piFull['dirname'] ?? $absDir);
+				$baseNoExtForThumbSeed = $base; // each thumb has its own suffix
+
+				foreach ($thumbsCfg as $tCfg) {
+					$tw = (int)($tCfg['w'] ?? 0);
+					$th = (int)($tCfg['h'] ?? 0);
+					if ($tw <= 0 || $th <= 0) {
+						$thumbCols['_errors'][] = $this->t('err_thumb_wh', 'Invalid thumbnail width/height.');
+						continue;
+					}
+					$tfit  = (string)($tCfg['fit'] ?? 'crop');
+					$tfmt  = $this->normalizeExt((string)($tCfg['format'] ?? $ext));
+					$tqual = (int)($tCfg['quality'] ?? 82);
+					$tsuf  = (string)($tCfg['suffix'] ?? ('_' . $tw . 'x' . $th));
+					$tcol  = (string)($tCfg['column'] ?? '');
+
+					// Unique per thumb to avoid collisions on repeated uploads
+					$thumbAbs = $this->resolveUniqueTargetPath($dirAbs . DIRECTORY_SEPARATOR . $baseNoExtForThumbSeed . $tsuf . '.' . $tfmt);
+
+					$ti = ($tfit === 'stretch')
+						? $this->imageResizeStretch($src, $tw, $th)
+						: $this->imageResizeCropCenter($src, $tw, $th);
+					if (!$ti || !$this->imageSave($ti, $thumbAbs, $tfmt, $tqual)) {
+						if ($ti) { \imagedestroy($ti); }
+						$thumbCols['_errors'][] = $this->t('err_thumb_write', 'Failed to write thumbnail.');
+						continue;
+					}
+					\imagedestroy($ti);
+					$this->tryChmodPublic($thumbAbs);
+					$writtenThumbAbs[] = $thumbAbs;
+
+					$pub = $this->toPublicPath($thumbAbs);
+					$thumbCols['_paths'][] = $pub;
+					if ($tcol !== '') {
+						$thumbCols[$tcol] = $pub;
+					}
+				}
+													   
+			}
+
+			// Atomic cleanup on any thumb error
+			if (!empty($thumbCols['_errors'])) {
+				$this->deleteIfFile($fullAbsPath);
+				foreach ((array)($thumbCols['_paths'] ?? []) as $pub) {
+					$this->deleteIfFile($this->fromPublicPath((string)$pub));
+				}
+				if ($src) { \imagedestroy($src); }
+				$msg = \implode(' ', (array)$thumbCols['_errors']);
+				if ($orig !== '') { $msg .= ' (' . $orig . ')'; }
+				$out['files'][] = ['ok' => false, 'error' => $msg];
+				continue;
+			}
+
+			if ($src) { \imagedestroy($src); }
+			unset($thumbCols['_errors'], $thumbCols['_paths']);
+
+			$accepted++;
+			$out['files'][] = [
+				'ok'    => true,
+				'path'  => $this->toPublicPath($fullAbsPath),
+				'thumbs'=> $thumbCols
+			];
 		}
 
 		$out['status'] = true;
 		return $out;
 	}
+
 
 	/**
 	 * Add attached non-image files (multi). No re-encode, no thumbnails.
@@ -378,18 +752,18 @@ final class Upload extends BaseService {
 
 		$input = (string)($attachedCfg['inputName'] ?? '');
 		if ($input === '' || !isset($_FILES[$input])) {
-			return $out + ['error' => [$this->t('err_no_file', 'No file provided.')]];
+			return ['status' => false, 'files' => [], 'error' => [$this->t('err_no_file', 'No file provided.')]];
 		}
 		$dir = $this->normalizeDir((string)($attachedCfg['dir'] ?? ''));
 		if ($dir === '') {
-			return $out + ['error' => [$this->t('err_cfg_dir_missing', 'Upload directory is missing in configuration.')]];
+			return ['status' => false, 'files' => [], 'error' => [$this->t('err_cfg_dir_missing', 'Upload directory is missing in configuration.')]];
 		}
 		$absDir = $this->absUploadsDir($dir);
 		$this->ensureDir($absDir);
 
 		$files = $this->normalizeMultiFiles($_FILES[$input]);
 		if ($files === []) {
-			return $out + ['error' => [$this->t('err_no_file', 'No file provided.')]];
+			return ['status' => false, 'files' => [], 'error' => [$this->t('err_no_file', 'No file provided.')]];
 		}
 
 		$accept = (array)($attachedCfg['accept'] ?? []);
@@ -402,25 +776,37 @@ final class Upload extends BaseService {
 		$accepted = 0;
 
 		foreach ($files as $f) {
+			
+			$orig = $this->safeOrigName($f['name'] ?? '');
+			
 			if ($maxCount > 0 && $accepted >= $remaining) {
 				$out['files'][] = ['ok' => false, 'error' => $this->t('err_max_count_reached', 'Maximum number of attachments reached.')];
 				continue;
 			}
 			if ($f['error'] !== \UPLOAD_ERR_OK) {
-				$out['files'][] = ['ok' => false, 'error' => $this->errorFromUploadCode($f['error'])];
+				$msg = $this->errorFromUploadCode($f['error']);
+				if ($orig !== '') { $msg .= ' (' . $orig . ')'; }
+				$out['files'][] = ['ok' => false, 'error' => $msg];
 				continue;
 			}
 			if ($f['size'] <= 0) {
-				$out['files'][] = ['ok' => false, 'error' => $this->t('err_empty_file', 'File is empty.')];
+				$msg = $this->t('err_empty_file', 'File is empty.');
+				if ($orig !== '') { $msg .= ' (' . $orig . ')'; }
+				$out['files'][] = ['ok' => false, 'error' => $msg];
 				continue;
 			}
 			if ($maxBytes > 0 && $f['size'] > $maxBytes) {
-				$out['files'][] = ['ok' => false, 'error' => $this->t('err_too_large_bytes', 'File is too large.')];
+				$msg = $this->t('err_too_large_bytes', 'File is too large.');
+				if ($orig !== '') { $msg .= ' (' . $orig . ')'; }
+				$out['files'][] = ['ok' => false, 'error' => $msg];
 				continue;
 			}
+
 			$mime = $this->detectMime($f['tmp_name']);
 			if ($accept !== [] && !\in_array($mime, $accept, true)) {
-				$out['files'][] = ['ok' => false, 'error' => $this->t('err_invalid_mime', 'File type not allowed.')];
+				$msg = $this->t('err_invalid_mime', 'File type not allowed.');
+				if ($orig !== '') { $msg .= ' (' . $orig . ')'; }
+				$out['files'][] = ['ok' => false, 'error' => $msg];
 				continue;
 			}
 
@@ -449,7 +835,9 @@ final class Upload extends BaseService {
 
 			// Keep deterministic auto-suffix for attachments
 			if (!$this->moveUploadedFile($f['tmp_name'], $targetPath, false, true)) {
-				$out['files'][] = ['ok' => false, 'error' => $this->t('err_write_failed', 'Failed to write file.')];
+				$msg = $this->t('err_write_failed', 'Failed to write file.');
+				if ($orig !== '') { $msg .= ' (' . $orig . ')'; }
+				$out['files'][] = ['ok' => false, 'error' => $msg];
 				continue;
 			}
 
@@ -503,6 +891,28 @@ final class Upload extends BaseService {
 		}
 		return $s;
 	}
+
+
+	/**
+	 * Make a user-visible version of the original client filename.
+	 * Strips directories, control chars and trims overlong names.
+	 *
+	 * @param string|null $name Original client-provided filename.
+	 * @return string Safe, short basename (may be empty).
+	 */
+	private function safeOrigName(?string $name): string {
+		$b = \basename((string)$name);
+		$b = (string)\preg_replace('~[\r\n\t]+~', ' ', $b);
+		$b = \trim($b);
+		if ($b === '') {
+			return '';
+		}
+		if (\mb_strlen($b) > 120) {
+			$b = \mb_substr($b, 0, 120) . '…';
+		}
+		return $b;
+	}
+
 
 	/**
 	 * Build basename from a pattern and current payload (without extension).
@@ -882,10 +1292,27 @@ final class Upload extends BaseService {
 	}
 
 
-	/** Delete old original + configured thumbnails; returns list of deleted absolute paths. */
+	/**
+	 * Delete previous fullsize + thumbnails for a column upload.
+	 *
+	 * Strategy:
+	 * 1) Delete fullsize by reading current column or explicit path.
+	 * 2) For each configured thumbnail:
+	 *    - If 'column' is set and $currentRow has a non-empty value, delete that file directly.
+	 *    - Else, attempt deterministic deletion using base+suffix(+format) derived from the old fullsize path.
+	 * 3) Deduplicate and robustly ignore missing files.
+	 *
+	 * @param array|null  $currentRow
+	 * @param array       $uploadCfg
+	 * @param string|null $explicitPublicPath
+	 * @param string|null $columnName
+	 * @return array<string> Absolute paths deleted
+	 */
 	private function deleteOldColumnFiles(?array $currentRow = null, array $uploadCfg = [], ?string $explicitPublicPath = null, ?string $columnName = null): array {
-		
 		$deleted = [];
+		$seen = [];
+
+		// Resolve old fullsize public path (from explicit, column, or fallback finder)
 		$origCol = (string)($explicitPublicPath ?? '');
 		if ($origCol === '' && $currentRow !== null) {
 			if ($columnName !== null && isset($currentRow[$columnName]) && \is_string($currentRow[$columnName])) {
@@ -895,38 +1322,61 @@ final class Upload extends BaseService {
 			}
 		}
 
+		// Delete fullsize
 		if ($origCol !== '') {
 			$abs = $this->fromPublicPath($origCol);
 			if ($abs !== '' && \is_file($abs)) {
-				if (@\unlink($abs)) {
-					$deleted[] = $abs;
+				if (@\unlink($abs)) { $deleted[] = $abs; $seen[$abs] = true; }
+			}
+		}
+
+		$thumbsCfg = (array)($uploadCfg['thumbnails'] ?? []);
+		if ($thumbsCfg === []) {
+			return $deleted;
+		}
+
+		// Primary: column-based deletion for thumbs
+		if ($currentRow !== null) {
+			foreach ($thumbsCfg as $tCfg) {
+				$col = (string)($tCfg['column'] ?? '');
+				if ($col !== '' && isset($currentRow[$col]) && \is_string($currentRow[$col]) && $currentRow[$col] !== '') {
+					$abs = $this->fromPublicPath((string)$currentRow[$col]);
+					if ($abs !== '' && \is_file($abs) && !isset($seen[$abs])) {
+						if (@\unlink($abs)) { $deleted[] = $abs; $seen[$abs] = true; }
+					}
 				}
 			}
 		}
 
-		// Delete thumbs only if we can infer their suffixes from cfg
-		$thumbsCfg = (array)($uploadCfg['thumbnails'] ?? []);
-		if ($thumbsCfg !== [] && $origCol !== '') {
-			$piSrc = \pathinfo($this->fromPublicPath($origCol));
-			$dirAbs = (string)($piSrc['dirname'] ?? '');
-			$baseNoExt = (string)($piSrc['filename'] ?? '');
+		// Fallback: suffix-based deterministic deletion if no column value exists
+		if ($origCol !== '') {
+			$piSrc   = \pathinfo($this->fromPublicPath($origCol));
+			$dirAbs  = (string)($piSrc['dirname'] ?? '');
+			$base    = (string)($piSrc['filename'] ?? '');
+			$srcExt  = (string)($piSrc['extension'] ?? 'webp');
+
 			foreach ($thumbsCfg as $tCfg) {
+				$col = (string)($tCfg['column'] ?? '');
+				$colHasValue = ($currentRow !== null && $col !== '' && !empty($currentRow[$col]));
+				if ($colHasValue) { continue; }
 
 				$w = (int)($tCfg['w'] ?? 0);
 				$h = (int)($tCfg['h'] ?? 0);
-
-				// Mirror makeThumbnails(): Default suffix is _{w}x{h} when not provided
 				$suffix = (string)($tCfg['suffix'] ?? ($w > 0 && $h > 0 ? ('_' . $w . 'x' . $h) : ''));
 				if ($suffix === '') { continue; }
-				$fmt = $this->normalizeExt((string)($tCfg['format'] ?? ($piSrc['extension'] ?? 'webp')));
-				$dstAbs = $dirAbs . DIRECTORY_SEPARATOR . $baseNoExt . $suffix . '.' . $fmt;
-				if (\is_file($dstAbs) && @\unlink($dstAbs)) {
-					$deleted[] = $dstAbs;
+
+				$fmt = $this->normalizeExt((string)($tCfg['format'] ?? $srcExt));
+				$dstAbs = $dirAbs . DIRECTORY_SEPARATOR . $base . $suffix . '.' . $fmt;
+
+				if (\is_file($dstAbs) && !isset($seen[$dstAbs])) {
+					if (@\unlink($dstAbs)) { $deleted[] = $dstAbs; $seen[$dstAbs] = true; }
 				}
 			}
 		}
+
 		return $deleted;
 	}
+
 
 	/** Best-effort: Find current public path for original column file. */
 	private function findCurrentColumnPath(array $currentRow, array $uploadCfg): string {
