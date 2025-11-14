@@ -500,7 +500,8 @@ final class Upload extends BaseService {
 	public function addAttachedImages(array $attachedCfg, array $payload, int $fkId, int $currentCount = 0): array {
 		$out = ['status' => false, 'files' => [], 'error' => []];
 
-		$input = (string)($attachedCfg['inputName'] ?? '');
+		$inputRaw = (string)($attachedCfg['inputName'] ?? '');
+		$input    = (string)\preg_replace('~\[\]$~', '', $inputRaw);		
 		if ($input === '' || !isset($_FILES[$input])) {
 			return ['status' => false, 'files' => [], 'error' => [$this->t('err_no_file', 'No file provided.')]];
 		}
@@ -750,7 +751,8 @@ final class Upload extends BaseService {
 	public function addAttachedFiles(array $attachedCfg, array $payload, int $fkId, int $currentCount = 0): array {
 		$out = ['status' => false, 'files' => [], 'error' => []];
 
-		$input = (string)($attachedCfg['inputName'] ?? '');
+		$inputRaw = (string)($attachedCfg['inputName'] ?? '');
+		$input    = (string)\preg_replace('~\[\]$~', '', $inputRaw);
 		if ($input === '' || !isset($_FILES[$input])) {
 			return ['status' => false, 'files' => [], 'error' => [$this->t('err_no_file', 'No file provided.')]];
 		}
