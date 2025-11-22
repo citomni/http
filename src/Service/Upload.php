@@ -310,10 +310,24 @@ final class Upload extends BaseService {
 
 			// --- Fullsize (from original, obviously) ---
 			$fullOk = false;
-			if ($fullW > 0 && $fullH > 0) {
+			
+			// Compute target size if only one dimension is given.
+			$targetW = $fullW;
+			$targetH = $fullH;
+			if ($fullW > 0 && $fullH <= 0) {
+				// Width fixed, derive height from aspect ratio.
+				$targetW = $fullW;
+				$targetH = (int)\round($fullW * ($h / $w));
+			} elseif ($fullH > 0 && $fullW <= 0) {
+				// Height fixed, derive width from aspect ratio.
+				$targetH = $fullH;
+				$targetW = (int)\round($fullH * ($w / $h));
+			}
+
+			if ($targetW > 0 && $targetH > 0) {
 				$dst = ($fullFit === 'stretch')
-					? $this->imageResizeStretch($src, $fullW, $fullH)
-					: $this->imageResizeCropCenter($src, $fullW, $fullH);
+					? $this->imageResizeStretch($src, $targetW, $targetH)
+					: $this->imageResizeCropCenter($src, $targetW, $targetH);
 				if ($dst) {
 					$fullOk = $this->imageSave($dst, $targetPath, $ext, $targetQuality);
 					\imagedestroy($dst);
@@ -361,14 +375,24 @@ final class Upload extends BaseService {
 				$baseNoExtForThumbSeed = $base; // thumbs typically use their own suffix; base is the pattern root
 
 				foreach ($thumbsCfg as $tCfg) {
+					
 					$tw = (int)($tCfg['w'] ?? 0);
 					$th = (int)($tCfg['h'] ?? 0);
+
+					// Derive missing dimension if exactly one is provided.
+					if ($tw > 0 && $th <= 0) {
+						$th = (int)\round($tw * ($h / $w));
+					} elseif ($th > 0 && $tw <= 0) {
+						$tw = (int)\round($th * ($w / $h));
+					}
+
 					if ($tw <= 0 || $th <= 0) {
 						$err = $this->t('err_thumb_wh','Invalid thumbnail width/height.');
-						$writtenThumbAbs[] = null; // mark attempt
+						$writtenThumbAbs[] = null;
 						$thumbCols['_errors'][] = $err;
 						continue;
 					}
+
 					$tfit   = (string)($tCfg['fit'] ?? 'crop');
 					$tfmt   = $this->normalizeExt((string)($tCfg['format'] ?? $ext));
 					$tqual  = (int)($tCfg['quality'] ?? 82);
@@ -643,16 +667,27 @@ final class Upload extends BaseService {
 
 			// ---- Fullsize (from original) ----
 			$fullOk = false;
-			if ($fullW > 0 && $fullH > 0) {
+			
+			// Derive missing dimension if exactly one is set.
+			$targetW = $fullW;
+			$targetH = $fullH;
+			if ($fullW > 0 && $fullH <= 0) {
+				$targetW = $fullW;
+				$targetH = (int)\round($fullW * ($h / $w));
+			} elseif ($fullH > 0 && $fullW <= 0) {
+				$targetH = $fullH;
+				$targetW = (int)\round($fullH * ($w / $h));
+			}
+			
+			if ($targetW > 0 && $targetH > 0) {
 				$dst = ($fullFit === 'stretch')
-					? $this->imageResizeStretch($src, $fullW, $fullH)
-					: $this->imageResizeCropCenter($src, $fullW, $fullH);
+					? $this->imageResizeStretch($src, $targetW, $targetH)
+					: $this->imageResizeCropCenter($src, $targetW, $targetH);
 				if ($dst) {
 					$fullOk = $this->imageSave($dst, $fullAbsPath, $ext, $quality);
 					\imagedestroy($dst);
 				}
 			} else {
-				// No explicit size: reencode to target format/quality
 				$fullOk = $this->imageSave($src, $fullAbsPath, $ext, $quality);
 			}
 
@@ -671,15 +706,24 @@ final class Upload extends BaseService {
 			if ($thumbsCfg !== []) {
 				$piFull = \pathinfo($fullAbsPath);
 				$dirAbs = (string)($piFull['dirname'] ?? $absDir);
-				$baseNoExtForThumbSeed = $base; // each thumb has its own suffix
+				$baseNoExtForThumbSeed = $base; // Each thumb has its own suffix
 
 				foreach ($thumbsCfg as $tCfg) {
 					$tw = (int)($tCfg['w'] ?? 0);
 					$th = (int)($tCfg['h'] ?? 0);
+					
+					// Derive missing dimension if exactly one is set.
+					if ($tw > 0 && $th <= 0) {
+						$th = (int)\round($tw * ($h / $w));
+					} elseif ($th > 0 && $tw <= 0) {
+						$tw = (int)\round($th * ($w / $h));
+					}
+
 					if ($tw <= 0 || $th <= 0) {
 						$thumbCols['_errors'][] = $this->t('err_thumb_wh', 'Invalid thumbnail width/height.');
 						continue;
 					}
+
 					$tfit  = (string)($tCfg['fit'] ?? 'crop');
 					$tfmt  = $this->normalizeExt((string)($tCfg['format'] ?? $ext));
 					$tqual = (int)($tCfg['quality'] ?? 82);
