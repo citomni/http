@@ -1078,7 +1078,7 @@ final class Upload extends BaseService {
 		if ($base === '') {
 			throw new \RuntimeException('CITOMNI_PUBLIC_PATH is not defined.');
 		}
-		return \rtrim($base, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . 'uploads' . $dir;
+		return \rtrim($base, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . 'uploads' . DIRECTORY_SEPARATOR . 'u' . $dir;
 	}
 
 	private function normalizeDir(string $dir): string {
