@@ -147,18 +147,22 @@ final class TemplateEngine extends BaseService {
 	 *       'var'   => 'header',
 	 *       'type'  => 'dynamic',
 	 *       'call'  => ['class' => \Foo\Model\SitewideModel::class, 'method' => 'header'],
-	 *       'ire'   => ['/^\/$/', '/^\/nyheder\/.*\/'], // compiled include regexes
-	 *       'ere'   => ['/^\/admin\//'],               // compiled exclude regexes
+	 *       'ire'   => ['/^\/$/', '/^\/nyheder\/.*\/'],	// compiled from cfg->view->vars['header']['include']
+	 *       'ere'   => ['/^\/admin\//'],        			// compiled from cfg->view->vars['header']['exclude']
 	 *     ],
 	 *     'admin_nav' => [
 	 *       'var'   => 'admin_nav',
 	 *       'type'  => 'static',
 	 *       'data'  => [...],
-	 *       'ire'   => ['/^\/admin\//'],
-	 *       'ere'   => [],
+	 *       'ire'   => ['/^\/admin\//'], 	// compiled from cfg->view->vars['admin_nav']['include']
+	 *       'ere'   => [],					// compiled from cfg->view->vars['admin_nav']['exclude']
 	 *     ],
 	 *     ...
 	 *   ]
+	 *
+	 * Notes:
+	 * - 'ire' / 'ere' are internal compiled regex arrays.
+	 *   In config you always use 'include' / 'exclude'.
 	 *
 	 * Notes:
 	 * - Keys are the final template variable names ("header", "footer", "admin_nav", ...).
@@ -1056,7 +1060,7 @@ final class TemplateEngine extends BaseService {
 	 * - Guarantees the result starts with "/" and returns "/" for the frontpage.
 	 *
 	 * Why:
-	 * - vars_providers include/exclude patterns are matched against this
+	 * - cfg->view->vars include/exclude patterns are matched against this
 	 *   normalized, app-relative path.
 	 */
 	private function appRelativePath(string $rawPath): string {
@@ -1120,7 +1124,7 @@ final class TemplateEngine extends BaseService {
 	 *   This prevents accidental regex injection from config, unless the dev
 	 *   explicitly opts in with "~...~".
 	 *
-	 * @param string $pat Human-friendly matcher from cfg->view->vars_providers[*].include/exclude.
+	 * @param string $pat Human-friendly matcher from cfg->view->vars[*].include/exclude.
 	 *
 	 * @return string Anchored PCRE pattern.
 	 */
