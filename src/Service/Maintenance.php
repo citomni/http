@@ -103,7 +103,7 @@ class Maintenance extends BaseService {
 	 *     2) Retry-After header (seconds)
 	 *     3) No-cache headers (Cache-Control, Pragma)
 	 *     4) X-Robots-Tag: noindex
-	 *     5) Content-Type: text/html; charset=utf-8
+	 *     5) Content-Type: text/html; charset=<cfg locale charset>
 	 *     6) Connection: close
 	 * - Attempts to render a branded template if configured at maintenance.flag.template;
 	 *   otherwise renders a minimal inline HTML page.
@@ -128,6 +128,35 @@ class Maintenance extends BaseService {
 			return;
 		}
 
+		// Bypass maintenance for internal system endpoints (webhook-protected).
+		$uri = (string)($_SERVER['REQUEST_URI'] ?? '');
+		$path = (string)(\explode('?', $uri, 2)[0] ?? '');
+		if ($path !== '' && $path[0] !== '/') {
+			$path = '/' . $path;
+		}
+
+		// Compute app base path from SCRIPT_NAME (supports root + subdir installs).
+		$script = (string)($_SERVER['SCRIPT_NAME'] ?? '');
+		$base = \rtrim(\str_replace('\\', '/', \dirname($script)), '/');
+
+		// If entry is /<base>/public/index.php, strip /public to get /<base>.
+		if ($base !== '' && \substr($base, -7) === '/public') {
+			$base = \substr($base, 0, -7);
+			$base = $base === '' ? '' : \rtrim($base, '/');
+		}
+
+		// Strip base prefix from request path if present.
+		if ($base !== '' && ($path === $base || \str_starts_with($path, $base . '/'))) {
+			$path = \substr($path, \strlen($base));
+			if ($path === '') {
+				$path = '/';
+			}
+		}
+
+		if (\str_starts_with($path, '/_system/')) {
+			return;
+		}
+
 		// Proxy-aware client IP resolution (Kernel::boot already set trusted proxies)
 		$clientIp = $this->app->request->ip();
 
@@ -147,14 +176,15 @@ class Maintenance extends BaseService {
 			\header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
 			\header('Pragma: no-cache');
 			\header('X-Robots-Tag: noindex, noarchive');
-			\header('Content-Type: text/html; charset='.(string)$this->app->cfg->locale->charset);
+			\header('Content-Type: text/html; charset=' . (string)$this->app->cfg->locale->charset);
 			\header('Connection: close');
 		}
 
 		// Optional branded template (kept deliberately simple & deterministic)
 		$template = (string)($this->app->cfg->maintenance->flag->template ?? '');
 		if ($template !== '' && \is_file($template) && \is_readable($template)) {
-            // Variables available to the template (intentionally limited)
+
+			// Variables available to the template (intentionally limited)
 			$retry_after   = $retry;
 			$contact_email = (string)($this->app->cfg->identity->email ?? ($this->app->cfg->support_email ?? 'support@citomni.com'));
 
