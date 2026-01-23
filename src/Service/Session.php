@@ -745,8 +745,12 @@ class Session extends BaseService {
 		$this->ini('session.use_only_cookies',       $cfgSess['use_only_cookies']       ?? true);
 		$this->ini('session.lazy_write',             $cfgSess['lazy_write']             ?? true);
 		$this->ini('session.gc_maxlifetime',         $cfgSess['gc_maxlifetime']         ?? 1440);
-		$this->ini('session.sid_length',             $cfgSess['sid_length']             ?? 48);
-		$this->ini('session.sid_bits_per_character', $cfgSess['sid_bits_per_character'] ?? 6);
+
+		// PHP 8.4+: Changing SID length / bits is deprecated. Keep runtime defaults.
+		if (\PHP_VERSION_ID < 80400) {
+			$this->ini('session.sid_length',             $cfgSess['sid_length']             ?? 48);
+			$this->ini('session.sid_bits_per_character', $cfgSess['sid_bits_per_character'] ?? 6);
+		}
 
 		// Optional save_path (create directory if needed).
 		if (!empty($cfgSess['save_path']) && \is_string($cfgSess['save_path'])) {
