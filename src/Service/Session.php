@@ -36,8 +36,7 @@ use CitOmni\Kernel\Service\BaseService;
  *   1) Start session on demand (idempotent; no duplicate headers).
  *   2) Get/set/unset values with null-safe lookups.
  *   3) Destroy sessions explicitly (e.g., on logout).
- *   4) Simple flash helpers (set/consume/keep/reflash).
- * - Keep deterministic behavior across environments (CLI/HTTP).
+ * - Keep deterministic behavior across supported runtime contexts.
  *
  * Collaborators:
  * - $this->app->cfg->session.*   (optional) Session and hardening options.
@@ -45,28 +44,9 @@ use CitOmni\Kernel\Service\BaseService;
  * - $this->app->cfg->http.*      (read)     For base_url -> https inference.
  * - PHP session_*() functions    (native runtime).
  *
- * Configuration keys (optional; effective defaults):
- * - session.use_strict_mode         (bool)  default true
- * - session.use_only_cookies        (bool)  default true
- * - session.lazy_write              (bool)  default true
- * - session.gc_maxlifetime          (int)   default 1440
- * - session.sid_length              (int)   default 48
- * - session.sid_bits_per_character  (int)   default 6
- * - session.save_path               (string) directory is created if missing
- * - session.name                    (string) cookie name (via session_name)
- * - session.rotate_interval         (int)   seconds; 0 disables rotation
- * - session.fingerprint.bind_user_agent (bool) default false
- * - session.fingerprint.bind_ip_octets    (int 0..4) default 0 (IPv4 prefix)
- * - session.fingerprint.bind_ip_blocks    (int 0..8) default 0 (IPv6 prefix)
- * - cookie.secure                   (bool)  fallback for cookie Secure
- * - cookie.httponly                 (bool)  fallback for HttpOnly
- * - cookie.samesite                 (string "Lax"|"Strict"|"None") fallback for SameSite
- * - cookie.path                     (string) fallback for Path
- * - cookie.domain                   (string|null) fallback for Domain
- *
  * Notes on cookie lifetime:
- * - This class sets session cookie lifetime to 0 (session cookie). There is no cfg override
- *   for lifetime here; adjust globally via php.ini if needed.
+ * - This class always uses lifetime 0 (session cookie).
+ * - There is no cfg override here; adjust globally via php.ini if needed.
  *
  * Behavior:
  * - start():
@@ -81,12 +61,6 @@ use CitOmni\Kernel\Service\BaseService;
  *   1) session_unset() + session_destroy() + $_SESSION = [].
  *   2) Expires the session cookie using the active cookie params.
  * - regenerate($deleteOld=true): rotates session id; requires active session.
- * - Flash helpers:
- *   - flash($key,$value): set one-time value.
- *   - pull($key,$default=null): get and remove.
- *   - hasFlash($key): presence check.
- *   - keep($key): keep current flash for next request.
- *   - reflash(): keep all flashes for next request.
  * - Fingerprint policy:
  *   - When enabled, stores a compact UA/IP prefix signature in '_sess_fpr'.
  *   - On mismatch, destroys the session, restarts cleanly, and stores new signature
@@ -110,12 +84,6 @@ use CitOmni\Kernel\Service\BaseService;
  *   // Start session at the beginning of a controller flow
  *   $this->app->session->start();
  *
- *   // Store a flash message
- *   $this->app->session->flash('notice', 'Welcome back!');
- *
- *   // Retrieve and consume a flash message
- *   $msg = $this->app->session->pull('notice');
- *
  *   // Persist login
  *   $this->app->session->set('user_id', $user->id);
  *
@@ -127,18 +95,14 @@ use CitOmni\Kernel\Service\BaseService;
  *
  * Method overview:
  * - start(): void
+ * - isActive(): bool
+ * - id(): string|null
  * - get(string $key): mixed|null
  * - set(string $key, mixed $value): void
  * - has(string $key): bool
  * - remove(string $key): void
  * - destroy(bool $forgetCookie = true): void
  * - regenerate(bool $deleteOld = true): void
- * - isActive(): bool
- * - flash(string $key, mixed $value): void
- * - pull(string $key, mixed $default = null): mixed
- * - hasFlash(string $key): bool
- * - keep(string $key): void
- * - reflash(): void
  */
 class Session extends BaseService {
 	
@@ -502,161 +466,6 @@ class Session extends BaseService {
 
 
 
-
-/*
- *---------------------------------------------------------------
- * FLASH MESSAGES (ONE-SHOT UI STATE)
- *---------------------------------------------------------------
- * PURPOSE
- *   Ephemeral, one-request messages (PRG pattern).
- *
- * NOTES
- *   - Stored under $_SESSION['_flash'].
- *   - keep()/reflash() intentionally no-op beyond preserving presence.
- */
-
-
-	/**
-	 * Set a one-time (flash) value for the next request.
-	 *
-	 * Behavior:
-	 * - Stores $value under $_SESSION['_flash'][$key].
-	 * - Value remains available until consumed via pull() or cleared by reassign.
-	 *
-	 * Notes:
-	 * - Flash values are meant for short-lived UI messages (e.g., post-redirect-get).
-	 *
-	 * Typical usage:
-	 *   $this->app->session->flash('notice', 'Saved!');
-	 *
-	 * @param string $key   Flash key (non-empty).
-	 * @param mixed  $value Any serializable value.
-	 * @return void
-	 */
-	public function flash(string $key, mixed $value): void {
-		$this->ensureStarted();
-		$_SESSION['_flash_next'][$key] = $value;
-	}
-
-
-	/**
-	 * Retrieve and consume a flash value by key.
-	 *
-	 * Behavior:
-	 * - Returns the stored value and removes it from the flash bag.
-	 * - If the key is missing, returns $default unchanged.
-	 * - Cleans up the flash bag when it becomes empty.
-	 *
-	 * Typical usage:
-	 *   $msg = $this->app->session->pull('notice') ?? '';
-	 *
-	 * @param string $key       Flash key to consume.
-	 * @param mixed  $default   Value returned when the key is absent.
-	 * @return mixed The stored value or $default.
-	 */
-	public function pull(string $key, mixed $default = null): mixed {
-		$this->ensureStarted();
-		if (!isset($_SESSION['_flash'][$key])) {
-			return $default;
-		}
-		$val = $_SESSION['_flash'][$key];
-		unset($_SESSION['_flash'][$key]);
-
-		// If the flash bag is now empty, drop it entirely to minimize session size.
-		if (empty($_SESSION['_flash'])) {
-			unset($_SESSION['_flash']);
-		}
-
-		return $val;
-	}
-
-
-	/**
-	 * Check if a flash key exists (without consuming it).
-	 *
-	 * Behavior:
-	 * - Returns true when $_SESSION['_flash'][$key] is set.
-	 *
-	 * Typical usage:
-	 *   if ($this->app->session->hasFlash('error')) { ... }
-	 *
-	 * @param string $key Flash key to check.
-	 * @return bool True if present; false otherwise.
-	 */
-	public function hasFlash(string $key): bool {
-		$this->ensureStarted();
-		return isset($_SESSION['_flash'][$key]);
-	}
-
-
-	/**
-	 * Keep a specific flash key for the next request (retain without consuming).
-	 *
-	 * Copies the current-request flash entry from $_SESSION['_flash'][$key]
-	 * into $_SESSION['_flash_next'][$key] so it survives one more request.
-	 *
-	 * Behavior:
-	 * - No effect if the key is not present in the current flash bag.
-	 * - Idempotent within a request (re-applying overwrites with same value).
-	 * - Does not consume/remove the current flash value.
-	 * - Requires an active session (ensureStarted()).
-	 *
-	 * Typical usage:
-	 *   $this->app->session->keep('form_values');
-	 *
-	 * @param string $key Flash key to preserve.
-	 * @return void
-	 */
-	public function keep(string $key): void {
-		$this->ensureStarted();
-		if (isset($_SESSION['_flash'][$key])) {
-			if (!isset($_SESSION['_flash_next']) || !\is_array($_SESSION['_flash_next'])) {
-				$_SESSION['_flash_next'] = [];
-			}
-			$_SESSION['_flash_next'][$key] = $_SESSION['_flash'][$key];
-		}
-	}
-
-
-	/**
-	 * Keep all current flash values for the next request.
-	 *
-	 * Copies the current-request flash bag ($_SESSION['_flash']) into
-	 * $_SESSION['_flash_next'] so all entries survive one more request.
-	 *
-	 * Behavior:
-	 * - No-op when the current flash bag is empty.
-	 * - Merges into any already queued next-request entries.
-	 *   Existing keys in _flash_next are preserved (explicit "next" wins).
-	 * - Does not consume/remove current flash values.
-	 * - Requires an active session.
-	 *
-	 * Typical usage:
-	 *   // After failed validation, keep all flashes for redisplay
-	 *   $this->app->session->reflash();
-	 *
-	 * @return void
-	 */
-	public function reflash(): void {
-		$this->ensureStarted();
-
-		$curr = $_SESSION['_flash'] ?? null;
-		if (!\is_array($curr) || $curr === []) {
-			return; // Nothing to carry over
-		}
-
-		$next = (isset($_SESSION['_flash_next']) && \is_array($_SESSION['_flash_next']))
-			? $_SESSION['_flash_next']
-			: [];
-
-		// Preserve already queued "next" values; add the rest from current
-		$_SESSION['_flash_next'] = $next + $curr;
-	}
-
-
-
-
-
 /*
  *---------------------------------------------------------------
  * INTERNALS (DO NOT CALL DIRECTLY)
@@ -669,22 +478,25 @@ class Session extends BaseService {
  *   - maybeRotateId()/maybeBindFingerprint() are cheap and conditional.
  *   - IPv4/IPv6 prefix helpers are best-effort normalizers.
  */
- 
+
 
 	/**
-	 * Ensure a PHP session is active; initialize INI/cookie params exactly once.
+	 * Ensure a session is active, initializing runtime settings once.
 	 *
 	 * Behavior:
-	 * - No-op when session_status() is already PHP_SESSION_ACTIVE.
-	 * - Fails fast if headers have already been sent (cannot start session).
-	 * - Calls initIniOnce() before session_start() (one-time per request/process).
-	 * - On successful start, applies optional fingerprint binding and rotation.
+	 * - Returns immediately if a session is already active.
+	 * - Verifies headers have not been sent yet (required for session_start()).
+	 * - Applies INI and cookie param initialization once via initIniOnce().
+	 * - Starts the session and then applies post-start policies:
+	 *   - maybeBindFingerprint()
+	 *   - maybeRotateId()
 	 *
 	 * Notes:
-	 * - This is called by all public APIs that rely on $_SESSION (lazy autostart).
+	 * - Central gate used by all lazy APIs.
+	 * - Throws early on header/state violations to preserve deterministic behavior.
 	 *
 	 * @return void
-	 * @throws \RuntimeException If headers are already sent or session_start() fails.
+	 * @throws \RuntimeException If headers have already been sent or session_start() fails.
 	 */
 	private function ensureStarted(): void {
 		if (\session_status() === \PHP_SESSION_ACTIVE) {
@@ -701,37 +513,32 @@ class Session extends BaseService {
 		if (!@\session_start()) {
 			throw new \RuntimeException('session_start() failed.');
 		}
-
-		$this->manageFlashLifecycle();
 		$this->maybeBindFingerprint();
 		$this->maybeRotateId();
 	}
 
 
 	/**
-	 * Initialize session INI and cookie parameters exactly once.
+	 * Initialize session-related INI directives and cookie params once.
 	 *
 	 * Behavior:
-	 * - Sets strict/lazy/write/entropy INI flags and optional save_path (creates dir).
-	 * - Applies session name if configured.
-	 * - Derives cookie flags (secure/httponly/samesite/path/domain) from
-	 *   session.* -> cookie.* -> http.base_url/request->isHttps().
-	 * - Guards: SameSite=None requires Secure=true.
-	 * - No-op if headers are already sent.
+	 * - Reads optional cfg from:
+	 *   - session.* for session runtime settings and cookie overrides
+	 *   - cookie.*  as fallback for cookie flags
+	 *   - http.base_url / Request::isHttps() to infer Secure when not configured
+	 * - Applies hardened defaults and session cookie params.
+	 * - Creates save_path directory when configured and missing.
 	 *
 	 * Notes:
-	 * - Best-effort: ini_set() failures are ignored by design.
+	 * - SameSite is normalized to Lax/Strict/None and validated.
+	 * - SameSite=None without Secure=true throws.
+	 * - PHP 8.4+: sid_length/sid_bits_per_character are left untouched (deprecated).
 	 *
 	 * @return void
-	 * @throws \RuntimeException If SameSite=None is configured without Secure=true.
+	 * @throws \RuntimeException When SameSite=None is configured without Secure=true.
 	 */
 	private function initIniOnce(): void {
 		if ($this->iniInitialized) {
-			return;
-		}
-		// If headers are already sent, skip INI/cookie param changes entirely.
-		if (\headers_sent()) {
-			$this->iniInitialized = true;
 			return;
 		}
 		$this->iniInitialized = true;
@@ -740,7 +547,7 @@ class Session extends BaseService {
 		$cfgCookie = isset($this->app->cfg->cookie)  ? $this->app->cfg->cookie->toArray()  : [];
 		$cfgHttp   = isset($this->app->cfg->http)    ? $this->app->cfg->http->toArray()    : [];
 
-		// Harden core INI (best-effort; ignore failures).
+		// Hardened, low-overhead defaults.
 		$this->ini('session.use_strict_mode',        $cfgSess['use_strict_mode']        ?? true);
 		$this->ini('session.use_only_cookies',       $cfgSess['use_only_cookies']       ?? true);
 		$this->ini('session.lazy_write',             $cfgSess['lazy_write']             ?? true);
@@ -830,41 +637,6 @@ class Session extends BaseService {
 		}
 		if (($now - $last) >= $interval) {
 			$this->regenerate(true);
-		}
-	}
-
-
-	/**
-	 * Promote next-request flash data to the current request.
-	 *
-	 * Moves queued flash entries from $_SESSION['_flash_next'] into
-	 * $_SESSION['_flash'] and clears $_SESSION['_flash_next'].
-	 * Intended to be called once per request after session_start(),
-	 * before any reads of flash data (e.g., pull()/hasFlash()).
-	 *
-	 * Behavior:
-	 * - Idempotent within a request (safe to call multiple times).
-	 * - Does not start the session; caller must ensure an active session.
-	 * - If no queued data exists, leaves $_SESSION['_flash'] untouched.
-	 * - Avoids creating keys unless data actually exists.
-	 *
-	 * Notes:
-	 * - The flash protocol is:
-	 *   - flash($k,$v) writes to $_SESSION['_flash_next'] (visible next request).
-	 *   - pull()/hasFlash() read from $_SESSION['_flash'] (visible this request).
-	 *   - keep()/reflash() copy current -> next when needed.
-	 * - Call this early in the request lifecycle (e.g., from ensureStarted()).
-	 *
-	 * Typical usage:
-	 *   // Internal:
-	 *   $this->manageFlashLifecycle(); // right after session_start()
-	 *
-	 * @return void
-	 */
-	private function manageFlashLifecycle(): void {
-		if (isset($_SESSION['_flash_next'])) {
-			$_SESSION['_flash'] = $_SESSION['_flash_next'];
-			unset($_SESSION['_flash_next']);
 		}
 	}
 
