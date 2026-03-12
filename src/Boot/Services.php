@@ -44,7 +44,7 @@ final class Services {
 		'cookie'		=> \CitOmni\Http\Service\Cookie::class,
 		// 'view'			=> \CitOmni\Http\Service\View::class,  // Replaced by TemplateEngine, but kept for now for back compat
 		'tplEngine'		=> \CitOmni\Http\Service\TemplateEngine::class,
-		'security'		=> \CitOmni\Http\Service\Security::class,
+		'security'		=> \CitOmni\Http\Service\Security::class,   // Replaced by the newer CSRF-service, but kept for now for back compat
 		'csrf'			=> \CitOmni\Http\Service\Csrf::class,
 		'nonce'			=> \CitOmni\Http\Service\Nonce::class,
 		'maintenance'	=> \CitOmni\Http\Service\Maintenance::class,
