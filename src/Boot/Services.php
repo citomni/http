@@ -31,7 +31,9 @@ namespace CitOmni\Http\Boot;
  * - All definitions must be FQCNs or arrays with ['class'=>FQCN,'options'=>[]].
  */
 final class Services {
+
 	public const MAP = [
+
 		'errorHandler'	=> \CitOmni\Http\Service\ErrorHandler::class,
 		'request'		=> \CitOmni\Http\Service\Request::class,
 		'response'		=> \CitOmni\Http\Service\Response::class,
@@ -40,22 +42,16 @@ final class Services {
 		'flash'			=> \CitOmni\Http\Service\Flash::class,
 		'datetime'		=> \CitOmni\Http\Service\Datetime::class,
 		'cookie'		=> \CitOmni\Http\Service\Cookie::class,
-		'view'			=> \CitOmni\Http\Service\View::class,  // Replaced by TemplateEngine, but kept for now for back compat
+		// 'view'			=> \CitOmni\Http\Service\View::class,  // Replaced by TemplateEngine, but kept for now for back compat
 		'tplEngine'		=> \CitOmni\Http\Service\TemplateEngine::class,
 		'security'		=> \CitOmni\Http\Service\Security::class,
+		'csrf'			=> \CitOmni\Http\Service\Csrf::class,
 		'nonce'			=> \CitOmni\Http\Service\Nonce::class,
 		'maintenance'	=> \CitOmni\Http\Service\Maintenance::class,
 		'webhooksAuth'	=> \CitOmni\Http\Service\WebhooksAuth::class,
 		'slugger'		=> \CitOmni\Http\Service\Slugger::class,
 		'tags'			=> \CitOmni\Http\Service\Tags::class,
-		
-		// 'url'			=> \CitOmni\Http\Service\Url::class,
-		// 'files' 		=> \CitOmni\Http\Service\Files::class,
-		
 		'upload' 		=> \CitOmni\Http\Service\Upload::class,
-		
-		// Test service
-		// 'winProbe'		=> \CitOmni\Http\Service\WinProbe::class,
 	];
 
 }

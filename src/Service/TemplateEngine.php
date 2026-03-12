@@ -474,6 +474,7 @@ final class TemplateEngine extends BaseService {
 	 *   $asset, $hasService, $hasPackage, $csrfField, $currentPath, $role.
 	 *
 	 * Notes:
+	 * - csrf_protection reflects cfg->security->csrf->enabled.
 	 * - Closures are bound to this service instance and call into $this->app on-demand.
 	 * - $asset() applies cache-busting (cfg->view.asset_version) and keeps existing
 	 *   query strings intact.
@@ -505,7 +506,7 @@ final class TemplateEngine extends BaseService {
 
 			// --- Security feature flags (informational for UI text, badges, warnings etc.)
 
-			'csrf_protection'       => (bool)$cfg->security->csrf_protection,
+			'csrf_protection'       => (bool)($cfg->security->csrf->enabled ?? true),
 			'honeypot_protection'   => (bool)$cfg->security->honeypot_protection,
 			'form_action_switching' => (bool)$cfg->security->form_action_switching,
 			'captcha_protection'    => (bool)$cfg->security->captcha_protection,
@@ -738,11 +739,11 @@ final class TemplateEngine extends BaseService {
 			 * Notes:
 			 * - Use TRIPLE braces when rendering ({{{ ... }}}) so we don't escape
 			 *   the actual <input> element.
-			 * - Returns "" (empty string) if security service is missing.
+			 * - Returns "" (empty string) if the csrf service is not registered.
 			 */
 			'csrfField' => function (): string {
-				if ($this->app->hasService('security') && \method_exists($this->app->security, 'csrfHiddenInput')) {
-					return (string)$this->app->security->csrfHiddenInput();
+				if ($this->app->hasService('csrf')) {
+					return $this->app->csrf->htmlField();
 				}
 				return '';
 			},

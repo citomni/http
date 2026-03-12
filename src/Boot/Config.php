@@ -333,8 +333,34 @@ final class Config {
 		 *------------------------------------------------------------------
 		 */
 		'security' => [
-			'csrf_protection'		=> true, // true | false; Prevent CSRF (Cross-Site Request Forgery) attacks.
-			'csrf_field_name'		=> 'csrf_token',
+		
+			'csrf' => [
+				'enabled'                      => true,                              // Enable or disable CSRF protection globally.
+				'field_name'                   => '_csrf',                           // Hidden form field name used for CSRF token submission.
+				'header_name'                  => 'X-CSRF-Token',                    // HTTP header name used by AJAX/API clients to submit the CSRF token.
+				'session_key'                  => '_csrf',                           // Session key where the raw CSRF token is stored.
+				'token_bytes'                  => 32,                                // Number of random bytes used when generating a new CSRF token.
+				'protect_methods'              => ['POST', 'PUT', 'PATCH', 'DELETE'], // HTTP methods that require CSRF verification.
+
+				'origin_check'                 => true,                              // Enable Origin/Referer validation as an additional CSRF defense layer.
+				'referer_fallback_on_https'    => true,                              // Use Referer validation on HTTPS requests when the Origin header is missing.
+				'allow_missing_origin_on_http' => true,                              // Allow missing Origin header on plain HTTP requests (useful for local/dev setups).
+				'trusted_origins'              => [],                                // Additional trusted origins or hostnames allowed by Origin/Referer validation.
+
+				'fetch_metadata' => [
+					'enabled'                   => true,                              // Enable Fetch Metadata validation via the Sec-Fetch-Site header.
+					'allow_same_site'           => true,                              // Allow same-site requests to pass Fetch Metadata validation.
+				],
+
+				'mask_tokens'                  => true,                              // Return masked tokens to reduce BREACH-style compression attack exposure.
+
+				'rotate_on_login'              => true,                              // Rotate the CSRF token after successful login.
+				'rotate_on_logout'             => true,                              // Rotate the CSRF token during logout flow before session teardown or redirect.
+
+				'log_failures'                 => true,                              // Log CSRF verification failures through the log service.
+				'log_channel'                  => 'security',                        // Logical log channel/destination used for CSRF failure logging.
+			],
+			
 			
 			// Anti-bots
 			'captcha_protection'	=> true, // true | false; The native captcha will help prevent bots from filling out forms.
