@@ -63,7 +63,7 @@ use CitOmni\Kernel\Service\BaseService;
  *
  * Placeholder rules (built-ins; unknown placeholders match a single segment):
  * - {id}    => [0-9]+
- * - {email} => [a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+
+ * - {email} => [a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}
  * - {slug}  => [a-zA-Z0-9-_]+
  * - {code}  => [a-zA-Z0-9]+
  *
@@ -128,7 +128,7 @@ class Router extends BaseService {
 	/** Validation rules for dynamic placeholders like {id}, {email}, etc. */
 	private const PARAM_RULES = [
 		'id'    => '[0-9]+',
-		'email' => '[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+',
+		'email' => '[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}',
 		'slug'  => '[a-zA-Z0-9-_]+',
 		'code'  => '[a-zA-Z0-9]+',
 	];
