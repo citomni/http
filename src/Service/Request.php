@@ -273,10 +273,11 @@ class Request extends BaseService {
 
 
 	/** True if a file was uploaded for $key (not UPLOAD_ERR_NO_FILE). */
+	/*
 	public function hasFile(string $key): bool {
 		return $this->app->files->has($key);
 	}
-
+	*/
 
 	/**
 	 * Whitelist subset from GET/POST (auto source).
@@ -337,16 +338,18 @@ class Request extends BaseService {
 	 * @param string $key
 	 * @return \CitOmni\Http\Service\UploadedFile|null
 	 */
+	/*
 	public function file(string $key): ?\CitOmni\Http\Service\UploadedFile {
 		return $this->app->files->get($key);
 	}
-
+	*/
 
 	/** All uploaded files as value objects. */
+	/*
 	public function files(): array {
 		return $this->app->files->all();
 	}
-
+	*/
 
 	/**
 	 * Parse the request body as JSON (associative array) with caching.
