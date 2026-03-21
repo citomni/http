@@ -654,19 +654,28 @@ class Request extends BaseService {
 
 
 	/**
-	 * Resolve the effective server port (int).
+	 * Resolve the effective client-facing server port.
 	 *
 	 * Behavior:
 	 * - If proxies are trusted AND the peer is on the whitelist:
 	 *   1) Use X-Forwarded-Port when present (>0).
 	 *   2) Else parse RFC 7239 Forwarded header's host token for ":port"
 	 *      (supports bracketed IPv6: "[2001:db8::1]:8443").
-	 * - Otherwise fall back to SERVER_PORT.
+	 * - Otherwise fall back to SERVER_PORT when present.
+	 * - If SERVER_PORT conflicts with the resolved scheme, normalize common
+	 *   reverse-proxy mismatches:
+	 *   - https + 80  => 443
+	 *   - http  + 443 => 80
 	 * - If still unknown, infer from isHttps(): 443 (https) or 80 (http).
 	 *
 	 * Notes:
 	 * - Proxy-derived data is only honored when both trustProxy() and
 	 *   clientIpIsTrusted(...) are true (defense in depth).
+	 * - This method returns the public-facing effective port, not necessarily
+	 *   the backend listener port seen by PHP-FPM or Apache behind a proxy.
+	 *
+	 * Typical usage:
+	 *   $port = $this->app->request->port();
 	 *
 	 * @return int TCP port number (1..65535) or a sane default (80/443).
 	 */
@@ -689,16 +698,18 @@ class Request extends BaseService {
 				foreach (\explode(';', $first) as $pair) {
 					[$k, $v] = \array_map('trim', \explode('=', $pair, 2) + ['', '']);
 					if (\strtolower($k) === 'host' && $v !== '') {
-						$v = \trim($v, "\"'"); // strip potential quotes
+						$v = \trim($v, "\"'"); // Strip potential quotes
 
 						// Bracketed IPv6 literal: "[2001:db8::1]:8443"
 						if ($v !== '' && $v[0] === '[') {
 							$rb = \strpos($v, ']');
-							// Port present if we have "]:NNNN"
 							if ($rb !== false && \strlen($v) > $rb + 1 && $v[$rb + 1] === ':') {
-								return (int)\substr($v, $rb + 2);
+								$port = (int)\substr($v, $rb + 2);
+								if ($port > 0) {
+									return $port;
+								}
 							}
-							break; // no port found in this token
+							break;
 						}
 
 						// Non-bracketed: Take last ":" as delimiter (covers IPv4/hostnames)
@@ -717,6 +728,16 @@ class Request extends BaseService {
 		// Fallback: Direct server value
 		$p = (int)($_SERVER['SERVER_PORT'] ?? 0);
 		if ($p > 0) {
+			$isHttps = $this->isHttps();
+
+			// Normalize common backend/public port mismatches behind TLS terminators
+			if ($isHttps && $p === 80) {
+				return 443;
+			}
+			if (!$isHttps && $p === 443) {
+				return 80;
+			}
+
 			return $p;
 		}
 
