@@ -15,24 +15,79 @@ declare(strict_types=1);
 
 namespace CitOmni\Http\Boot;
 
-
-/**
- * Vendor baseline HTTP configuration for CitOmni.
- *
- * Behavior:
- * - Deterministic merge order ("last wins"):
- *   1) Vendor baseline: \CitOmni\Http\Boot\Config::CFG
- *   2) Providers: /config/providers.php (their CFG_HTTP blocks)
- *   3) App base: /config/citomni_http_cfg.php
- *   4) Env overlay: /config/citomni_http_cfg.{ENV}.php
- *
- * Notes:
- * - CITOMNI_APP_PATH must be defined early in public/index.php.
- * - Prefer absolute URLs for http.base_url in stage/prod.
- */
-final class Config {
-	public const CFG = [
+final class Registry {
 	
+
+	/**
+	 * Vendor baseline service map for HTTP mode.
+	 *
+	 * Behavior:
+	 * - This is tier 1 in the deterministic HTTP service map merge:
+	 *   1) Vendor baseline: \CitOmni\Http\Boot\Registry::MAP_HTTP
+	 *   2) Providers: /config/providers.php (their MAP_HTTP blocks)
+	 *   3) App map: /config/services.php
+	 * - Service merge semantics use PHP array union (`+`):
+	 *   left wins, later layers only fill keys not already defined.
+	 *
+	 * Notes:
+	 * - Service IDs are resolved via $this->app->{id}.
+	 * - Services are instantiated lazily and kept as singletons per request/process.
+	 * - Definitions must be either:
+	 *   - 'id' => FQCN
+	 *   - 'id' => ['class' => FQCN, 'options' => [...]]
+	 * - /config/services.php has highest precedence and can override both providers
+	 *   and vendor baseline.
+	 */
+	public const MAP_HTTP = [
+
+		'errorHandler'	=> \CitOmni\Http\Service\ErrorHandler::class,
+		'request'		=> \CitOmni\Http\Service\Request::class,
+		'response'		=> \CitOmni\Http\Service\Response::class,
+		'router'		=> \CitOmni\Http\Service\Router::class,
+		'session'		=> \CitOmni\Http\Service\Session::class,
+		'flash'			=> \CitOmni\Http\Service\Flash::class,
+		'datetime'		=> \CitOmni\Http\Service\Datetime::class,
+		'cookie'		=> \CitOmni\Http\Service\Cookie::class,
+		// 'view'			=> \CitOmni\Http\Service\View::class,  // Replaced by TemplateEngine, but kept for now for back compat
+		'tplEngine'		=> \CitOmni\Http\Service\TemplateEngine::class,
+		'security'		=> \CitOmni\Http\Service\Security::class,   // Replaced by the newer CSRF-service, but kept for now for back compat
+		'csrf'			=> \CitOmni\Http\Service\Csrf::class,
+		'nonce'			=> \CitOmni\Http\Service\Nonce::class,
+		'maintenance'	=> \CitOmni\Http\Service\Maintenance::class,
+		'webhooksAuth'	=> \CitOmni\Http\Service\WebhooksAuth::class,
+		'slugger'		=> \CitOmni\Http\Service\Slugger::class,
+		'tags'			=> \CitOmni\Http\Service\Tags::class,
+		'upload' 		=> \CitOmni\Http\Service\Upload::class,
+
+	];
+
+
+
+
+
+
+	/**
+	 * Vendor baseline configuration for HTTP mode.
+	 *
+	 * Behavior:
+	 * - This is tier 1 in the deterministic HTTP config merge:
+	 *   1) Vendor baseline: \CitOmni\Http\Boot\Registry::CFG_HTTP
+	 *   2) Providers: /config/providers.php (their CFG_HTTP blocks)
+	 *   3) App base: /config/citomni_http_cfg.php
+	 *   4) Env overlay: /config/citomni_http_cfg.{ENV}.php
+	 * - Config merge semantics are deep associative merge with last wins.
+	 *
+	 * Notes:
+	 * - The baseline must contain the stable top-level HTTP config tree expected by
+	 *   CitOmni\Http services and controllers.
+	 * - CITOMNI_APP_PATH must be defined before boot.
+	 * - In stage/prod, prefer an explicit absolute http.base_url (or
+	 *   CITOMNI_PUBLIC_ROOT_URL where that policy is used).
+	 * - Providers may extend or override this baseline, and the application layer
+	 *   remains the final authority.
+	 */
+	public const CFG_HTTP = [
+
 		/*
 		 *------------------------------------------------------------------
 		 * APPLICATION IDENTITY
@@ -962,7 +1017,174 @@ final class Config {
 			'header_timestamp' => 'HTTP_X_CITOMNI_TIMESTAMP',
 			'header_nonce' => 'HTTP_X_CITOMNI_NONCE',
 		],
+	];
 
+
+
+
+
+
+	/**
+	 * Vendor baseline route map for HTTP mode.
+	 *
+	 * Behavior:
+	 * - This is tier 1 in the deterministic HTTP route merge:
+	 *   1) Vendor baseline: \CitOmni\Http\Boot\Registry::ROUTES_HTTP
+	 *   2) Providers: /config/providers.php (their ROUTES_HTTP blocks)
+	 *   3) App base: /config/citomni_http_routes.php
+	 *   4) Env overlay: /config/citomni_http_routes.{ENV}.php
+	 * - Route merge semantics are deep associative merge with last wins.
+	 *
+	 * Notes:
+	 * - Routes live in the dedicated route map, not inside CFG_HTTP.
+	 * - The array shape must match the Router contract used by CitOmni\Http.
+	 * - Providers may contribute additional routes, while the app layer may
+	 *   override or replace vendor/provider routes by path key.
+	 * - Empty arrays are ignored during merge.
+	 */
+	public const ROUTES_HTTP = [
+	
+		'/' => [
+			'controller' => \CitOmni\Http\Controller\PublicController::class,
+			'action' => 'index',
+			'methods' => ['GET'],
+			'template_file' => 'public/index.html',
+			'template_layer' => 'citomni/http'
+		],
+		'/legal/website-license' => [
+			'controller' => \CitOmni\Http\Controller\PublicController::class,
+			'action' => 'websiteLicense',
+			'methods' => ['GET']
+		],
+		// '/legal/website-license' => [
+			// 'controller' => \CitOmni\Http\Controller\PublicController::class,
+			// 'action' => 'redirectWebsiteLicense',
+			// 'methods' => ['GET']
+		// ],
+		'/legal/website-license/index.html' => [
+			'controller' => \CitOmni\Http\Controller\PublicController::class,
+			'action' => 'redirectWebsiteLicense',
+			'methods' => ['GET']
+		],
+		
+		
+		// --- System/ops routes ---
+		'/_system/ping' => [
+			'controller' => \CitOmni\Http\Controller\SystemController::class,
+			'action' => 'ping',
+			'methods' => ['GET'],
+		],
+		'/_system/health' => [
+			'controller' => \CitOmni\Http\Controller\SystemController::class,
+			'action' => 'health',
+			'methods' => ['GET'],
+		],
+		'/_system/version' => [
+			'controller' => \CitOmni\Http\Controller\SystemController::class,
+			'action' => 'version',
+			'methods' => ['GET'],
+		],
+		'/_system/time' => [
+			'controller' => \CitOmni\Http\Controller\SystemController::class,
+			'action' => 'time',
+			'methods' => ['GET'],
+		],
+		'/_system/clientip' => [
+			'controller' => \CitOmni\Http\Controller\SystemController::class,
+			'action' => 'clientIp',
+			'methods' => ['GET'],
+		],
+		'/_system/request-echo' => [
+			'controller' => \CitOmni\Http\Controller\SystemController::class,
+			'action' => 'requestEcho',
+			'methods' => ['GET'],
+		],
+
+		// Protected ops (HMAC via WebhooksAuth):
+		'/_system/reset-cache' => [
+			'controller' => \CitOmni\Http\Controller\SystemController::class,
+			'action' => 'resetCache',
+			'methods' => ['POST'],
+		],
+		'/_system/warmup-cache' => [
+			'controller' => \CitOmni\Http\Controller\SystemController::class,
+			'action' => 'warmupCache',
+			'methods' => ['POST'],
+		],
+		'/_system/maintenance' => [
+			'controller' => \CitOmni\Http\Controller\SystemController::class,
+			'action' => 'maintenance',
+			'methods' => ['GET'],
+		],
+		'/_system/maintenance/enable' => [
+			'controller' => \CitOmni\Http\Controller\SystemController::class,
+			'action' => 'maintenanceEnable',
+			'methods' => ['POST'],
+		],
+		'/_system/maintenance/disable' => [
+			'controller' => \CitOmni\Http\Controller\SystemController::class,
+			'action' => 'maintenanceDisable',
+			'methods' => ['POST'],
+		],
+
+		'/_system/_debug/webhook' => [
+			'controller' => \CitOmni\Http\Controller\SystemController::class,
+			'action'     => 'webhookDebug',
+			'methods'    => ['POST'],
+		],
+		
+		'/_system/appinfo.html' => [
+			'controller' => \CitOmni\Http\Controller\SystemController::class,
+			'action' => 'appinfoHtml',
+			'methods' => ['GET'],
+			'template_file' => 'public/appinfo.html',
+			'template_layer' => 'citomni/http'
+		],			
+		'/_system/appinfo.json' => [
+			'controller' => \CitOmni\Http\Controller\SystemController::class,
+			'action' => 'appinfoJson',
+			'methods' => ['GET'],
+		],
+		'/_system/appinfo-old.html' => [
+			'controller' => \CitOmni\Http\Controller\SystemController::class,
+			'action' => 'appinfo',
+			'methods' => ['GET'],
+			'template_file' => 'public/appinfo.html',
+			'template_layer' => 'citomni/http'
+		],
+		
+		// --- Regex routes (matches BEFORE top-level placeholders) ---
+		'regex' => [
+			// '/user/{id}' => [
+				// 'controller' => 'CitOmni\\Http\\Controller\\UserController',
+				// 'action' => 'getUser',
+				// 'methods' => ['GET'],
+				// 'template_file' => 'public/example.html',
+				// 'template_layer' => 'citomni/http',
+			// ],
+			// '/email/{email}' => [
+				// 'controller' => 'CitOmni\\Http\\Controller\\EmailController',
+				// 'action' => 'validateEmail',
+				// 'methods' => ['GET'],
+				// 'template_file' => 'public/example.html',
+				// 'template_layer' => 'citomni/http',
+			// ],
+			// '/slug/{urlslug}' => [
+				// 'controller' => 'CitOmni\\Http\\Controller\\SlugController',
+				// 'action' => 'getSlug',
+				// 'methods' => ['GET'],
+				// 'template_file' => 'public/example.html',
+				// 'template_layer' => 'citomni/http',
+			// ],
+			// '/code/{code}' => [
+				// 'controller' => 'CitOmni\\Http\\Controller\\CodeController',
+				// 'action' => 'processCode',
+				// 'methods' => ['POST'],
+			// ],
+		],
 
 	];
+
+	
+	
 }
