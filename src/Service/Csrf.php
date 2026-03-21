@@ -261,7 +261,7 @@ final class Csrf extends BaseService {
 	 *
 	 * Typical usage:
 	 *   if (!$this->app->csrf->verify()) {
-	 *       $this->app->flash->error('csrf', 'Invalid or expired token.');
+	 *       $this->app->flash->error('Invalid or expired token.');
 	 *       $this->app->response->redirect($this->app->request->path());
 	 *   }
 	 *
