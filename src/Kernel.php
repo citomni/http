@@ -17,7 +17,7 @@ namespace CitOmni\Http;
 
 use CitOmni\Kernel\App;
 use CitOmni\Kernel\Mode;
-
+use CitOmni\Kernel\Runtime;
 
 /**
  * Kernel: High-performance HTTP bootstrapper and dispatcher for CitOmni apps.
@@ -27,14 +27,15 @@ use CitOmni\Kernel\Mode;
  *   1) Resolve [appRoot, configDir, publicPath] from a flexible $entryPath.
  *   2) Instantiate App($configDir, Mode::HTTP). Vendor baseline is merged with providers, app base,
  *      and environment overlays; precompiled caches under /var/cache are used when present.
- *   3) Never catch exceptions in Kernel; downstream failures are handled by the ErrorHandler service.
+ *   3) Install the HTTP ErrorHandler service early.
+ *   4) Apply shared runtime configuration via Runtime::configure($app->cfg):
+ *      timezone, default charset, and ICU locale on a best-effort basis.
+ *   5) Enforce HTTP-specific runtime requirements (intl is mandatory for localized HTTP features).
+ *   6) Never catch exceptions in Kernel; downstream failures are handled by the ErrorHandler service.
  *
- * - Apply environment defaults and wire services required early in the request lifecycle.
- *   1) Set timezone (cfg.locale.timezone, default "UTC") and charset (cfg.locale.charset, default "UTF-8").
- *   2) Define CITOMNI_PUBLIC_ROOT_URL (DEV allows auto-detect; non-DEV requires absolute cfg.http.base_url).
- *   3) Apply cfg.http.trusted_proxies to the Request service (enables proxy-aware IP/URL resolution).
- *   4) Install the HTTP ErrorHandler service early ... (reads cfg.error_handler once via its 
- *      constructor/options; no other service resolution).
+ * - Apply HTTP-specific environment defaults and wire services required early in the request lifecycle.
+ *   1) Define CITOMNI_PUBLIC_ROOT_URL (DEV allows auto-detect; non-DEV requires absolute cfg.http.base_url).
+ *   2) Apply cfg.http.trusted_proxies to the Request service (enables proxy-aware IP/URL resolution).
  *
  * - Dispatch the HTTP request lifecycle.
  *   1) Start a single, top-level output buffer as early as possible to prevent partial output. This allows
@@ -44,35 +45,20 @@ use CitOmni\Kernel\Mode;
  *   4) Optionally emit a DEV-friendly performance footer when ?_perf is present.
  *
  * Request lifecycle (order of operations):
- *   - Output buffer start -> boot() -> ErrorHandler install -> timezone & charset -> public root URL
- *     -> trusted proxies -> maintenance guard -> router run -> optional perf footer.
- *
- * Collaborators:
- * - \CitOmni\Kernel\App - Container exposing read-only cfg and resolving services (service map may be cached under /var/cache).
- * - request (HTTP Request service) - Reads cfg.http.trusted_proxies; made proxy-aware by Kernel during boot.
- * - maintenance (Maintenance service) - Enforces maintenance mode based on a flag file and service policy. Kernel does not pass arguments.
- * - router (Router service) - Resolves the route (exact or regex with placeholders) and invokes controllers. On errors, delegates to ErrorHandler::httpError($status, $context) for guaranteed responses (404/405/500).
- * - \CitOmni\Http\Service\ErrorHandler - Guarantees "no blank page" for: Uncaught exceptions, Shutdown fatals (E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR, E_USER_ERROR), Router HTTP errors (404/405/5xx). Non-fatal PHP errors (warnings/notices/etc.) may optionally render in DEV via cfg.
- *
- * Configuration keys (relevant excerpts):
- * - cfg.locale.timezone (string) - Default: "UTC". Invalid values throw at boot.
- * - cfg.locale.charset (string) - Default: "UTF-8". If ini_set('default_charset', ...) fails, Kernel throws at boot.
- * - cfg.http.base_url (string; absolute URL, no trailing slash) - Required in non-DEV. In DEV, if missing/relative, Kernel auto-detects (optionally proxy-aware). Example: "https://www.example.com".
- * - cfg.http.trust_proxy (bool) - When true, auto-detection of CITOMNI_PUBLIC_ROOT_URL may honor X-Forwarded-* headers.
- * - cfg.http.trusted_proxies (string[] of IPs/CIDRs) - List of trusted proxies for the Request service (e.g., ["10.0.0.0/8"]).
- * - cfg.error_handler.render.trigger (int; PHP error bitmask) - Controls which non-fatal PHP errors trigger rendering (DEV convenience). Fatals are always rendered and are sanitized out of this mask even if misconfigured.
- * - cfg.error_handler.render.detail.level (int) - 0 = minimal client message (prod/stage), 1 = developer details (only active in 'dev').
- * - cfg.error_handler.render.detail.trace.{max_frames, max_arg_strlen, max_array_items, max_depth, ellipsis} - Bounded trace formatting when detail.level = 1 (and CITOMNI_ENVIRONMENT === 'dev').
- * - cfg.error_handler.render.force_error_reporting (int, optional) - Hard override of error_reporting() at handler install time (e.g., E_ALL in dev).
- * - cfg.error_handler.log.trigger (int; PHP error bitmask), cfg.error_handler.log.path (string),
- *   cfg.error_handler.log.max_bytes (int), cfg.error_handler.log.max_files (int) - Robust JSONL logs with size-based rotation and pruning. Router 404/405/5xx are always logged to dedicated files: http_router_404.jsonl, http_router_405.jsonl, http_router_5xx.jsonl.
- * - cfg.error_handler.templates.html (string), cfg.error_handler.templates.html_failsafe (string|null) - Optional plain-PHP templates for error pages. The handler falls back to a built-in minimal HTML if missing.
- * - cfg.error_handler.status_defaults.{exception, shutdown, php_error, http_error} (int) - Default HTTP status codes used by the handler when a specific mapping is not present.
+ *   - Output buffer start
+ *   - boot():
+ *       resolve paths -> instantiate App -> ErrorHandler install
+ *       -> Runtime::configure() -> intl requirement assertion
+ *       -> public root URL -> trusted proxies
+ *   - maintenance guard
+ *   - router run
+ *   - optional perf footer
  *
  * Error handling:
- * - Fail fast in Kernel:
+ * - Fail fast in Kernel / shared runtime setup:
  *     - Invalid timezone -> \RuntimeException.
  *     - Failed default charset -> \RuntimeException.
+ *     - Missing PHP intl extension in HTTP mode -> \RuntimeException.
  *     - Unresolvable entry path / missing config dir -> \RuntimeException.
  *     - Non-DEV without absolute cfg.http.base_url -> \RuntimeException.
  * - No try/catch in Kernel. The ErrorHandler service is installed early and is responsible for:
@@ -133,10 +119,13 @@ use CitOmni\Kernel\Mode;
  *   // Missing cfg.http.base_url -> \CitOmni\Http\Kernel::boot(...) throws \RuntimeException.
  *
  *   // Invalid timezone (cfg.locale.timezone):
- *   // date_default_timezone_set() fails -> \RuntimeException.
+ *   // Runtime::configure() throws \RuntimeException.
  *
  *   // Invalid charset (cfg.locale.charset):
- *   // ini_set('default_charset', ...) fails or mismatch -> \RuntimeException.
+ *   // Runtime::configure() throws \RuntimeException.
+ *
+ *   // Missing intl extension in HTTP mode:
+ *   // \CitOmni\Http\Kernel::boot(...) throws \RuntimeException.
  *
  * Notes:
  * - CITOMNI_PUBLIC_ROOT_URL:
@@ -144,6 +133,10 @@ use CitOmni\Kernel\Mode;
  *     - In 'dev': if cfg.http.base_url is absolute, it is used; else Kernel auto-detects (optionally
  *       honoring X-Forwarded-* when cfg.http.trust_proxy is true).
  *     - In non-dev: cfg.http.base_url MUST be an absolute URL, otherwise Kernel throws.
+ *
+ * - Runtime configuration:
+ *     - Shared process-global runtime setup is delegated to \CitOmni\Kernel\Runtime.
+ *     - HTTP mode still enforces intl as a hard requirement after Runtime::configure().
  *
  * - Performance footer:
  *     - When the query parameter ?_perf is present, Kernel emits a harmless HTML comment footer with timing,
@@ -173,7 +166,9 @@ final class Kernel {
 		\ob_start();
 		\ob_implicit_flush(false);
 
-        // Accept either public/, config/, or app-root
+		// Accept either public/, config/, or app-root.
+		// boot() performs HTTP-mode bootstrap, shared runtime configuration,
+		// and HTTP-specific early wiring before maintenance/router dispatch.
 		$app = self::boot($entryPath, $opts);
 
 		// Deliberately call guard() with no arguments.
@@ -209,68 +204,56 @@ final class Kernel {
 	
 	
 	/**
-	 * Boot the App in HTTP mode and apply environment defaults.
+	 * Boot the App in HTTP mode and apply shared/runtime-specific defaults.
 	 *
 	 * Behavior:
 	 * - Resolve [appRoot, configDir, publicPath] from $entryPath.
 	 * - Instantiate App($configDir, Mode::HTTP).
-	 * - Set timezone and default charset from cfg.locale.*.
+	 * - Install the HTTP ErrorHandler service early.
+	 * - Apply shared runtime configuration via Runtime::configure($app->cfg).
+	 * - Enforce HTTP-specific runtime requirements (intl is mandatory in HTTP mode).
 	 * - Define CITOMNI_PUBLIC_ROOT_URL (see definePublicRootUrl()).
 	 * - Apply cfg.http.trusted_proxies to Request (optional).
-	 * - Install error handler from cfg.error_handler (optional).
 	 *
 	 * Notes:
 	 * - Expects CITOMNI_APP_PATH to be defined by the entrypoint (used by App caches).
 	 * - Kernel does not define CITOMNI_APP_PATH/CITOMNI_PUBLIC_PATH; only PUBLIC_ROOT_URL.
+	 * - Runtime::configure() handles timezone, charset, and ICU locale setup; HTTP still asserts intl explicitly.
 	 *
 	 * @param string $entryPath Absolute path to /public, /config, or app root.
 	 * @param array<string,mixed> $opts Reserved; currently unused.
 	 * @return App
-	 * @throws \RuntimeException On invalid timezone/charset or missing/invalid paths.
+	 * @throws \RuntimeException On invalid runtime configuration, missing intl in HTTP mode, or missing/invalid paths.
 	 */
 	public static function boot(string $entryPath, array $opts = []): App {
 		
-		// Resolve paths (app root, config dir, public path)
+		// Resolve paths (app root, config dir, public path).
 		[$appRoot, $configDir, $publicPath] = self::resolvePaths($entryPath);
 
-		// 1) Construct the App container for HTTP mode
+		// 1) Construct the App container for HTTP mode.
 		$app = new App($configDir, Mode::HTTP);
 
-		// 2) Error handler (optional)
-		// If you ship a handler, expose a static ::install(array $cfg) method.
-		// Reads exclusively from cfg.error_handler
+		// 2) Install the HTTP error handler early.
+		// Reads exclusively from cfg.error_handler.
 		$app->errorHandler->install();
 
-		// 3) Timezone
-		$tz = (string)($app->cfg->locale->timezone ?? 'UTC');
-		if (!@date_default_timezone_set($tz)) {
-			throw new \RuntimeException('Invalid timezone: ' . $tz);
-		}
+		// 3) Apply shared runtime configuration.
+		// Handles timezone, default charset, and ICU locale on a best-effort basis.
+		Runtime::configure($app->cfg);
 
-		// 4) ICU Locale for Intl (dates/numbers/currency)
-		$icu = (string)($app->cfg->locale->icu_locale ?? 'en_US');
+		// 4) HTTP requires intl for localized dates/numbers.
+		// Runtime::configure() only sets ICU when the extension is available.
 		if (!\class_exists(\Locale::class)) {
 			throw new \RuntimeException('PHP intl extension is required for localized dates/numbers.');
 		}
-		try {
-			\Locale::setDefault($icu); // independent of html lang
-		} catch (\Throwable $e) {
-			throw new \RuntimeException('Invalid ICU locale: ' . $icu);
-		}
 
-		// 5) Charset
-		$charset = (string)($app->cfg->locale->charset ?? 'UTF-8');
-		if (!@ini_set('default_charset', $charset) || \ini_get('default_charset') !== $charset) {
-			throw new \RuntimeException('Failed to set default charset to ' . $charset);
-		}
-
-		// 6) Define CITOMNI_PUBLIC_ROOT_URL (env-aware)
+		// 5) Define CITOMNI_PUBLIC_ROOT_URL (env-aware).
 		self::definePublicRootUrl($app);
 
-		// 7) Wire http.trusted_proxies into Request service
+		// 6) Wire http.trusted_proxies into Request service.
 		// If http.trusted_proxies is defined in the configuration, inject it into
-		// the Request service. This way we make sure that client IP resolution becomes proxy-aware
-		// (i.e. behind load balancers or reverse proxies).
+		// the Request service so client IP/URL resolution becomes proxy-aware
+		// behind load balancers or reverse proxies.
 		$tp = $app->cfg->http->trusted_proxies ?? null; // null|array
 		if (\is_array($tp)) {
 			$app->request->setTrustedProxies($tp);
@@ -278,6 +261,7 @@ final class Kernel {
 	
 		return $app;
 	}
+
 
 	/**
 	 * Resolve appRoot, configDir and publicPath from a flexible entry path.
