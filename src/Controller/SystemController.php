@@ -1381,10 +1381,10 @@ final class SystemController extends BaseController {
 		$this->app->response->noCache();
 		$this->requireWebhookOrAbort(); // 404 on failure
 
-		$written = $this->app->warmCache(overwrite: true, opcacheInvalidate: true);
+		$result = $this->app->warmCache(overwrite: true, opcacheInvalidate: true);
 
 		$this->app->response->jsonStatus([
-			'written' => (int)$written,
+			'written' => \count(\array_filter($result)),
 			'status'  => 'ok',
 		], 200);
 	}
