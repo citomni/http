@@ -15,6 +15,7 @@ declare(strict_types=1);
 
 namespace CitOmni\Http\Service;
 
+use CitOmni\Http\Util\Url;
 use CitOmni\Kernel\Service\BaseService;
 
 /**
