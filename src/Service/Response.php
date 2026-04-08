@@ -139,38 +139,52 @@ class Response extends BaseService {
 		
 
 	/**
-	 * Redirects to a given URL with an optional HTTP status code and terminate.
+	 * Send a redirect response and terminate execution.
 	 *
 	 * Behavior:
-	 * - Strips CR/LF from $url to prevent header injection.
-	 * - Sends Location and optional status code (default 302).
+	 * - Treats app-local paths (for example "/login.html") as public-root-relative
+	 *   and prefixes them with CITOMNI_PUBLIC_ROOT_URL.
+	 * - Removes CR/LF from the final Location value to prevent header injection.
+	 * - Sends the Location header with the supplied status code.
 	 * - Terminates execution deterministically.
 	 *
 	 * Notes:
-	 * - If headers are already sent, logs the situation (if log service exists) and still terminates.
-	 * - Does not normalize relative URLs to absolute to keep overhead minimal.
+	 * - Non-local URLs are sent as provided after header-value sanitization.
+	 * - If headers have already been sent, the method logs the situation when a
+	 *   log service exists and still terminates.
+	 * - In HTTP mode, CITOMNI_PUBLIC_ROOT_URL is expected to be defined by the
+	 *   kernel before this method is called.
 	 *
 	 * Typical usage:
-	 *   $this->app->response->redirect('/login'); // 302 by default
-	 *
-	 * Examples:
-	 *
-	 *   // Permanent move
+	 *   $this->app->response->redirect('/login.html');
 	 *   $this->app->response->redirect('https://example.com/new', 301);
 	 *
-	 * @param string $url Absolute or relative URL. CR/LF will be removed.
-	 * @param int $statusCode 3xx status code (default 302).
+	 * @param string $url Redirect target. App-local paths are resolved against the public root.
+	 * @param int $statusCode HTTP status code to send with the redirect header.
 	 * @return never
 	 */
 	public function redirect(string $url, int $statusCode = 302): never {
 		if (!\headers_sent()) {
+			
+			// Resolve app-local paths against the detected public root.
+			if (Url::isLocal($url)) {
+				$url = \rtrim((string)\CITOMNI_PUBLIC_ROOT_URL, '/') . $url;
+			}
+
+			// Strip CR/LF before emitting the Location header.
 			$loc = $this->sanitizeHeaderValue($url);
 			\header('Location: ' . $loc, true, $statusCode);
+			
 		} else {
 			$this->logHeadersAlreadySent(__METHOD__, ['location' => $url, 'status' => $statusCode]);
 		}
+
 		exit;
 	}
+
+
+
+
 
 
 
