@@ -78,11 +78,32 @@
 
 		* { box-sizing: border-box; }
 		html, body { height: 100%; }
+
+		html {
+			background: var(--md-bg);
+			overflow-x: clip;
+		}
+
+		html::before {
+			content: "";
+			position: fixed;
+			top: -12vh;
+			right: -14vw;
+			bottom: -12vh;
+			left: -14vw;
+			z-index: -1;
+			pointer-events: none;
+			background:
+				radial-gradient(82vmax 48vmax at 84% -10%, rgba(41,98,255,.10), transparent 72%),
+				radial-gradient(70vmax 42vmax at -12% 100%, rgba(0,200,83,.10), transparent 74%);
+			background-repeat: no-repeat;
+			background-position: 84% -10%, -12% 100%;
+			background-size: 82vmax 48vmax, 70vmax 42vmax;
+		}
+
 		body {
 			margin: 0;
-			background: radial-gradient(1200px 800px at 80% -10%, rgba(41,98,255,0.08), transparent 60%),
-						radial-gradient(1000px 700px at -10% 100%, rgba(0,200,83,0.08), transparent 55%),
-						var(--md-bg);
+			background: transparent;
 			color: var(--md-text);
 			font: 16px/1.5 system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, "Helvetica Neue", Arial, "Noto Sans", "Apple Color Emoji", "Segoe UI Emoji";
 			text-rendering: optimizeLegibility;
