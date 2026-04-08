@@ -38,22 +38,29 @@ final class Url {
 	 * Check whether a string is a local path.
 	 *
 	 * A local path starts with exactly one forward slash. Strings starting
-	 * with "//" or "/\" are rejected to prevent protocol-relative URLs
-	 * and backslash-based open-redirect vectors.
+	 * with "//" or "/\" are rejected because some clients interpret them
+	 * as protocol-relative or slash-equivalent external targets.
 	 *
-	 * This is a structural check only - it does not validate path syntax,
-	 * resolve the path, or confirm that the target exists.
+	 * This method is intended for low-level locality checks such as
+	 * guarding user-supplied redirect targets against open-redirect abuse.
 	 *
-	 * @param  string  $path  The path to check.
-	 * @return bool  True if the path is local.
+	 * This is a structural check only. It does not validate path syntax,
+	 * normalize the path, resolve it, or confirm that the target exists.
+	 *
+	 * @param string $path The path to check.
+	 * @return bool True when the string is a local path.
 	 */
 	public static function isLocal(string $path): bool {
 		if ($path === '' || $path[0] !== '/') {
 			return false;
 		}
+
+		// Reject protocol-relative URLs (//evil.com) and backslash
+		// variants that some browsers interpret as slashes.
 		if (isset($path[1]) && ($path[1] === '/' || $path[1] === '\\')) {
 			return false;
 		}
+
 		return true;
 	}
 
