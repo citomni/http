@@ -760,7 +760,7 @@ class Request extends BaseService {
 	/**
 	 * Path part only (no query string), leading slash retained.
 	 */
-	public function path(): string {
+	public function pathRaw(): string {
 		$uri = $this->uri();
 		$qpos = \strpos($uri, '?');
 		return $qpos === false ? $uri : \substr($uri, 0, $qpos);
@@ -770,14 +770,16 @@ class Request extends BaseService {
 	/**
 	 * Path with app base trimmed, e.g. "/subdir/admin/x.html" -> "/admin/x.html".
 	 */
-	public function pathWithBaseTrimmed(): string {
-		$path = $this->path();
+	public function pathFromAppRoot(): string {
+		$path = $this->pathRaw();
 		$base = (string)\parse_url($this->baseUrl(), \PHP_URL_PATH);
 		$base = \rtrim($base, '/');
+
 		if ($base !== '' && \str_starts_with($path, $base)) {
 			$trimmed = \substr($path, \strlen($base));
 			return $trimmed !== '' ? $trimmed : '/';
 		}
+
 		return $path;
 	}
 

@@ -34,6 +34,8 @@ use CitOmni\Kernel\Service\BaseService;
  *   by default and can be disabled via config/constructor options.
  * - Compile templates to disk cache under /var/cache for performance. Cache keys
  *   incorporate both "path" and "layer".
+ * - Match path-scoped view variables against the app-root-relative request path
+ *   reported by Request::pathFromAppRoot().
  *
  * Configuration keys read (cfg->view):
  *
@@ -73,7 +75,7 @@ use CitOmni\Kernel\Service\BaseService;
  *       - and which request paths it should apply to (`include` / `exclude`).
  *
  *     We compile this into $this->compiledVars with ready-to-use regexes so that,
- *     for a given request path, we can cheaply inject:
+ *     for a given app-root-relative request path, we can cheaply inject:
  *       - static data blobs (menus, etc.)
  *       - dynamic provider output (header models, etc.).
  *
@@ -138,6 +140,9 @@ final class TemplateEngine extends BaseService {
 	/** @var string Raw HTML snippet (analytics, marketing tags) injected globally */
 	private string $marketingScripts = '';
 
+
+
+
 	/**
 	 * Precompiled, path-scoped template vars from cfg->view->vars.
 	 *
@@ -184,6 +189,15 @@ final class TemplateEngine extends BaseService {
 
 
 
+
+
+
+
+
+	// ----------------------------------------------------------------
+	// Construction
+	// ----------------------------------------------------------------
+
 	/**
 	 * One-time initialization for this request/process.
 	 *
@@ -208,7 +222,9 @@ final class TemplateEngine extends BaseService {
 	 * @return void
 	 */
 	protected function init(): void {
-		
+
+
+		// -- 1. Snapshot cfg and service options ---------------------------
 		// Snapshot cfg root for the view layer.
 		// If cfg->view is missing, fall back to an empty stdClass-like object for convenience.
 		$viewCfg = $this->app->cfg->view ?? (object)[];
@@ -221,9 +237,8 @@ final class TemplateEngine extends BaseService {
 		$opt = $this->options;
 		$this->options = [];
 
-
-		// ---------------------------------------------------------------------------------
-		// 1) Template layers map (layer => absolute dir)
+		// -- 2. Normalize template layer map -------------------------------
+		// Template layers map (layer => absolute dir)
 		//
 		// - view.template_layers is expected to be something like:
 		//     [
@@ -241,7 +256,6 @@ final class TemplateEngine extends BaseService {
 		//
 		// - We do NOT realpath() here; loadSource() enforces that templates can't escape
 		//   their configured root using ../ tricks. Doing it lazily keeps init() cheap.
-		// ---------------------------------------------------------------------------------
 		$rawLayers = $this->normalizeCfgMap($viewCfg->template_layers ?? []);
 		foreach ($rawLayers as $layerKey => $pathVal) {
 			$layer = (string)$layerKey;
@@ -263,38 +277,34 @@ final class TemplateEngine extends BaseService {
 			$this->layersMap[$layer] = $abs;
 		}
 
-
-		// ---------------------------------------------------------------------------------
-		// 2) Rendering / compilation flags & toggles
+		// -- 3. Snapshot rendering flags -----------------------------------
+		// Rendering / compilation flags & toggles
 		//
 		// - Some flags can be overridden via service-map options when wiring the service.
 		//   Options win over cfg->view (predictable "last wins" semantics).
 		//
 		// - We coerce to bool so later checks are cheap.
 		//   This avoids repeatedly touching cfg->view in hot render paths.
-		// ---------------------------------------------------------------------------------
-		$this->cacheEnabled       = (bool)($opt['cache_enabled']        ?? $viewCfg->cache_enabled        ?? false);
-		$this->trimWhitespace     = (bool)($opt['trim_whitespace']      ?? $viewCfg->trim_whitespace      ?? false);
+		$this->cacheEnabled		= (bool)($opt['cache_enabled'] ?? $viewCfg->cache_enabled ?? false);
+		$this->trimWhitespace	= (bool)($opt['trim_whitespace'] ?? $viewCfg->trim_whitespace ?? false);
 		$this->removeHtmlComments = (bool)($opt['remove_html_comments'] ?? $viewCfg->remove_html_comments ?? false);
-		$this->allowPhpTags       = (bool)($opt['allow_php_tags']       ?? $viewCfg->allow_php_tags       ?? true);
+		$this->allowPhpTags		= (bool)($opt['allow_php_tags'] ?? $viewCfg->allow_php_tags ?? true);
 
-
-		// ---------------------------------------------------------------------------------
-		// 3) Passthrough view config (asset versioning, marketing snippets, globals)
+		// -- 4. Snapshot passthrough view config ---------------------------
+		// Passthrough view config (asset versioning, marketing snippets, globals)
 		//
 		// - assetVersion is used by the $asset() helper for cache-busting (?v=...).
 		// - marketingScripts is dumped into all templates (e.g. analytics tags).
 		// - icons is also normalized into a flat associative array (id => raw <svg>).
 		//   This feeds the $icon('home') helper exposed in buildGlobals().
-		// ---------------------------------------------------------------------------------
-		$this->assetVersion     = (string)($opt['asset_version']      ?? $viewCfg->asset_version      ?? '');
-		$this->marketingScripts = (string)($viewCfg->marketing_scripts ?? '');
+		$this->assetVersion		= (string)($opt['asset_version'] ?? $viewCfg->asset_version ?? '');
+		$this->marketingScripts	= (string)($viewCfg->marketing_scripts ?? '');
 
 		// Inline SVG icons (string id => SVG markup). Used by $icon('foo') in templates.
-		$this->icons            = $this->normalizeCfgMap($viewCfg->icons ?? []);
+		$this->icons = $this->normalizeCfgMap($viewCfg->icons ?? []);
 
-
-		// 4) Pre-compile scoped view vars (static + dynamic)
+		// -- 5. Precompile scoped view vars --------------------------------
+		// Pre-compile scoped view vars (static + dynamic)
 		//
 		// cfg->view->vars is expected to be an associative map:
 		//   varName => [
@@ -307,11 +317,11 @@ final class TemplateEngine extends BaseService {
 		// We normalize that map up front and compile it into $this->compiledVars
 		// so that at request time we only do cheap preg_match() and (maybe) a single
 		// provider call per var.
-		$this->compiledVars = []; // array<string,array{...}>
+		$this->compiledVars = [];
 
-		// Flatten cfg->view->vars (Cfg node or plain array) into a plain associative array
+		// Flatten cfg->view->vars (Cfg node or plain array) into a plain associative array.
 		$varsCfg = $this->normalizeCfgMap($viewCfg->vars ?? []);
-		
+
 		foreach ($varsCfg as $varName => $row) {
 			if (!\is_array($row) || $row === []) {
 				continue;
@@ -319,8 +329,8 @@ final class TemplateEngine extends BaseService {
 
 			// We trust the array key as the var name
 			$varName = (string)$varName;
-			$type    = (string)($row['type'] ?? '');
-			$source  = $row['source'] ?? null;
+			$type	= (string)($row['type'] ?? '');
+			$source	= $row['source'] ?? null;
 
 			if ($varName === '' || $type === '' || $source === null) {
 				throw new \RuntimeException(
@@ -340,11 +350,11 @@ final class TemplateEngine extends BaseService {
 				// Here 'source' is literal data (array/string/whatever),
 				// and we will inject it directly at request time.
 				$this->compiledVars[$varName] = [
-					'var'   => $varName,
-					'type'  => 'static',
-					'data'  => $source,
-					'ire'   => $ire,
-					'ere'   => $ere,
+					'var'	=> $varName,
+					'type'	=> 'static',
+					'data'	=> $source,
+					'ire'	=> $ire,
+					'ere'	=> $ere,
 				];
 				continue;
 			}
@@ -357,11 +367,11 @@ final class TemplateEngine extends BaseService {
 				//
 				// We'll just store it as 'call' and reuse invokeProvider() at runtime.
 				$this->compiledVars[$varName] = [
-					'var'   => $varName,
-					'type'  => 'dynamic',
-					'call'  => $source, // <- shapes: "FQCN::m", ['class'=>..], ['service'=>..]
-					'ire'   => $ire,
-					'ere'   => $ere,
+					'var'	=> $varName,
+					'type'	=> 'dynamic',
+					'call'	=> $source, // <- shapes: "FQCN::m", ['class'=>..], ['service'=>..]
+					'ire'	=> $ire,
+					'ere'	=> $ere,
 				];
 				continue;
 			}
@@ -371,19 +381,25 @@ final class TemplateEngine extends BaseService {
 			);
 		}
 
-
-		// ---------------------------------------------------------------------------------
-		// 5) Cache dir
-		//
+		// -- 6. Resolve cache dir ------------------------------------------
 		// - All compiled templates are written to CITOMNI_APP_PATH . '/var/cache'.
 		// - We don't allow overriding this via config because predictable layout
 		//   is part of CitOmni's "no guessing" philosophy (and deploy tooling
 		//   assumes this location).
-		// ---------------------------------------------------------------------------------
 		$this->cacheDir = \CITOMNI_APP_PATH . '/var/cache';
+
 	}
 
 
+
+
+
+
+
+
+	// ----------------------------------------------------------------
+	// Rendering
+	// ----------------------------------------------------------------
 
 	/**
 	 * Render a template "file@layer" directly to output.
@@ -440,6 +456,16 @@ final class TemplateEngine extends BaseService {
 	}
 
 
+
+
+
+
+
+
+	// ----------------------------------------------------------------
+	// Globals and scoped vars
+	// ----------------------------------------------------------------
+
 	/**
 	 * Merge globals, dynamic vars, and controller data.
 	 *
@@ -452,12 +478,12 @@ final class TemplateEngine extends BaseService {
 	 * @return array<string,mixed>
 	 */
 	private function buildFinalVars(array $data): array {
-		$glb = $this->globals ??= $this->buildGlobals();
+		$globals = $this->globals ??= $this->buildGlobals();
 
-		$pathRel = $this->appRelativePath($this->app->request->path());
-		$scoped  = $this->buildScopedVarsForPath($pathRel);
+		$pathFromAppRoot = $this->app->request->pathFromAppRoot();
+		$scoped = $this->buildScopedVarsForPath($pathFromAppRoot);
 
-		return $data + $scoped + $glb;
+		return $data + $scoped + $globals;
 	}
 
 
@@ -494,28 +520,28 @@ final class TemplateEngine extends BaseService {
 		return [
 			// --- Identity & locale scalars (cheap values used directly in templates)
 
-			'app_name'         => (string)$cfg->identity->app_name,
-			'base_url'         => $baseUrl,
-			'public_root_url'  => $publicUrl,
-			'language'         => (string)$cfg->locale->language,
-			'charset'          => (string)$cfg->locale->charset,
+			'app_name'	=> (string)$cfg->identity->app_name,
+			'base_url'	=> $baseUrl,
+			'public_root_url' => $publicUrl,
+			'language'	=> (string)$cfg->locale->language,
+			'charset'	=> (string)$cfg->locale->charset,
 
 			// --- View passthroughs (global marketing snippets etc.)
 
-			'marketing_scripts'=> $this->marketingScripts,
+			'marketing_scripts' => $this->marketingScripts,
 
 			// --- Security feature flags (informational for UI text, badges, warnings etc.)
 
-			'csrf_protection'       => (bool)($cfg->security->csrf->enabled ?? true),
-			'honeypot_protection'   => (bool)$cfg->security->honeypot_protection,
-			'form_action_switching' => (bool)$cfg->security->form_action_switching,
-			'captcha_protection'    => (bool)$cfg->security->captcha_protection,
+			'csrf_protection'		=> (bool)($cfg->security->csrf->enabled ?? true),
+			'honeypot_protection'	=> (bool)$cfg->security->honeypot_protection,
+			'form_action_switching'	=> (bool)$cfg->security->form_action_switching,
+			'captcha_protection'	=> (bool)$cfg->security->captcha_protection,
 
 			// --- Environment info (e.g. show debug panels only in dev)
 
 			'env' => [
-				'name' => \defined('CITOMNI_ENVIRONMENT') ? (string)\CITOMNI_ENVIRONMENT : 'prod',
-				'dev'  => \defined('CITOMNI_ENVIRONMENT') ? (\CITOMNI_ENVIRONMENT === 'dev') : false,
+				'name'	=> \defined('CITOMNI_ENVIRONMENT') ? (string)\CITOMNI_ENVIRONMENT : 'prod',
+				'dev'	=> \defined('CITOMNI_ENVIRONMENT') ? (\CITOMNI_ENVIRONMENT === 'dev') : false,
 			],
 
 
@@ -750,7 +776,7 @@ final class TemplateEngine extends BaseService {
 
 
 			/**
-			 * $currentPath: Get the current request path (what the browser asked for).
+			 * $currentPath: Get the current app-root-relative request path.
 			 *
 			 * Typical usage:
 			 *   <li class="{% if $currentPath() === '/member/profile' %}active{% endif %}">
@@ -758,11 +784,11 @@ final class TemplateEngine extends BaseService {
 			 *   </li>
 			 *
 			 * Notes:
-			 * - Returns whatever Request::path() currently reports, e.g. "/member/profile".
-			 * - Good for "active" menu highlighting.
+			 * - Returns Request::pathFromAppRoot(), e.g. "/member/profile".
+			 * - Good for "active" menu highlighting and local route comparisons.
 			 */
 			'currentPath' => function (): string {
-				return $this->app->request->path();
+				return $this->app->request->pathFromAppRoot();
 			},
 
 
@@ -784,7 +810,6 @@ final class TemplateEngine extends BaseService {
 			 *   of nuking the whole page for a missing cosmetic asset).
 			 */
 			'icon' => function (string $name): string {
-				
 				$key = (string)$name;
 				if (isset($this->icons[$key])) {
 					return $this->icons[$key];
@@ -856,13 +881,16 @@ final class TemplateEngine extends BaseService {
 				switch ($fn) {
 					case 'label':
 						return $gate->label(...$args);
+
 					case 'labelOf':
 						return $gate->labelOf(...$args);
+
 					case 'labels':
 						return $gate->labels(...$args);
 
 					case 'is':
 						return $gate->__get((string)$args[0]);
+
 					case 'any':
 						return $gate->any(...$args);
 
@@ -883,8 +911,8 @@ final class TemplateEngine extends BaseService {
 			},
 		];
 	}
-	
-	
+
+
 	/**
 	 * buildScopedVarsForPath: Resolve all configured view vars (static+dynamic)
 	 * that apply to the current request path.
@@ -1008,8 +1036,8 @@ final class TemplateEngine extends BaseService {
 		// Case 2: ['class' => FQCN, 'method' => 'm']
 		// Instantiate a fresh object of that FQCN with $app, then call ->m()
 		if (\is_array($call) && isset($call['class'], $call['method'])) {
-			$cls = (string)$call['class'];
-			$m   = (string)$call['method'];
+			$cls	= (string)$call['class'];
+			$m		= (string)$call['method'];
 
 			// Sanity-check method existence on that class
 			if (!\method_exists($cls, $m)) {
@@ -1026,8 +1054,8 @@ final class TemplateEngine extends BaseService {
 		// Case 3: ['service' => 'id', 'method' => 'm']
 		// Reuse an already-constructed Service from $this->app and call ->m()
 		if (\is_array($call) && isset($call['service'], $call['method'])) {
-			$id = (string)$call['service'];
-			$m  = (string)$call['method'];
+			$id	= (string)$call['service'];
+			$m	= (string)$call['method'];
 
 			// Ensure the service actually exists in this app build
 			if (!$this->app->hasService($id)) {
@@ -1047,49 +1075,6 @@ final class TemplateEngine extends BaseService {
 
 		// Anything else is unsupported (we don't guess)
 		throw new \RuntimeException("Unsupported provider call definition for var '{$varName}'.");
-	}
-
-
-	/**
-	 * appRelativePath: Normalize request path to an app-relative path.
-	 *
-	 * Behavior:
-	 * - Derives the effective app base path from Request::baseUrl() (which already
-	 *   reflects CITOMNI_PUBLIC_ROOT_URL / cfg->http->base_url).
-	 * - Strips that base path prefix from the raw request path.
-	 * - Normalizes multiple slashes.
-	 * - Guarantees the result starts with "/" and returns "/" for the frontpage.
-	 *
-	 * Why:
-	 * - cfg->view->vars include/exclude patterns are matched against this
-	 *   normalized, app-relative path.
-	 */
-	private function appRelativePath(string $rawPath): string {
-		$base = $this->app->request->baseUrl();          // e.g. "https://site.tld/app/" or "/"
-		$basePath = (string)\parse_url($base, \PHP_URL_PATH); // "/app/" part from base URL
-		$basePath = $basePath !== '' ? '/' . \trim($basePath, '/') . '/' : '/';
-		// Now $basePath is guaranteed to look like "/app/" or "/"
-
-		// Normalize the incoming raw path from the request
-		$path = $rawPath !== '' ? $rawPath : '/';
-		if ($path[0] !== '/') {
-			$path = '/' . $path;  // enforce leading "/"
-		}
-
-		// If app is mounted under a subdir ("/app/"), strip that prefix out so that
-		// "/app/member/profile" becomes "/member/profile"
-		if ($basePath !== '/') {
-			$prefix = \rtrim($basePath, '/');  // "/app"
-			if ($prefix !== '' && \str_starts_with($path, $prefix . '/')) {
-				$path = \substr($path, \strlen($prefix)); // drop "/app"
-			}
-		}
-
-		// Collapse accidental double slashes, etc.
-		$path = \preg_replace('~/+~', '/', $path) ?? $path;
-
-		// Ensure we never return "" (return "/" for frontpage)
-		return $path === '' ? '/' : $path;
 	}
 
 
@@ -1154,10 +1139,10 @@ final class TemplateEngine extends BaseService {
 
 		// Escape literal chars for regex, but keep "*" as wildcard.
 		// Example: "/news/*" -> '/^\/news\/.*/'
-		$quoted = \preg_quote($pat, '/');      // turn "/" etc. into "\/", "*" into "\*"
-		$quoted = \str_replace('\*', '.*', $quoted); // replace escaped "*" with ".*" (wildcard)
+		$quoted = \preg_quote($pat, '/');				// turn "/" etc. into "\/", "*" into "\*"
+		$quoted = \str_replace('\*', '.*', $quoted);	// replace escaped "*" with ".*" (wildcard)
 
-		return '/^' . $quoted . '/';           // anchor at start of string
+		return '/^' . $quoted . '/';					// anchor at start of str
 	}
 
 
@@ -1219,6 +1204,17 @@ final class TemplateEngine extends BaseService {
 		return true;
 	}
 
+
+
+
+
+
+
+
+
+	// ----------------------------------------------------------------
+	// Compilation pipeline
+	// ----------------------------------------------------------------
 
 	/**
 	 * Compile "file@layer" to a cached PHP file and return its absolute path.
@@ -1322,6 +1318,452 @@ final class TemplateEngine extends BaseService {
 
 
 	/**
+	 * splitRef: Parse a template reference of the form "file@layer".
+	 *
+	 * A template reference always names both:
+	 * - a relative template path (e.g. "admin/panel.html")
+	 * - a layer key registered in TemplateEngine::init() (e.g. "citomni/admin")
+	 *
+	 * Example valid refs:
+	 *   "public/home.html@app"
+	 *   "admin/admin_layout.html@citomni/admin"
+	 *
+	 * Behavior:
+	 * - Splits on the LAST '@' to allow filenames that might contain '@'
+	 *   earlier (edge case, but deterministic).
+	 * - Ensures both the relative path and layer are non-empty.
+	 * - Ensures the layer exists in $this->layersMap. If the layer is not
+	 *   registered, we fail fast.
+	 * - Normalizes leading slashes away from the relative path so lookups
+	 *   are consistent on disk.
+	 *
+	 * Notes:
+	 * - This method does not check that the template file exists; use loadSource()
+	 *   for that.
+	 *
+	 * @param string $ref Full template reference "path@layer".
+	 *
+	 * @return array{0:string,1:string} Tuple {relativePath, layer} where:
+	 *   - relativePath is a path under that layer's template root
+	 *     (no leading slash),
+	 *   - layer is the layer identifier as registered in init().
+	 *
+	 * @throws \InvalidArgumentException If $ref is missing "@", or if either side
+	 *                                   of the split is empty.
+	 * @throws \RuntimeException         If the referenced layer is unknown.
+	 */
+	private function splitRef(string $ref): array {
+		// Find the *last* "@", to be deterministic even if someone ever does "foo@bar@layer".
+		$pos = \strrpos($ref, '@');
+		if ($pos === false) {
+			throw new \InvalidArgumentException("TemplateEngine: Template ref '{$ref}' must contain '@layer'.");
+		}
+
+		// Left side is the template path, right side is the layer key.
+		$rel	= \substr($ref, 0, $pos);
+		$layer	= \substr($ref, $pos + 1);
+
+		// Normalize path: strip any accidental leading "/" or "\".
+		$rel = \ltrim($rel, '/\\');
+
+		// Basic validation: no empty parts.
+		if ($rel === '' || $layer === '') {
+			throw new \InvalidArgumentException("TemplateEngine: Invalid template ref '{$ref}'.");
+		}
+
+		// Ensure the layer exists in the precomputed map from init().
+		if (!isset($this->layersMap[$layer])) {
+			throw new \RuntimeException("TemplateEngine: Unknown layer '{$layer}' in '{$ref}'.");
+		}
+
+		return [$rel, $layer];
+	}
+
+
+	/**
+	 * loadSource: Resolve a template ref (path + layer) to absolute disk path and read it.
+	 *
+	 * This is the authoritative I/O step for loading template source code. It:
+	 * - Maps the logical layer key (e.g. "citomni/admin") to its absolute template root.
+	 * - Resolves the requested relative path under that root.
+	 * - Guards against path traversal attempts ("../", symlinks escaping root, etc.).
+	 * - Returns both the template code and the absolute on-disk path.
+	 *
+	 * Security:
+	 * - We `realpath()` both the base root and the requested file, then verify
+	 *   that the requested file still lives under the base root. If not, we throw.
+	 *
+	 * Notes:
+	 * - This method does NOT cache; caching happens later in compile().
+	 * - This method throws on missing templates instead of returning null. We
+	 *   prefer fail-fast so the global error handler can report a real error.
+	 *
+	 * Typical usage:
+	 *   [$code, $absPath] = $this->loadSource('admin/panel.html', 'citomni/admin');
+	 *
+	 * @param string $rel   Relative template path under the layer root.
+	 * @param string $layer Layer identifier (must exist in $this->layersMap).
+	 *
+	 * @return array{0:string,1:string} {code, absPath}
+	 *                                  code    = file contents as string
+	 *                                  absPath = absolute path to template file
+	 *
+	 * @throws \RuntimeException If the layer is unknown, the file does not exist,
+	 *                           or the resolved path escapes the layer root.
+	 */
+	private function loadSource(string $rel, string $layer): array {
+		// Look up the absolute root directory for this layer.
+		$root = $this->layersMap[$layer] ?? null;
+		if ($root === null) {
+			throw new \RuntimeException("TemplateEngine: Layer '{$layer}' not registered.");
+		}
+
+		// Build absolute candidate path "<layerRoot>/<rel>".
+		$base	= \rtrim($root, "/\\") . '/';
+		$target	= \realpath($base . $rel);
+
+		// Bail out if file is missing or unreadable.
+		if ($target === false) {
+			throw new \RuntimeException("TemplateEngine: Template '{$rel}@{$layer}' not found.");
+		}
+
+		// Security: Ensure that the resolved file did not escape the intended base.
+		$baseWithSep = \rtrim(\realpath($base) ?: $base, "/\\") . \DIRECTORY_SEPARATOR;
+		if (\strpos($target, $baseWithSep) !== 0) {
+			throw new \RuntimeException("TemplateEngine: Illegal path escape '{$rel}@{$layer}'.");
+		}
+
+		// Load file contents (we intentionally do not silence errors here).
+		$code = (string)\file_get_contents($target);
+
+		return [$code, $target];
+	}
+
+
+	/**
+	 * cacheFileName: Build a deterministic cache filename for a compiled template.
+	 *
+	 * Each compiled template ("relativePath@layer") becomes a standalone cached
+	 * PHP file in the engine's cache directory. We derive a filename that:
+	 *
+	 * - Encodes both the layer and the relative path (sanitized to safe chars),
+	 *   so different layers with the same relative template path never collide.
+	 *   Example:
+	 *     "header.html@app"              -> app__header_html_xxxxxxxx.php
+	 *     "header.html@citomni/admin"    -> citomni_admin__header_html_xxxxxxxx.php
+	 *
+	 * - Appends a short hash (first 8 chars of sha1) for uniqueness and to keep
+	 *   file names stable even if two templates sanitize to the same slug.
+	 *
+	 * Behavior:
+	 * - Uses "/" and "\" normalization to make path segments filesystem-safe.
+	 * - Writes into $this->cacheDir, which is resolved in init().
+	 *
+	 * Notes:
+	 * - The hash is based on "<rel>@<layer>", not file contents. We don't need
+	 *   content hashing here because we already handle freshness using mtimes
+	 *   in compile().
+	 *
+	 * Typical usage:
+	 *   $cacheFile = $this->cacheFileName('admin/panel.html', 'citomni/admin');
+	 *
+	 * @param string $rel   Relative template path under that layer.
+	 * @param string $layer Layer identifier (e.g. "app", "citomni/admin").
+	 *
+	 * @return string Absolute path to the cache file on disk.
+	 */
+	private function cacheFileName(string $rel, string $layer): string {
+		// Normalize/sanitize the relative path into something filesystem-safe.
+		// "foo/bar.html" -> "foo_bar_html"
+		$slugRel = \preg_replace(
+			'/[^A-Za-z0-9_]+/',
+			'_',
+			\strtr($rel, ['\\' => '/', '/' => '_'])
+		);
+
+		// Normalize/sanitize the layer identifier similarly.
+		// "citomni/admin" -> "citomni_admin"
+		$slugLayer = \preg_replace('/[^A-Za-z0-9_]+/', '_', $layer);
+
+		// Short hash to avoid collisions if two different refs sanitize to same slugs.
+		$hash = \substr(\sha1($rel . '@' . $layer), 0, 8);
+
+		// Example final filename:
+		//   /var/cache/citomni_admin__foo_bar_html_1a2b3c4d.php
+		return $this->cacheDir . '/' . $slugLayer . '__' . $slugRel . '_' . $hash . '.php';
+	}
+
+
+
+
+
+
+
+
+
+	// ----------------------------------------------------------------
+	// Layouts and includes
+	// ----------------------------------------------------------------
+
+	/**
+	 * processExtendsAndBlocks: Resolve layout inheritance (`{% extends %}`) and block overrides.
+	 *
+	 * This method applies child->parent template inheritance and returns a "flattened"
+	 * template string with all `{% block %}` / `{% yield %}` pairs resolved.
+	 * After this step, the result is a single concrete template where:
+	 *
+	 * - The parent layout's structure is preserved.
+	 * - Any `{% yield blockName %}` in the parent has been replaced by the
+	 *   corresponding `{% block blockName %}...{% endblock %}` content from
+	 *   the child.
+	 * - Remaining structural tags (`{% extends ... %}`, `{% block ... %}`,
+	 *   `{% endblock %}`, `{% yield ... %}`) are eliminated so that later
+	 *   phases (`compileSyntax()`) don't need to know about them.
+	 *
+	 * Behavior:
+	 * - Looks for a single `{% extends "file@layer" %}` in the given $code.
+	 *   If not found, returns $code unchanged.
+	 *
+	 * - If found:
+	 *   1) Split the reference to get `$parentRel` and `$parentLayer`.
+	 *   2) Strip the `{% extends ... %}` line from the child.
+	 *   3) Extract all `{% block blockName %}...{% endblock %}` regions
+	 *      from the child and remember them by `blockName`.
+	 *   4) Load the parent template source via `loadSource()`, strip template
+	 *      comments from the parent, and then replace each `{% yield blockName %}`
+	 *      in the parent with the child's content for that block.
+	 *   5) If the parent has a `{% yield %}` for which the child never provided
+	 *      a matching `{% block %}`, we throw. Missing content is considered a
+	 *      template error (fail fast, not silent fallback).
+	 *
+	 * - Duplicate blocks in the child are illegal:
+	 *   `{% block header %}` defined twice in the same child template reports
+	 *   a RuntimeException instead of "last wins". We do this to keep behavior
+	 *   deterministic and obvious.
+	 *
+	 * - Recursion:
+	 *   After merging child overrides into the parent, we call
+	 *   `processExtendsAndBlocks()` again on the merged parent output.
+	 *   This supports multi-level inheritance, e.g.:
+	 *     app@foo extends citomni/admin@layout
+	 *     citomni/admin@layout extends citomni/http@base_layout
+	 *
+	 * Failure modes (fail fast):
+	 * - If a child declares a `{% block %}` that the parent never `{% yield %}`s,
+	 *   we throw (developer error in templates).
+	 * - If the parent still contains `{% yield ... %}` after merging, we throw
+	 *   because that means the child did not supply a required block.
+	 * - If a duplicate block name appears in the child, we throw.
+	 *
+	 * Notes:
+	 * - `$code` passed in here is expected to already be stripped of template
+	 *   comments (`{# ... #}`) by the caller (compile() does this before calling).
+	 *   We still call `removeTemplateComments()` on the parent layout we load.
+	 *
+	 * - This method does not perform include expansion; `{% include %}` is
+	 *   handled later by `processIncludes()`.
+	 *
+	 * - This method does not perform any of the `{{ }}` / `{? ?}` compilation;
+	 *   that is handled by `compileSyntax()`.
+	 *
+	 * Typical usage:
+	 *   // Inside compile():
+	 *   $code = $this->removeTemplateComments($code);
+	 *   $code = $this->processExtendsAndBlocks($code, $layer);
+	 *   $code = $this->processIncludes($code, 0);
+	 *   $code = $this->compileSyntax($code);
+	 *
+	 * @param string $code         Child template source after comment stripping,
+	 *                             before include expansion. May contain one
+	 *                             `{% extends "..." %}` and zero or more `{% block %}`.
+	 * @param string $currentLayer Layer identifier of the child (e.g. "app" or "citomni/admin").
+	 *
+	 * @return string Flattened template source with inheritance resolved. The
+	 *                returned code no longer contains `{% extends %}`,
+	 *                `{% block %}`, `{% endblock %}`, or `{% yield %}`.
+	 *
+	 * @throws \RuntimeException On:
+	 *   - Duplicate `{% block %}` names in the child.
+	 *   - Child block not yielded by the parent.
+	 *   - Parent still containing `{% yield %}` after merge (missing block).
+	 *   - Failure to replace yields due to regex errors.
+	 *   - Inaccessible parent template.
+	 */
+	private function processExtendsAndBlocks(string $code, string $currentLayer): string {
+		if (\strpos($code, '{% extends') === false) {
+			// No parent -> nothing to resolve.
+			return $code;
+		}
+		if (!\preg_match('/{%\s*extends\s+["\'](.+?)["\']\s*%}/', $code, $m)) {
+			// Tag looked like it might be there, but not in a valid form.
+			return $code;
+		}
+
+		[$parentRel, $parentLayer] = $this->splitRef($m[1]);
+
+		// Remove the extends tag from the child to avoid it leaking further down.
+		$childNoExtends = \preg_replace(
+			'/{%\s*extends\s+["\'](.+?)["\']\s*%}/',
+			'',
+			$code,
+			1
+		);
+
+		// Load the parent layout source and strip comments from it.
+		[$layoutCode, $layoutAbs] = $this->loadSource($parentRel, $parentLayer);
+		$layoutCode = $this->removeTemplateComments($layoutCode);
+
+		// Extract all `{% block name %}...{% endblock %}` from the child.
+		\preg_match_all(
+			'/{%\s*block\s+([\w-]+)\s*%}(.*?){%\s*endblock\s*%}/s',
+			$childNoExtends,
+			$matches,
+			\PREG_SET_ORDER
+		);
+
+		$seen = [];
+		foreach ($matches as $match) {
+			$name		= $match[1];
+			// $content = \trim($match[2]);
+			$content	= $match[2];
+
+			// Disallow duplicate block definitions in the same child template.
+			if (isset($seen[$name])) {
+				throw new \RuntimeException(
+					"TemplateEngine: Duplicate block '{$name}' in child template (layer '{$currentLayer}')."
+				);
+			}
+			$seen[$name] = true;
+
+			// Replace `{% yield name %}` in the parent with the child's block content.
+			$quoted = \preg_quote($name, '/');
+			$replaced = \preg_replace(
+				'/{%\s*yield\s*' . $quoted . '\s*%}/',
+				$content,
+				$layoutCode,
+				-1,
+				$count
+			);
+
+			if ($replaced === false || $replaced === null) {
+				throw new \RuntimeException("TemplateEngine: Regex replace failed for block '{$name}'.");
+			}
+
+			$layoutCode = $replaced;
+
+			// If the parent never yielded this block, the child's block is "orphaned".
+			if ($count === 0) {
+				throw new \RuntimeException(
+					"TemplateEngine: Block '{$name}' from child layer '{$currentLayer}' was not yielded in parent template: " . $layoutAbs
+				);
+			}
+		}
+
+		// After merging: If the parent still has any `{% yield something %}`, then the child failed to provide a block for that something.
+		if (\preg_match_all('/{%\s*yield\s*([\w-]+)\s*%}/', $layoutCode, $leftover) && !empty($leftover[1])) {
+			$missing = \array_values(\array_unique($leftover[1]));
+			$list = "'" . \implode("', '", $missing) . "'";
+			throw new \RuntimeException(
+				"TemplateEngine: Missing child blocks {$list} from layer '{$currentLayer}' in parent template: " . $layoutAbs
+			);
+		}
+
+		// Recursively resolve further extends in the parent.
+		// This supports multi-level inheritance chains.
+		return $this->processExtendsAndBlocks($layoutCode, $parentLayer);
+	}
+
+
+	/**
+	 * processIncludes: Inline `{% include "file@layer" %}` directives recursively.
+	 *
+	 * Behavior:
+	 * - Scans the given template code for `{% include "relative/path.html@layer" %}`.
+	 * - For each include:
+	 *   1) Splits the reference into (relative path, layer) via splitRef().
+	 *   2) Loads the referenced template source from that layer (loadSource()).
+	 *   3) Removes `{# ... #}` comments from the included template.
+	 *   4) Recursively processes includes inside the included template (depth+1).
+	 *   5) Replaces the `{% include ... %}` tag with the fully expanded included code.
+	 *
+	 * - Enforces a maximum nesting depth of 16 to avoid pathological recursion
+	 *   (circular includes, accidental infinite loops, etc.).
+	 *
+	 * Notes:
+	 * - Includes are resolved at compile time, not at runtime, so the final
+	 *   compiled template is a single PHP file with everything inlined.
+	 * - This method does not apply `compileSyntax()` yet; it operates on the
+	 *   pre-compiled template language (still containing {{ }}, {% if %}, etc.).
+	 * - Security: loadSource() ensures the resolved absolute path stays within
+	 *   the registered template layer directory. Traversal attempts fail fast.
+	 *
+	 * @param string $code   Raw template code (already had `{# ... #}` comments
+	 *                       removed by the caller if desired, but not required).
+	 * @param int    $depth  Current recursion depth. Must start at 0. Each nested
+	 *                       include increments depth by 1. Hard-capped at 16.
+	 *
+	 * @return string Fully expanded code with all `{% include ... %}` directives
+	 *                inlined for this branch (and their own nested includes
+	 *                already resolved).
+	 *
+	 * @throws \RuntimeException If include nesting exceeds MAX depth (16).
+	 * @throws \RuntimeException If an included template cannot be found or escapes
+	 *                           its layer root.
+	 */
+	private function processIncludes(string $code, int $depth): string {
+		if (\strpos($code, '{% include') === false) {
+			return $code;
+		}
+		if ($depth >= 16) {
+			throw new \RuntimeException('TemplateEngine: Include depth exceeded.');
+		}
+
+		// Strip comments in the caller BEFORE scanning for includes, so commented-out includes are ignored
+		//
+		// Note: We intentionally run removeTemplateComments() again inside this method,
+		//       even though compile() already stripped comments earlier, because we ALSO
+		//       want to ignore commented-out includes INSIDE included partials. That way
+		//       `{# {% include "debug/panel@app" %} #}` never keeps a cache dependency alive.
+		$clean = $this->removeTemplateComments($code);
+
+		$expanded = \preg_replace_callback(
+			'/{%\s*include\s+["\'](.+?)["\']\s*%}/i',
+			function (array $m) use ($depth) {
+				[$rel, $layer] = $this->splitRef($m[1]);
+
+				[$incCode, ] = $this->loadSource($rel, $layer);
+
+				// Strip comments in the included file
+				$incCode = $this->removeTemplateComments($incCode);
+
+				// Recurse into nested includes inside that included code
+				$incCode = $this->processIncludes($incCode, $depth + 1);
+
+				return $incCode;
+			},
+			$clean
+		);
+
+		if ($expanded === null) {
+			throw new \RuntimeException('TemplateEngine: PCRE error during processIncludes().');
+		}
+
+		return $expanded;
+	}
+
+
+
+
+
+
+
+
+
+	// ----------------------------------------------------------------
+	// Syntax and comment processing
+	// ----------------------------------------------------------------
+
+	/**
 	 * compileSyntax: Transform templating syntax ({{ }}, {{{ }}}, {% %}, {? ?}) into plain PHP.
 	 *
 	 * Converts the high-level template language into executable PHP. This runs
@@ -1375,13 +1817,11 @@ final class TemplateEngine extends BaseService {
 	 *                is added by compile().
 	 */
 	private function compileSyntax(string $code): string {
-
 		$patterns = [
-		
 			// Raw PHP echo
 			'/{\?=\s*(.+?)\s*\?}/s' => $this->allowPhpTags ? '<?php echo $1; ?>' : '',
 			// Raw PHP block
-			'/{\?(.+?)\?}/s'        => $this->allowPhpTags ? '<?php $1 ?>'       : '',
+			'/{\?(.+?)\?}/s' => $this->allowPhpTags ? '<?php $1 ?>' : '',
 
 			// Triple curlies => raw echo
 			'/\{\{\{\s*(.+?)\s*\}\}\}/s'
@@ -1389,30 +1829,30 @@ final class TemplateEngine extends BaseService {
 
 			// Double curlies => escaped echo (use runtime charset if available)
 			'/\{\{\s*(.+?)\s*\}\}/s'
-				=> '<?php echo htmlspecialchars($1 ?? "", ENT_QUOTES | ENT_SUBSTITUTE, $charset ?? "UTF-8"); ?>',
+				=> '<?php echo htmlspecialchars($1 ?? "", \ENT_QUOTES | \ENT_SUBSTITUTE, $charset ?? "UTF-8"); ?>',
 
 			// {% set $var = expr %}  (requires $)
 			'/{%\s*set\s+\$([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+?)\s*%}/s'
 				=> '<?php $$1 = $2; ?>',
 
 			// Control structures
-			'/{%\s*if\s*(.+?)\s*%}/'     => '<?php if ($1): ?>',
+			'/{%\s*if\s*(.+?)\s*%}/' => '<?php if ($1): ?>',
 			'/{%\s*elseif\s*(.+?)\s*%}/' => '<?php elseif ($1): ?>',
-			'/{%\s*else\s*%}/'           => '<?php else: ?>',
-			'/{%\s*endif\s*%}/'          => '<?php endif; ?>',
+			'/{%\s*else\s*%}/' => '<?php else: ?>',
+			'/{%\s*endif\s*%}/' => '<?php endif; ?>',
 
 			// foreach (parentheses required)
 			'/{%\s*foreach\s*\((.+?)\)\s*%}/' => '<?php foreach ($1): ?>',
-			'/{%\s*endforeach\s*%}/'          => '<?php endforeach; ?>',
+			'/{%\s*endforeach\s*%}/' => '<?php endforeach; ?>',
 
 			// Continue / Break (optional numeric level + optional semicolon)
 			'/{%\s*continue\s*((?:\s+\d+)?)\s*;?\s*%}/' => '<?php continue$1; ?>',
-			'/{%\s*break\s*((?:\s+\d+)?)\s*;?\s*%}/'    => '<?php break$1; ?>',
+			'/{%\s*break\s*((?:\s+\d+)?)\s*;?\s*%}/' => '<?php break$1; ?>',
 
-			// Blocks/yields/extends should be resolved earlier — strip leftovers defensively
-			'/{%\s*block\s+([\w-]+)\s*%}/'         => '',
-			'/{%\s*endblock\s*%}/'                 => '',
-			'/{%\s*yield\s*([\w-]+)\s*%}/'         => '',
+			// Blocks/yields/extends should be resolved earlier - strip leftovers defensively
+			'/{%\s*block\s+([\w-]+)\s*%}/' => '',
+			'/{%\s*endblock\s*%}/' => '',
+			'/{%\s*yield\s*([\w-]+)\s*%}/' => '',
 			'/{%\s*extends\s+["\'](.+?)["\']\s*%}/' => '',
 		];
 
@@ -1538,425 +1978,6 @@ final class TemplateEngine extends BaseService {
 
 
 	/**
-	 * splitRef: Parse a template reference of the form "file@layer".
-	 *
-	 * A template reference always names both:
-	 * - a relative template path (e.g. "admin/panel.html")
-	 * - a layer key registered in TemplateEngine::init() (e.g. "citomni/admin")
-	 *
-	 * Example valid refs:
-	 *   "public/home.html@app"
-	 *   "admin/admin_layout.html@citomni/admin"
-	 *
-	 * Behavior:
-	 * - Splits on the LAST '@' to allow filenames that might contain '@'
-	 *   earlier (edge case, but deterministic).
-	 * - Ensures both the relative path and layer are non-empty.
-	 * - Ensures the layer exists in $this->layersMap. If the layer is not
-	 *   registered, we fail fast.
-	 * - Normalizes leading slashes away from the relative path so lookups
-	 *   are consistent on disk.
-	 *
-	 * Notes:
-	 * - This method does not check that the template file exists; use loadSource()
-	 *   for that.
-	 *
-	 * @param string $ref Full template reference "path@layer".
-	 *
-	 * @return array{0:string,1:string} Tuple {relativePath, layer} where:
-	 *   - relativePath is a path under that layer's template root
-	 *     (no leading slash),
-	 *   - layer is the layer identifier as registered in init().
-	 *
-	 * @throws \InvalidArgumentException If $ref is missing "@", or if either side
-	 *                                   of the split is empty.
-	 * @throws \RuntimeException         If the referenced layer is unknown.
-	 */
-	private function splitRef(string $ref): array {
-		// Find the *last* "@", to be deterministic even if someone ever does "foo@bar@layer".
-		$pos = \strrpos($ref, '@');
-		if ($pos === false) {
-			throw new \InvalidArgumentException("TemplateEngine: Template ref '{$ref}' must contain '@layer'.");
-		}
-
-		// Left side is the template path, right side is the layer key.
-		$rel   = \substr($ref, 0, $pos);
-		$layer = \substr($ref, $pos + 1);
-
-		// Normalize path: strip any accidental leading "/" or "\".
-		$rel = \ltrim($rel, '/\\');
-
-		// Basic validation: no empty parts.
-		if ($rel === '' || $layer === '') {
-			throw new \InvalidArgumentException("TemplateEngine: Invalid template ref '{$ref}'.");
-		}
-
-		// Ensure the layer exists in the precomputed map from init().
-		if (!isset($this->layersMap[$layer])) {
-			throw new \RuntimeException("TemplateEngine: Unknown layer '{$layer}' in '{$ref}'.");
-		}
-
-		return [$rel, $layer];
-	}
-
-
-	/**
-	 * loadSource: Resolve a template ref (path + layer) to absolute disk path and read it.
-	 *
-	 * This is the authoritative I/O step for loading template source code. It:
-	 * - Maps the logical layer key (e.g. "citomni/admin") to its absolute template root.
-	 * - Resolves the requested relative path under that root.
-	 * - Guards against path traversal attempts ("../", symlinks escaping root, etc.).
-	 * - Returns both the template code and the absolute on-disk path.
-	 *
-	 * Security:
-	 * - We `realpath()` both the base root and the requested file, then verify
-	 *   that the requested file still lives under the base root. If not, we throw.
-	 *
-	 * Notes:
-	 * - This method does NOT cache; caching happens later in compile().
-	 * - This method throws on missing templates instead of returning null. We
-	 *   prefer fail-fast so the global error handler can report a real error.
-	 *
-	 * Typical usage:
-	 *   [$code, $absPath] = $this->loadSource('admin/panel.html', 'citomni/admin');
-	 *
-	 * @param string $rel   Relative template path under the layer root.
-	 * @param string $layer Layer identifier (must exist in $this->layersMap).
-	 *
-	 * @return array{0:string,1:string} {code, absPath}
-	 *                                  code    = file contents as string
-	 *                                  absPath = absolute path to template file
-	 *
-	 * @throws \RuntimeException If the layer is unknown, the file does not exist,
-	 *                           or the resolved path escapes the layer root.
-	 */
-	private function loadSource(string $rel, string $layer): array {
-		// Look up the absolute root directory for this layer.
-		$root = $this->layersMap[$layer] ?? null;
-		if ($root === null) {
-			throw new \RuntimeException("TemplateEngine: Layer '{$layer}' not registered.");
-		}
-
-		// Build absolute candidate path "<layerRoot>/<rel>".
-		$base   = \rtrim($root, "/\\") . '/';
-		$target = \realpath($base . $rel);
-
-		// Bail out if file is missing or unreadable.
-		if ($target === false) {
-			throw new \RuntimeException("TemplateEngine: Template '{$rel}@{$layer}' not found.");
-		}
-
-		// Security: Ensure that the resolved file did not escape the intended base.
-		$baseWithSep = \rtrim(\realpath($base) ?: $base, "/\\") . DIRECTORY_SEPARATOR;
-		if (\strpos($target, $baseWithSep) !== 0) {
-			throw new \RuntimeException("TemplateEngine: Illegal path escape '{$rel}@{$layer}'.");
-		}
-
-		// Load file contents (we intentionally do not silence errors here).
-		$code = (string)\file_get_contents($target);
-
-		return [$code, $target];
-	}
-
-
-	/**
-	 * cacheFileName: Build a deterministic cache filename for a compiled template.
-	 *
-	 * Each compiled template ("relativePath@layer") becomes a standalone cached
-	 * PHP file in the engine's cache directory. We derive a filename that:
-	 *
-	 * - Encodes both the layer and the relative path (sanitized to safe chars),
-	 *   so different layers with the same relative template path never collide.
-	 *   Example:
-	 *     "header.html@app"              -> app__header_html_xxxxxxxx.php
-	 *     "header.html@citomni/admin"    -> citomni_admin__header_html_xxxxxxxx.php
-	 *
-	 * - Appends a short hash (first 8 chars of sha1) for uniqueness and to keep
-	 *   file names stable even if two templates sanitize to the same slug.
-	 *
-	 * Behavior:
-	 * - Uses "/" and "\" normalization to make path segments filesystem-safe.
-	 * - Writes into $this->cacheDir, which is resolved in init().
-	 *
-	 * Notes:
-	 * - The hash is based on "<rel>@<layer>", not file contents. We don't need
-	 *   content hashing here because we already handle freshness using mtimes
-	 *   in compile().
-	 *
-	 * Typical usage:
-	 *   $cacheFile = $this->cacheFileName('admin/panel.html', 'citomni/admin');
-	 *
-	 * @param string $rel   Relative template path under that layer.
-	 * @param string $layer Layer identifier (e.g. "app", "citomni/admin").
-	 *
-	 * @return string Absolute path to the cache file on disk.
-	 */
-	private function cacheFileName(string $rel, string $layer): string {
-		// Normalize/sanitize the relative path into something filesystem-safe.
-		// "foo/bar.html" -> "foo_bar_html"
-		$slugRel = \preg_replace(
-			'/[^A-Za-z0-9_]+/',
-			'_',
-			\strtr($rel, ['\\' => '/', '/' => '_'])
-		);
-
-		// Normalize/sanitize the layer identifier similarly.
-		// "citomni/admin" -> "citomni_admin"
-		$slugLayer = \preg_replace('/[^A-Za-z0-9_]+/', '_', $layer);
-
-		// Short hash to avoid collisions if two different refs sanitize to same slugs.
-		$hash = \substr(\sha1($rel . '@' . $layer), 0, 8);
-
-		// Example final filename:
-		//   /var/cache/citomni_admin__foo_bar_html_1a2b3c4d.php
-		return $this->cacheDir . '/' . $slugLayer . '__' . $slugRel . '_' . $hash . '.php';
-	}
-
-
-	/**
-	 * processExtendsAndBlocks: Resolve layout inheritance (`{% extends %}`) and block overrides.
-	 *
-	 * This method applies child->parent template inheritance and returns a "flattened"
-	 * template string with all `{% block %}` / `{% yield %}` pairs resolved.
-	 * After this step, the result is a single concrete template where:
-	 *
-	 * - The parent layout's structure is preserved.
-	 * - Any `{% yield blockName %}` in the parent has been replaced by the
-	 *   corresponding `{% block blockName %}...{% endblock %}` content from
-	 *   the child.
-	 * - Remaining structural tags (`{% extends ... %}`, `{% block ... %}`,
-	 *   `{% endblock %}`, `{% yield ... %}`) are eliminated so that later
-	 *   phases (`compileSyntax()`) don't need to know about them.
-	 *
-	 * Behavior:
-	 * - Looks for a single `{% extends "file@layer" %}` in the given $code.
-	 *   If not found, returns $code unchanged.
-	 *
-	 * - If found:
-	 *   1) Split the reference to get `$parentRel` and `$parentLayer`.
-	 *   2) Strip the `{% extends ... %}` line from the child.
-	 *   3) Extract all `{% block blockName %}...{% endblock %}` regions
-	 *      from the child and remember them by `blockName`.
-	 *   4) Load the parent template source via `loadSource()`, strip template
-	 *      comments from the parent, and then replace each `{% yield blockName %}`
-	 *      in the parent with the child's content for that block.
-	 *   5) If the parent has a `{% yield %}` for which the child never provided
-	 *      a matching `{% block %}`, we throw. Missing content is considered a
-	 *      template error (fail fast, not silent fallback).
-	 *
-	 * - Duplicate blocks in the child are illegal:
-	 *   `{% block header %}` defined twice in the same child template reports
-	 *   a RuntimeException instead of "last wins". We do this to keep behavior
-	 *   deterministic and obvious.
-	 *
-	 * - Recursion:
-	 *   After merging child overrides into the parent, we call
-	 *   `processExtendsAndBlocks()` again on the merged parent output.
-	 *   This supports multi-level inheritance, e.g.:
-	 *     app@foo extends citomni/admin@layout
-	 *     citomni/admin@layout extends citomni/http@base_layout
-	 *
-	 * Failure modes (fail fast):
-	 * - If a child declares a `{% block %}` that the parent never `{% yield %}`s,
-	 *   we throw (developer error in templates).
-	 * - If the parent still contains `{% yield ... %}` after merging, we throw
-	 *   because that means the child did not supply a required block.
-	 * - If a duplicate block name appears in the child, we throw.
-	 *
-	 * Notes:
-	 * - `$code` passed in here is expected to already be stripped of template
-	 *   comments (`{# ... #}`) by the caller (compile() does this before calling).
-	 *   We still call `removeTemplateComments()` on the parent layout we load.
-	 *
-	 * - This method does not perform include expansion; `{% include %}` is
-	 *   handled later by `processIncludes()`.
-	 *
-	 * - This method does not perform any of the `{{ }}` / `{? ?}` compilation;
-	 *   that is handled by `compileSyntax()`.
-	 *
-	 * Typical usage:
-	 *   // Inside compile():
-	 *   $code = $this->removeTemplateComments($code);
-	 *   $code = $this->processExtendsAndBlocks($code, $layer);
-	 *   $code = $this->processIncludes($code, 0);
-	 *   $code = $this->compileSyntax($code);
-	 *
-	 * @param string $code         Child template source after comment stripping,
-	 *                             before include expansion. May contain one
-	 *                             `{% extends "..." %}` and zero or more `{% block %}`.
-	 * @param string $currentLayer Layer identifier of the child (e.g. "app" or "citomni/admin").
-	 *
-	 * @return string Flattened template source with inheritance resolved. The
-	 *                returned code no longer contains `{% extends %}`,
-	 *                `{% block %}`, `{% endblock %}`, or `{% yield %}`.
-	 *
-	 * @throws \RuntimeException On:
-	 *   - Duplicate `{% block %}` names in the child.
-	 *   - Child block not yielded by the parent.
-	 *   - Parent still containing `{% yield %}` after merge (missing block).
-	 *   - Failure to replace yields due to regex errors.
-	 *   - Inaccessible parent template.
-	 */
-	private function processExtendsAndBlocks(string $code, string $currentLayer): string {
-		if (\strpos($code, '{% extends') === false) {
-			// No parent -> nothing to resolve.
-			return $code;
-		}
-		if (!\preg_match('/{%\s*extends\s+["\'](.+?)["\']\s*%}/', $code, $m)) {
-			// Tag looked like it might be there, but not in a valid form.
-			return $code;
-		}
-
-		[$parentRel, $parentLayer] = $this->splitRef($m[1]);
-
-		// Remove the extends tag from the child to avoid it leaking further down.
-		$childNoExtends = \preg_replace(
-			'/{%\s*extends\s+["\'](.+?)["\']\s*%}/',
-			'',
-			$code,
-			1
-		);
-
-		// Load the parent layout source and strip comments from it.
-		[$layoutCode, $layoutAbs] = $this->loadSource($parentRel, $parentLayer);
-		$layoutCode = $this->removeTemplateComments($layoutCode);
-
-		// Extract all `{% block name %}...{% endblock %}` from the child.
-		\preg_match_all(
-			'/{%\s*block\s+([\w-]+)\s*%}(.*?){%\s*endblock\s*%}/s',
-			$childNoExtends,
-			$matches,
-			\PREG_SET_ORDER
-		);
-
-		$seen = [];
-		foreach ($matches as $match) {
-			$name    = $match[1];
-			// $content = \trim($match[2]);
-			$content = $match[2];
-
-			// Disallow duplicate block definitions in the same child template.
-			if (isset($seen[$name])) {
-				throw new \RuntimeException(
-					"TemplateEngine: Duplicate block '{$name}' in child template (layer '{$currentLayer}')."
-				);
-			}
-			$seen[$name] = true;
-
-			// Replace `{% yield name %}` in the parent with the child's block content.
-			$quoted = \preg_quote($name, '/');
-			$replaced = \preg_replace(
-				'/{%\s*yield\s*' . $quoted . '\s*%}/',
-				$content,
-				$layoutCode,
-				-1,
-				$count
-			);
-
-			if ($replaced === false || $replaced === null) {
-				throw new \RuntimeException("TemplateEngine: Regex replace failed for block '{$name}'.");
-			}
-
-			$layoutCode = $replaced;
-
-			// If the parent never yielded this block, the child's block is "orphaned".
-			if ($count === 0) {
-				throw new \RuntimeException(
-					"TemplateEngine: Block '{$name}' from child layer '{$currentLayer}' was not yielded in parent template: " . $layoutAbs
-				);
-			}
-		}
-
-		// After merging: If the parent still has any `{% yield something %}`, then the child failed to provide a block for that something.
-		if (\preg_match_all('/{%\s*yield\s*([\w-]+)\s*%}/', $layoutCode, $leftover) && !empty($leftover[1])) {
-			$missing = \array_values(\array_unique($leftover[1]));
-			$list    = "'" . \implode("', '", $missing) . "'";
-			throw new \RuntimeException(
-				"TemplateEngine: Missing child blocks {$list} from layer '{$currentLayer}' in parent template: " . $layoutAbs
-			);
-		}
-
-		// Recursively resolve further extends in the parent.
-		// This supports multi-level inheritance chains.
-		return $this->processExtendsAndBlocks($layoutCode, $parentLayer);
-	}
-
-
-	/**
-	 * processIncludes: Inline `{% include "file@layer" %}` directives recursively.
-	 *
-	 * Behavior:
-	 * - Scans the given template code for `{% include "relative/path.html@layer" %}`.
-	 * - For each include:
-	 *   1) Splits the reference into (relative path, layer) via splitRef().
-	 *   2) Loads the referenced template source from that layer (loadSource()).
-	 *   3) Removes `{# ... #}` comments from the included template.
-	 *   4) Recursively processes includes inside the included template (depth+1).
-	 *   5) Replaces the `{% include ... %}` tag with the fully expanded included code.
-	 *
-	 * - Enforces a maximum nesting depth of 16 to avoid pathological recursion
-	 *   (circular includes, accidental infinite loops, etc.).
-	 *
-	 * Notes:
-	 * - Includes are resolved at compile time, not at runtime, so the final
-	 *   compiled template is a single PHP file with everything inlined.
-	 * - This method does not apply `compileSyntax()` yet; it operates on the
-	 *   pre-compiled template language (still containing {{ }}, {% if %}, etc.).
-	 * - Security: loadSource() ensures the resolved absolute path stays within
-	 *   the registered template layer directory. Traversal attempts fail fast.
-	 *
-	 * @param string $code   Raw template code (already had `{# ... #}` comments
-	 *                       removed by the caller if desired, but not required).
-	 * @param int    $depth  Current recursion depth. Must start at 0. Each nested
-	 *                       include increments depth by 1. Hard-capped at 16.
-	 *
-	 * @return string Fully expanded code with all `{% include ... %}` directives
-	 *                inlined for this branch (and their own nested includes
-	 *                already resolved).
-	 *
-	 * @throws \RuntimeException If include nesting exceeds MAX depth (16).
-	 * @throws \RuntimeException If an included template cannot be found or escapes
-	 *                           its layer root.
-	 */
-	private function processIncludes(string $code, int $depth): string {
-		
-		if (\strpos($code, '{% include') === false) {
-			return $code;
-		}
-		if ($depth >= 16) {
-			throw new \RuntimeException('TemplateEngine: Include depth exceeded.');
-		}
-
-		// Strip comments in the caller BEFORE scanning for includes, so commented-out includes are ignored
-		//
-		// Note: We intentionally run removeTemplateComments() again inside this method,
-		//       even though compile() already stripped comments earlier, because we ALSO
-		//       want to ignore commented-out includes INSIDE included partials. That way
-		//       `{# {% include "debug/panel@app" %} #}` never keeps a cache dependency alive.
-		$clean = $this->removeTemplateComments($code);
-
-		return \preg_replace_callback(
-			'/{%\s*include\s+["\'](.+?)["\']\s*%}/i',
-			function (array $m) use ($depth) {
-				[$rel, $layer] = $this->splitRef($m[1]);
-
-				[$incCode, ] = $this->loadSource($rel, $layer);
-
-				// Strip comments in the included file
-				$incCode = $this->removeTemplateComments($incCode);
-
-				// Recurse into nested includes inside that included code
-				$incCode = $this->processIncludes($incCode, $depth + 1);
-
-				return $incCode;
-			},
-			$clean
-		);
-	}
-
-
-	/**
 	 * Remove `{# ... #}` template comments using a single-pass depth parser (supports nesting).
 	 *
 	 * Implementation details:
@@ -1981,10 +2002,10 @@ final class TemplateEngine extends BaseService {
 			return $code;
 		}
 
-		$len = \strlen($code);   // Input length in bytes
-		$depth = 0;             // Current nesting depth of `{# ... #}` blocks
-		$start = 0;             // Last copy position (outside comments)
-		$out = '';              // Output buffer
+		$len	= \strlen($code);	// Input length in bytes
+		$depth	= 0;				// Current nesting depth of `{# ... #}` blocks
+		$start	= 0;				// Last copy position (outside comments)
+		$out	= '';				// Output buffer
 
 		// Scan the string once, matching `{#` and `#}` pairs
 		for ($i = 0; $i < $len; $i++) {
@@ -1994,16 +2015,16 @@ final class TemplateEngine extends BaseService {
 				if ($depth === 0) {
 					$out .= \substr($code, $start, $i - $start);
 				}
-				$depth++;   // Enter (or go deeper into) a comment block
-				$i++;       // Skip the '#' in `{#`
+				$depth++;	// Enter (or go deeper into) a comment block
+				$i++;		// Skip the '#' in `{#`
 				continue;
 			}
 
 			// Detect comment end `#}`
 			if ($i < $len - 1 && $code[$i] === '#' && $code[$i + 1] === '}' && $depth > 0) {
-				$depth--;              // Leave (or go up one level) of comment block
-				$i++;                  // Skip the '}' in `#}`
-				$start = $i + 1;       // Next non-comment text starts after this closer
+				$depth--;			// Leave (or go up one level) of comment block
+				$i++;				// Skip the '}' in `#}`
+				$start = $i + 1;	// Next non-comment text starts after this closer
 				continue;
 			}
 		}
@@ -2038,13 +2059,12 @@ final class TemplateEngine extends BaseService {
 	 * @return string (optimized HTML with collapsed whitespace outside sensitive tags)
 	 */
 	private function safeTrimWhitespace(string $html): string {
-	
 		// Split HTML into chunks: Alternating between "safe zones" (outside) and "sensitive zones" (inside)
-		$parts = preg_split(
+		$parts = \preg_split(
 			'#(<(?:pre|code|textarea|script|style)\b[^>]*>.*?</(?:pre|code|textarea|script|style)>)#si',
 			$html,
 			-1,
-			PREG_SPLIT_DELIM_CAPTURE
+			\PREG_SPLIT_DELIM_CAPTURE
 		);
 
 		// preg_split() can return false on failure -> fall back to original HTML
@@ -2058,15 +2078,26 @@ final class TemplateEngine extends BaseService {
 			if (($i % 2) === 0) {
 				// Replace runs of 2+ whitespace chars with a single space
 				// This avoids breaking inline markup while reducing size
-				$parts[$i] = preg_replace('/\s{2,}/', ' ', $chunk);
+				$parts[$i] = \preg_replace('/\s{2,}/', ' ', $chunk);
 			}
 			// Odd indexes = inside sensitive tags -> leave untouched
 		}
 
 		// Recombine and return cleaned HTML
-		return implode('', $parts);
+		return \implode('', $parts);
 	}
 
+
+
+
+
+
+
+
+
+	// ----------------------------------------------------------------
+	// Dependency scanning and cfg normalization
+	// ----------------------------------------------------------------
 
 	/**
 	 * Collect all (rel,layer) pairs that this template depends on via extends/includes.
@@ -2136,7 +2167,7 @@ final class TemplateEngine extends BaseService {
 
 		// Cfg node (or similar) with toArray():
 		if (\is_object($node) && \method_exists($node, 'toArray')) {
-			$out = $node->toArray(); // Cfg::toArray() returns its raw $data
+			$out = $node->toArray();  // Cfg::toArray() returns its raw $data
 			return \is_array($out) ? $out : [];
 		}
 

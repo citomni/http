@@ -60,12 +60,18 @@ use CitOmni\Kernel\Service\BaseService;
  *   exclusively for POST requests. HTML forms natively support only GET/POST;
  *   method-override (POST with _method) is physically a POST and works with the
  *   form field. JavaScript clients should always use the header.
+ * - Request path semantics are explicit:
+ *   pathRaw() is transport-facing, while pathFromAppRoot() is app-facing.
+ *   Redirect examples use pathFromAppRoot(). Logging records both forms.
  *
  * Config node: security.csrf (see init() for all keys).
  *
  * Typical usage:
  *   // HTML form flow:
- *   if (!$this->app->csrf->verify()) { redirect + flash; }
+ *   if (!$this->app->csrf->verify()) {
+ *       $this->app->flash->error('Invalid or expired token.');
+ *       $this->app->response->redirect($this->app->request->pathFromAppRoot());
+ *   }
  *
  *   // API/fail-fast:
  *   $this->app->csrf->requireValid();
@@ -73,7 +79,7 @@ use CitOmni\Kernel\Service\BaseService;
  *   // Template: {{{ $csrfField() }}}
  *   // JS: fetch('/api', { headers: { 'X-CSRF-Token': token } })
  *
- * @throws CsrfException            On invalid config at init time, or internal invariant violation.
+ * @throws CsrfException On invalid config at init time, or internal invariant violation.
  * @throws CsrfVerificationException On verification failure (requireValid() only).
  */
 final class Csrf extends BaseService {
@@ -90,7 +96,7 @@ final class Csrf extends BaseService {
 	/** @var string Session key where the raw token hex is stored. */
 	private string $sessionKey;
 
-	/** @var int Number of random bytes for token generation (≥ 16). */
+	/** @var int Number of random bytes for token generation (>= 16). */
 	private int $tokenBytes;
 
 	/** @var array<int, string> Uppercased HTTP methods that require CSRF verification. */
@@ -141,6 +147,13 @@ final class Csrf extends BaseService {
 
 
 
+
+
+
+	// ----------------------------------------------------------------
+	// Construction
+	// ----------------------------------------------------------------
+
 	/**
 	 * One-time initialization. Reads security.csrf config, pre-derives
 	 * immutable scalars, validates constraints.
@@ -159,19 +172,19 @@ final class Csrf extends BaseService {
 	protected function init(): void {
 		$c = $this->app->cfg->security->csrf;
 
-		$this->enabled    = (bool)($c->enabled ?? true);
-		$this->fieldName  = (string)($c->field_name ?? '_csrf');
-		$this->headerName = (string)($c->header_name ?? 'X-CSRF-Token');
-		$this->sessionKey = (string)($c->session_key ?? '_csrf');
-		$this->tokenBytes = (int)($c->token_bytes ?? 32);
-		$this->maskTokens = (bool)($c->mask_tokens ?? true);
+		$this->enabled		= (bool)($c->enabled ?? true);
+		$this->fieldName	= (string)($c->field_name ?? '_csrf');
+		$this->headerName	= (string)($c->header_name ?? 'X-CSRF-Token');
+		$this->sessionKey	= (string)($c->session_key ?? '_csrf');
+		$this->tokenBytes	= (int)($c->token_bytes ?? 32);
+		$this->maskTokens	= (bool)($c->mask_tokens ?? true);
 
-		$this->originCheck              = (bool)($c->origin_check ?? true);
-		$this->refererFallbackOnHttps   = (bool)($c->referer_fallback_on_https ?? true);
+		$this->originCheck	= (bool)($c->origin_check ?? true);
+		$this->refererFallbackOnHttps = (bool)($c->referer_fallback_on_https ?? true);
 		$this->allowMissingOriginOnHttp = (bool)($c->allow_missing_origin_on_http ?? true);
 
-		$this->logFailures = (bool)($c->log_failures ?? true);
-		$this->logChannel  = (string)($c->log_channel ?? 'security');
+		$this->logFailures	= (bool)($c->log_failures ?? true);
+		$this->logChannel	= (string)($c->log_channel ?? 'security');
 
 		// protect_methods - indexed array, normalize to uppercase, trim, deduplicate.
 		$rawMethods = $c->protect_methods ?? ['POST', 'PUT', 'PATCH', 'DELETE'];
@@ -192,8 +205,8 @@ final class Csrf extends BaseService {
 		if ($rawOrigins instanceof Cfg) {
 			$rawOrigins = $rawOrigins->toArray();
 		}
-		$this->trustedFullOrigins = [];
-		$this->trustedHosts       = [];
+		$this->trustedFullOrigins	= [];
+		$this->trustedHosts			= [];
 		foreach ((array)$rawOrigins as $entry) {
 			$str = \trim((string)$entry);
 			if ($str === '') {
@@ -218,10 +231,10 @@ final class Csrf extends BaseService {
 		// fetch_metadata - nested config node.
 		if (isset($c->fetch_metadata)) {
 			$fm = $c->fetch_metadata;
-			$this->fetchMetadataEnabled       = (bool)($fm->enabled ?? true);
+			$this->fetchMetadataEnabled = (bool)($fm->enabled ?? true);
 			$this->fetchMetadataAllowSameSite = (bool)($fm->allow_same_site ?? true);
 		} else {
-			$this->fetchMetadataEnabled       = true;
+			$this->fetchMetadataEnabled = true;
 			$this->fetchMetadataAllowSameSite = true;
 		}
 
@@ -243,9 +256,12 @@ final class Csrf extends BaseService {
 
 
 
-	// ────────────────────────────────────────────────────────────
-	//  Public API - Verification
-	// ────────────────────────────────────────────────────────────
+
+
+
+	// ----------------------------------------------------------------
+	// Public API - Verification
+	// ----------------------------------------------------------------
 
 	/**
 	 * Verify the current request against all enabled CSRF defense layers.
@@ -262,7 +278,7 @@ final class Csrf extends BaseService {
 	 * Typical usage:
 	 *   if (!$this->app->csrf->verify()) {
 	 *       $this->app->flash->error('Invalid or expired token.');
-	 *       $this->app->response->redirect($this->app->request->path());
+	 *       $this->app->response->redirect($this->app->request->pathFromAppRoot());
 	 *   }
 	 *
 	 * @return bool True if the request is allowed, false if rejected.
@@ -321,9 +337,11 @@ final class Csrf extends BaseService {
 
 
 
-	// ────────────────────────────────────────────────────────────
-	//  Public API - Token output
-	// ────────────────────────────────────────────────────────────
+
+
+	// ----------------------------------------------------------------
+	// Public API - Token output
+	// ----------------------------------------------------------------
 
 	/**
 	 * Return the CSRF token for the current session.
@@ -359,8 +377,8 @@ final class Csrf extends BaseService {
 	 * @return string Full <input type="hidden"> HTML string.
 	 */
 	public function htmlField(): string {
-		$name  = \htmlspecialchars($this->fieldName, \ENT_QUOTES | \ENT_SUBSTITUTE, 'UTF-8');
-		$value = \htmlspecialchars($this->token(), \ENT_QUOTES | \ENT_SUBSTITUTE, 'UTF-8');
+		$name	= \htmlspecialchars($this->fieldName, \ENT_QUOTES | \ENT_SUBSTITUTE, 'UTF-8');
+		$value	= \htmlspecialchars($this->token(), \ENT_QUOTES | \ENT_SUBSTITUTE, 'UTF-8');
 		return '<input type="hidden" name="' . $name . '" value="' . $value . '">';
 	}
 
@@ -393,9 +411,11 @@ final class Csrf extends BaseService {
 
 
 
-	// ────────────────────────────────────────────────────────────
-	//  Public API - Lifecycle
-	// ────────────────────────────────────────────────────────────
+
+
+	// ----------------------------------------------------------------
+	// Public API - Lifecycle
+	// ----------------------------------------------------------------
 
 	/**
 	 * Generate a new token, replace the session token, and return it.
@@ -441,9 +461,11 @@ final class Csrf extends BaseService {
 
 
 
-	// ────────────────────────────────────────────────────────────
-	//  Public API - Introspection
-	// ────────────────────────────────────────────────────────────
+
+
+	// ----------------------------------------------------------------
+	// Public API - Introspection
+	// ----------------------------------------------------------------
 
 	/**
 	 * Whether CSRF protection is globally enabled.
@@ -473,9 +495,11 @@ final class Csrf extends BaseService {
 
 
 
-	// ────────────────────────────────────────────────────────────
-	//  Internal - Verification engine
-	// ────────────────────────────────────────────────────────────
+
+
+	// ----------------------------------------------------------------
+	// Internal - Verification engine
+	// ----------------------------------------------------------------
 
 	/**
 	 * Run all enabled defense layers in order.
@@ -483,6 +507,7 @@ final class Csrf extends BaseService {
 	 * @return ?CsrfFailureReason Null on success, reason enum on failure.
 	 */
 	private function runVerification(): ?CsrfFailureReason {
+		// -- 1. Validate fetch metadata ------------------------------------
 		// Layer 1: Fetch Metadata (cheapest - header read + string compare).
 		if ($this->fetchMetadataEnabled) {
 			$reason = $this->checkFetchMetadata();
@@ -491,6 +516,7 @@ final class Csrf extends BaseService {
 			}
 		}
 
+		// -- 2. Validate origin or referer ---------------------------------
 		// Layer 2: Origin/Referer (header read + origin compare).
 		if ($this->originCheck) {
 			$reason = $this->checkOrigin();
@@ -499,6 +525,7 @@ final class Csrf extends BaseService {
 			}
 		}
 
+		// -- 3. Validate token ---------------------------------------------
 		// Layer 3: Token (session read + decode + hash_equals).
 		return $this->checkToken();
 	}
@@ -560,6 +587,7 @@ final class Csrf extends BaseService {
 	private function checkOrigin(): ?CsrfFailureReason {
 		$origin = $this->app->request->header('Origin');
 
+		// -- 1. Validate explicit Origin header -----------------------------
 		// Origin present and not the literal string "null" (sent by privacy-sensitive navigations).
 		if ($origin !== null && $origin !== '' && \strtolower($origin) !== 'null') {
 			$normalized = $this->normalizeOrigin($origin);
@@ -571,7 +599,7 @@ final class Csrf extends BaseService {
 				: CsrfFailureReason::OriginMismatch;
 		}
 
-		// Origin absent - HTTPS path.
+		// -- 2. Handle HTTPS requests without Origin ------------------------
 		if ($this->app->request->isHttps()) {
 			if ($this->refererFallbackOnHttps) {
 				$referer = $this->app->request->header('Referer');
@@ -593,7 +621,7 @@ final class Csrf extends BaseService {
 			return CsrfFailureReason::OriginMissing;
 		}
 
-		// Origin absent - HTTP path.
+		// -- 3. Handle HTTP requests without Origin -------------------------
 		if ($this->allowMissingOriginOnHttp) {
 			return null;
 		}
@@ -618,6 +646,7 @@ final class Csrf extends BaseService {
 	private function checkToken(): ?CsrfFailureReason {
 		$this->ensureSession();
 
+		// -- 1. Load submitted token from header or POST --------------------
 		// Read submitted token: header first (all methods), then POST form field
 		// (POST only - PHP only populates $_POST for POST requests).
 		$submitted = $this->app->request->header($this->headerName);
@@ -634,6 +663,7 @@ final class Csrf extends BaseService {
 
 		$submitted = (string)$submitted;
 
+		// -- 2. Load and validate session token -----------------------------
 		// Read session token.
 		$sessionHex = $this->app->session->get($this->sessionKey);
 
@@ -653,6 +683,7 @@ final class Csrf extends BaseService {
 
 		$sessionHex = \strtolower($sessionHex);
 
+		// -- 3. Normalize submitted token ----------------------------------
 		// Derive comparable hex from submitted token.
 		if ($this->maskTokens) {
 			$submittedHex = $this->unmask($submitted);
@@ -670,6 +701,7 @@ final class Csrf extends BaseService {
 			$submittedHex = \strtolower($submitted);
 		}
 
+		// -- 4. Compare in constant time -----------------------------------
 		return \hash_equals($sessionHex, $submittedHex)
 			? null
 			: CsrfFailureReason::TokenMismatch;
@@ -680,9 +712,10 @@ final class Csrf extends BaseService {
 
 
 
-	// ────────────────────────────────────────────────────────────
-	//  Internal - Session management
-	// ────────────────────────────────────────────────────────────
+
+	// ----------------------------------------------------------------
+	// Internal - Session management
+	// ----------------------------------------------------------------
 
 	/**
 	 * Start the session if not already active.
@@ -702,9 +735,11 @@ final class Csrf extends BaseService {
 
 
 
-	// ────────────────────────────────────────────────────────────
-	//  Internal - Token management
-	// ────────────────────────────────────────────────────────────
+
+
+	// ----------------------------------------------------------------
+	// Internal - Token management
+	// ----------------------------------------------------------------
 
 	/**
 	 * Ensure a token exists in the session. Returns the raw hex string (lowercase).
@@ -749,9 +784,10 @@ final class Csrf extends BaseService {
 
 
 
-	// ────────────────────────────────────────────────────────────
-	//  Internal - Token masking (BREACH mitigation)
-	// ────────────────────────────────────────────────────────────
+
+	// ----------------------------------------------------------------
+	// Internal - Token masking (BREACH mitigation)
+	// ----------------------------------------------------------------
 
 	/**
 	 * Mask a raw hex token with a random one-time pad.
@@ -790,8 +826,8 @@ final class Csrf extends BaseService {
 			return null;
 		}
 
-		$mask  = \substr($decoded, 0, $this->tokenBytes);
-		$xored = \substr($decoded, $this->tokenBytes);
+		$mask	= \substr($decoded, 0, $this->tokenBytes);
+		$xored	= \substr($decoded, $this->tokenBytes);
 		return \strtolower(\bin2hex($mask ^ $xored));
 	}
 
@@ -800,9 +836,11 @@ final class Csrf extends BaseService {
 
 
 
-	// ────────────────────────────────────────────────────────────
-	//  Internal - Origin matching
-	// ────────────────────────────────────────────────────────────
+
+
+	// ----------------------------------------------------------------
+	// Internal - Origin matching
+	// ----------------------------------------------------------------
 
 	/**
 	 * Extract and normalize an origin from a URL or origin string.
@@ -825,8 +863,8 @@ final class Csrf extends BaseService {
 			return null;
 		}
 
-		$host   = \strtolower($parts['host']);
-		$port   = $parts['port'] ?? null;
+		$host = \strtolower($parts['host']);
+		$port = $parts['port'] ?? null;
 
 		$origin = $scheme . '://' . $host;
 
@@ -889,8 +927,8 @@ final class Csrf extends BaseService {
 		}
 
 		$scheme = \strtolower($this->app->request->scheme());
-		$host   = \strtolower($this->app->request->host());
-		$port   = (int)$this->app->request->port();
+		$host = \strtolower($this->app->request->host());
+		$port = (int)$this->app->request->port();
 
 		$origin = $scheme . '://' . $host;
 
@@ -910,9 +948,11 @@ final class Csrf extends BaseService {
 
 
 
-	// ────────────────────────────────────────────────────────────
-	//  Internal - Logging
-	// ────────────────────────────────────────────────────────────
+
+
+	// ----------------------------------------------------------------
+	// Internal - Logging
+	// ----------------------------------------------------------------
 
 	/**
 	 * Log a CSRF verification failure via the log service.
@@ -930,16 +970,23 @@ final class Csrf extends BaseService {
 		}
 
 		try {
+			$pathRaw = \method_exists($this->app->request, 'pathRaw')
+				? $this->app->request->pathRaw()
+				: $this->app->request->uri();
+
+			$pathFromAppRoot = \method_exists($this->app->request, 'pathFromAppRoot')
+				? $this->app->request->pathFromAppRoot()
+				: null;
+
 			$this->app->log->write($this->logChannel, 'csrf.failure', $reason->value, [
 				'method' => $this->app->request->method(),
-				'path'   => $this->app->request->path(),
-				'ip'     => $this->app->request->ip(),
+				'path_raw' => $pathRaw,
+				'path_from_app_root' => $pathFromAppRoot,
+				'ip' => $this->app->request->ip(),
 			]);
 		} catch (\Throwable) {
 			// Logging failure must not mask the CSRF verification result.
 		}
 	}
-
-
 
 }
