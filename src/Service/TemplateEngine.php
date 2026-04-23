@@ -673,7 +673,7 @@ final class TemplateEngine extends BaseService {
 			 * $url: Build an absolute URL under the app's base_url.
 			 *
 			 * Typical usage:
-			 *   <a href="{{ $url('/member/profile') }}">Profil</a>
+			 *   <a href="{{ $url('/member/profile') }}">Profile</a>
 			 *   <form action="{{ $url('/login') }}" method="post">
 			 *
 			 * With query params:
@@ -681,13 +681,16 @@ final class TemplateEngine extends BaseService {
 			 *
 			 * Notes:
 			 * - $path may be "/foo" or "foo"; it will be normalized.
+			 * - This helper is intended for internal app URLs only.
 			 * - $query is turned into ?a=1&b=2 (http_build_query).
 			 */
 			'url' => function (string $path = '', array $query = []) use ($baseUrl): string {
-				$p = '/' . \ltrim($path, '/');
+				$p = '/' . \ltrim(\trim($path), '/');
+
 				if ($query !== []) {
 					$p .= '?' . \http_build_query($query);
 				}
+
 				return \rtrim($baseUrl, '/') . $p;
 			},
 
