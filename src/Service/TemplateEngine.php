@@ -28,7 +28,7 @@ use CitOmni\Kernel\Service\BaseService;
  * - Support partial reuse via `{% include "partial@layer" %}`, even across layers.
  * - Merge globals, dynamic (per-request) vars, and controller data for each render.
  *   Precedence: controller data > dynamic vars > globals.
- * - Expose helpers to templates (`$url`, `$asset`, `$txt`, `$icon`, `$hasIcon`, `$dt`, `$role`, etc.)
+ * - Expose helpers to templates (`$url`, `$asset`, `$txt`, `$icon`, `$hasIcon`, `$dt`, `$auth`, `$role`, etc.)
  *   as closures bound to the current App.
  * - Support inline PHP tags `{? ... ?}` and `{?= ... ?}`. Inline PHP is enabled
  *   by default and can be disabled via config/constructor options.
@@ -96,7 +96,7 @@ use CitOmni\Kernel\Service\BaseService;
  *   ]);
  *
  *   // Controller: capture as string (for email body, etc.)
- *   $html = $this->app->tplEngine->renderToString('mail/reset.html@citomni/auth', [
+ *   $html = $this->app->tplEngine->renderToString('mail/reset.html@citomni/authenticate', [
  *   	'user'  => $userRow,
  *   	'token' => $token,
  *   ]);
@@ -423,7 +423,7 @@ final class TemplateEngine extends BaseService {
 	 * Render a template "file@layer" into a string.
 	 *
 	 * Typical usage:
-	 *   $html = $this->app->tplEngine->renderToString('mail/reset.html@citomni/auth', [...]);
+	 *   $html = $this->app->tplEngine->renderToString('mail/reset.html@citomni/authenticate', [...]);
 	 *
 	 * @param string $ref
 	 * @param array<string,mixed> $data
@@ -488,7 +488,7 @@ final class TemplateEngine extends BaseService {
 	 *   form_action_switching, captcha_protection.
 	 * - Environment info: env => { name: string, dev: bool }.
 	 * - Lazy helpers (closures): $txt, $dt, $dtNow, $dtMonth, $dtWeekday, $url,
-	 *   $asset, $icon, $hasIcon, $hasService, $hasPackage, $csrfField, $currentPath, $role.
+	 *   $asset, $icon, $hasIcon, $hasService, $hasPackage, $csrfField, $currentPath, $auth, $role.
 	 *
 	 * Notes:
 	 * - csrf_protection reflects cfg->security->csrf->enabled.
@@ -540,15 +540,15 @@ final class TemplateEngine extends BaseService {
 			 * $txt: Localized text lookup with optional fallback/default.
 			 *
 			 * Typical usage:
-			 *   {{ $txt('login_title', 'auth_login', 'citomni/auth') }}
+			 *   {{ $txt('login_title', 'authenticate', 'citomni/authenticate') }}
 			 *   {{ $txt('greeting', 'homepage', null, 'Hello guest') }}
 			 *
 			 * With replacements:
-			 *   {{ $txt('welcome_name', 'homepage', 'citomni/auth', 'Hi', {'NAME': $user['first_name']}) }}
+			 *   {{ $txt('welcome_name', 'homepage', 'citomni/authenticate', 'Hi', {'NAME': $user['first_name']}) }}
 			 *
 			 * Notes:
 			 * - $file is typically the logical language file (without ".php").
-			 * - $layer is optional; pass e.g. "citomni/auth" to read provider language.
+			 * - $layer is optional; pass e.g. "citomni/authenticate" to read provider language.
 			 * - If key is missing, $default is returned.
 			 *
 			 * Throws:
@@ -734,7 +734,7 @@ final class TemplateEngine extends BaseService {
 			 * $hasPackage: Check if a provider/package is installed.
 			 *
 			 * Typical usage:
-			 *   {% if $hasPackage('citomni/auth') %}
+			 *   {% if $hasPackage('citomni/authenticate') %}
 			 *   	<li><a href="{{ $url('/member/login') }}">Log ind</a></li>
 			 *   {% endif %}
 			 *
@@ -837,7 +837,66 @@ final class TemplateEngine extends BaseService {
 
 
 			/**
-			 * $role: Role/permission helper for templates (proxy to RoleGate).
+			 * $auth: Authenticated identity helper for templates.
+			 *
+			 * Typical usage:
+			 *
+			 *   {% if $auth('check') %}
+			 *   	<a href="{{ $url('/member/home.html') }}">Member area</a>
+			 *   {% endif %}
+			 *
+			 *   {% if $auth('checkStrict') %}
+			 *   	{% set $identity = $auth('identity') %}
+			 *   	<span>{{ $identity['email'] }}</span>
+			 *   {% endif %}
+			 *
+			 *   {{ $auth('id') }}
+			 *   {{ $auth('role') }}
+			 *
+			 * Behavior:
+			 * - 'check'       => session-key authentication check, no database IO.
+			 * - 'checkStrict' => verified active identity check.
+			 * - 'identity'    => current sanitized identity row, or null.
+			 * - 'id'          => current identity id from session, or null.
+			 * - 'role'        => current role id, or null.
+			 *
+			 * Throws:
+			 * - \RuntimeException if the authenticate Auth service is unavailable.
+			 * - \InvalidArgumentException if you call with an unknown fn.
+			 */
+			'auth' => function (string $fn) {
+				if (!$this->app->hasService('auth') || !$this->app->hasPackage('citomni/authenticate')) {
+					throw new \RuntimeException(
+						"Auth service not available. Install 'citomni/authenticate' and register 'Auth' as 'auth'."
+					);
+				}
+
+				$auth = $this->app->auth;
+
+				switch ($fn) {
+					case 'check':
+						return $auth->check();
+
+					case 'checkStrict':
+						return $auth->checkStrict();
+
+					case 'identity':
+						return $auth->getIdentity();
+
+					case 'id':
+						return $auth->getIdentityId();
+
+					case 'role':
+						return $auth->getRole();
+
+					default:
+						throw new \InvalidArgumentException("Unknown auth helper '{$fn}'.");
+				}
+			},
+
+
+			/**
+			 * $role: Role/permission helper for templates (proxy to citomni/authenticate Role).
 			 *
 			 * Typical usage:
 			 *
@@ -851,13 +910,29 @@ final class TemplateEngine extends BaseService {
 			 *   	<a href="{{ $url('/staff/tools') }}">Staff tools</a>
 			 *   {% endif %}
 			 *
-			 *   {# Threshold / hierarchy check (>= operator) #}
-			 *   {% if $role('atLeast', 'operator') %}
+			 *   {# Minimum / hierarchy check (>= operator) #}
+			 *   {% if $role('min', 'operator') %}
 			 *   	<a href="{{ $url('/admin') }}">Admin panel</a>
+			 *   {% endif %}
+			 *
+			 *   {# Maximum / hierarchy check (<= operator) #}
+			 *   {% if $role('max', 'operator') %}
+			 *   	<p>Standard or support-level access.</p>
 			 *   {% endif %}
 			 *
 			 *   {# Numeric rank (tinyint) #}
 			 *   {{ $role('rank') }}   {# e.g. 9 for admin #}
+			 *
+			 *   {# Role name for a given id #}
+			 *   {{ $role('name', 9) }}
+			 *
+			 *   {# Role id for a given name #}
+			 *   {{ $role('id', 'admin') }}
+			 *
+			 *   {# Raw configured role map (name => id) #}
+			 *   {% foreach ($role('map') as $name => $rid) %}
+			 *   	<span>{{ $name }}: {{ $rid }}</span>
+			 *   {% endforeach %}
 			 *
 			 *   {# Localized label for current user #}
 			 *   {{ $role('label') }}
@@ -873,53 +948,65 @@ final class TemplateEngine extends BaseService {
 			 * Behavior:
 			 * - 'is'       => strict equality by role name ("admin").
 			 * - 'any'      => OR check across provided names/ids.
-			 * - 'atLeast'  => hierarchy check ("operator or higher").
+			 * - 'min'      => hierarchy check ("operator or higher").
+			 * - 'max'      => hierarchy check ("operator or lower").
+			 * - 'id'       => role name to id lookup.
+			 * - 'name'     => role id to name lookup.
+			 * - 'map'      => raw configured {name => id} role map.
 			 * - 'rank'     => numeric tinyint for current user.
 			 * - 'label'    => localized label for current user's role.
 			 * - 'labelOf'  => label for a provided role id.
 			 * - 'labels'   => {id => label} map of all roles.
 			 *
 			 * Throws:
-			 * - \RuntimeException if role service isn't available.
-			 * - \InvalidArgumentException in dev if you call with unknown fn.
+			 * - \RuntimeException if the authenticate Role service is unavailable.
+			 * - \InvalidArgumentException if you call with an unknown fn.
 			 */
 			'role' => function (string $fn, mixed ...$args) {
-				if (!$this->app->hasService('role') || !$this->app->hasPackage('citomni/auth')) {
+				if (!$this->app->hasService('role') || !$this->app->hasPackage('citomni/authenticate')) {
 					throw new \RuntimeException(
-						"Role service not available. Install 'citomni/auth' and register 'RoleGate' as 'role'."
+						"Role service not available. Install 'citomni/authenticate' and register 'Role' as 'role'."
 					);
 				}
-				$gate = $this->app->role;
+
+				$role = $this->app->role;
 
 				switch ($fn) {
 					case 'label':
-						return $gate->label(...$args);
+						return $role->label(...$args);
 
 					case 'labelOf':
-						return $gate->labelOf(...$args);
+						return $role->labelOf(...$args);
 
 					case 'labels':
-						return $gate->labels(...$args);
+						return $role->labels(...$args);
 
 					case 'is':
-						return $gate->__get((string)$args[0]);
+						return $role->is((string)$args[0]);
 
 					case 'any':
-						return $gate->any(...$args);
+						return $role->any(...$args);
 
-					case 'atLeast':
-						return $gate->atLeast(...$args);
+					case 'min':
+						return $role->min(...$args);
+
+					case 'max':
+						return $role->max(...$args);
+
+					case 'id':
+						return $role->id((string)$args[0]);
+
+					case 'name':
+						return $role->name((int)$args[0]);
+
+					case 'map':
+						return $role->map();
 
 					case 'rank':
-						return $gate->rank();
+						return $role->rank();
 
 					default:
-						$isDevLike = \defined('CITOMNI_ENVIRONMENT')
-							&& (\CITOMNI_ENVIRONMENT === 'dev' || \CITOMNI_ENVIRONMENT === 'stage');
-						if ($isDevLike) {
-							throw new \InvalidArgumentException("Unknown role helper '{$fn}'.");
-						}
-						return false;
+						throw new \InvalidArgumentException("Unknown role helper '{$fn}'.");
 				}
 			},
 		];
@@ -1243,7 +1330,7 @@ final class TemplateEngine extends BaseService {
 	 * - Write atomically into `var/cache` under a deterministic filename that includes both path and layer.
 	 * - If `cache_enabled` is true, reuse the compiled file if all sources/deps are older than the cached PHP.
 	 *
-	 * @param string $ref Template reference like "public/login.html@citomni/auth".
+	 * @param string $ref Template reference like "public/login.html@citomni/authenticate".
 	 * @return string Absolute path to a compiled PHP file ready for `require`.
 	 */
 	private function compile(string $ref): string {
