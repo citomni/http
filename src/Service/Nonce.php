@@ -15,560 +15,386 @@ declare(strict_types=1);
 
 namespace CitOmni\Http\Service;
 
+use CitOmni\Http\Exception\NonceConfigException;
 use CitOmni\Kernel\Service\BaseService;
 
-
 /**
- * Nonce: Filesystem-backed replay protection using single-use tokens.
+ * Nonce: Filesystem-backed single-use token ledger with namespaced storage and TTL.
  *
- * Provides defense-in-depth against replay attacks by tracking unique nonces
- * on the filesystem. Each nonce is persisted atomically as a small file in a
- * writable directory, with the filename derived from HASH_ALGO(nonce).
- *
- * Responsibilities:
- * - Persist and validate single-use nonces to prevent request replays within a bounded TTL window.
- *   1) Enforce strict input constraints (length, whitelist) before hashing
- *   2) Atomically create a file for unseen nonces (fopen with mode "x")
- *   3) Treat file mtime as canonical age; content is informational
- * - Keep hot paths lean and deterministic:
- *   1) No IO during setOptions(); IO occurs only when needed
- *   2) Opportunistic bounded purges to cap disk growth
- *   3) Return booleans on hot paths instead of throwing
- * - Provide basic maintenance utilities for expired-entry cleanup.
- *
- * Design goals:
- * - Minimal runtime overhead: fast atomic file creation via `fopen(..., 'x')`.
- * - Replay resistance: rejects reuse of any nonce still within its TTL window.
- * - Persistence: nonce files are durable until TTL expiration, with optional
- *   purge methods to bound disk growth.
- * - Defense-in-depth: enforces max length and strict character whitelist on
- *   raw nonces, preventing path traversal or resource exhaustion.
- * - Fail-fast: rejects missing/invalid `dir` configuration early.
- *
- * Collaborators:
- * - Consumed by higher-level guards such as WebhooksAuth (read/write).
- * - No direct external services required; operates on local filesystem.
- *
- * Configuration keys:
- * - dir (string, required) - Absolute writable directory for nonce files
- *   - Must resolve under CITOMNI_APP_PATH . "/var/" (enforced at runtime)
- *
- * Storage model:
- * - Filename: HASH_ALGO(nonce) + ".nonce"
- * - Content:  UNIX timestamp (int), with mtime also set to creation time.
- * - Directory: must reside under CITOMNI_APP_PATH/var/ and be writable.
- *
- * Error handling:
- * - setOptions(): fail fast via \RuntimeException on missing/invalid "dir".
- * - checkAndStore()/purgeSomeExpired()/purgeAllExpired(): return status booleans/ints; do not throw.
- * - Filesystem warnings are suppressed deliberately; callers act on return values.
+ * Provides replay protection for primitives such as webhooks, OTP enrollment,
+ * one-time form submissions, and similar single-use scenarios. Each call site
+ * picks its own namespace so multiple unrelated ledgers can coexist without
+ * collisions, and so opportunistic pruning can use per-namespace TTLs.
  *
  * Behavior:
- * - Storage model:
- *   - Filename: HASH_ALGO(nonce) . ".nonce" (hex)
- *   - Content: UNIX timestamp string (mtime is the canonical age)
- *   - Directory residency constraint under /var/ to avoid traversal/symlink escape
- * - Determinism:
- *   - Given identical inputs and filesystem state, results are deterministic.
- *   - One-time per-process validation of HASH_ALGO availability.
- * - Side effects and outputs:
- *   - Creates, touches, chmods, and unlinks files in the configured directory.
- *   - May delete a bounded number of expired files during opportunistic purge.
- * - Precedence/ordering rules:
- *   - On collision with expired file: delete then retry once (write wins if retry succeeds).
- *   - On collision with fresh file: treat as replay and return false.
- * - Thread-safety / reentrancy:
- *   - Cross-process contention is guarded by fopen(..., "x") atomicity on POSIX-compliant filesystems.
- *   - Safe to call concurrently across FPM workers as long as they share the same real directory.
- *
- * Design for extension:
- * - Class is non-final by design; override HASH_ALGO in subclasses if required.
- * - Protected constant HASH_ALGO allows algorithm substitution (e.g., "sha512").
- * - Avoids magic; explicit configuration via setOptions().
- * - Rationale for not final: benign to extend for different hash or folder policy while preserving contract.
- *
- * Security boundaries:
- * - Enforces ASCII whitelist and maximum length before hashing.
- * - Requires directory to resolve inside CITOMNI_APP_PATH . "/var/".
- * - Uses hash-derived filenames; never uses raw nonce as a path segment.
- *
- * Performance notes:
- * - Zero IO during setOptions(); minimal syscalls on hot path.
- * - Opportunistic purge runs ~2% of calls and inspects at most 25 items.
- * - No directory scans on every write; only on purge attempts.
- *
- * Typical usage:
- *
- *   $ok = $this->app->nonce
- *       ->setOptions((object)['dir' => CITOMNI_APP_PATH . '/var/nonces'])
- *       ->checkAndStore($nonce, 300);
- *   if (!$ok) {
- *       // Deny request - invalid or replayed nonce, or storage failure
- *   }
- *
- * Examples:
- *
- *   // Bulk cleanup via admin job or cron (bounded)
- *   $removed = $this->app->nonce
- *       ->setOptions(['dir' => CITOMNI_APP_PATH . '/var/nonces'])
- *       ->purgeAllExpired(300, 1000);
- *   // $removed is the number of deleted files
- *
- * Failure:
- *
- *   // Missing required configuration throws immediately
- *   $this->app->nonce->setOptions([]); // throws \RuntimeException
- *
- * Standalone (only if necessary):
- *
- *   // Minimal isolated demo (not typical in app code)
- *   $nonceSvc = (new \CitOmni\Http\Service\Nonce())
- *       ->setOptions(['dir' => CITOMNI_APP_PATH . '/var/nonces']);
- *   if (!$nonceSvc->checkAndStore('abc123', 120)) {
- *       // Handle replay or validation failure
- *   }
+ * - Storage layout: <root_dir>/<namespace>/<sha256(nonce)>.nonce
+ * - First write of a nonce wins (atomic O_EXCL via fopen 'x').
+ * - Subsequent writes within TTL are rejected (replay).
+ * - Subsequent writes after TTL are accepted (the stale file is reaped first).
+ * - Opportunistic purge runs probabilistically inside checkAndStore() to
+ *   prevent unbounded growth on long-lived ledgers. Operators may also call
+ *   purgeExpired() from a CLI cron for deterministic cleanup.
+ * - Nonce strings must match a strict character/length whitelist to keep
+ *   filesystem behavior predictable across platforms.
  *
  * Notes:
- * - Documentation is ASCII-only; code examples are valid PHP and use // comments.
- * - IPv6 and alternative storage backends are intentionally out of scope for core.
+ * - Boolean return from checkAndStore() conflates "replay" and "transient
+ *   storage failure" into a single negative answer. This is intentional:
+ *   from a security standpoint both must reject the request, and richer
+ *   telemetry can be added later without changing the call sites.
+ * - Configuration shape errors fail fast at init(). Runtime storage failures
+ *   return false from checkAndStore().
+ *
+ * Config node: nonce
+ *   - dir                 string  Required. Root directory for all ledgers.
+ *   - max_len             int     Optional, default 128. Maximum nonce length.
+ *   - purge_probability   int     Optional, default 50. 1-in-N chance to opportunistically purge.
+ *   - purge_limit         int     Optional, default 25. Max files scanned per opportunistic purge.
+ *   - dir_mode            int     Optional, default 0775. Mode used when creating directories.
+ *   - file_mode           int     Optional, default 0660. Mode applied to nonce files.
+ *
+ * Typical usage:
+ *   if (!$this->app->nonce->checkAndStore('webhooks', $nonce, 300)) {
+ *       // Replay or storage failure - reject the request.
+ *   }
+ *
+ *   // CLI cron:
+ *   $deleted = $this->app->nonce->purgeExpired('webhooks', 300);
+ *
+ * @throws NonceConfigException On invalid config at init time.
  */
-class Nonce extends BaseService { 
+final class Nonce extends BaseService {
 
-	/** @var string Absolute path to writable nonce directory. */
-	private string $dir = '';
+	/** Hash algorithm used to derive the on-disk filename from the nonce string. */
+	private const HASH_ALGO = 'sha256';
 
-	/** @var int Maximum accepted raw nonce length (defense-in-depth). */
-	private int $maxLen = 128;
-
-	/** @var string Allowed raw nonce pattern (defense-in-depth). */
-	private string $allowedPattern = '/^[A-Za-z0-9._:-]{1,128}$/';
-
-	// File extension suffix used for all stored nonce files
+	/** Filename suffix for nonce ledger entries. */
 	private const EXT = '.nonce';
 
-	// Configurable hash algorithm for filename derivation (e.g., 'sha256', 'sha512')
-	// Use subclassing to override:
-	// class MyNonce extends Nonce { protected const HASH_ALGO = 'sha512'; }
-	protected const HASH_ALGO = 'sha256';
+	/** Maximum length of a namespace label (bounded for filesystem sanity). */
+	private const NAMESPACE_MAX_LEN = 64;
 
+	/** Strict allow-list pattern for namespace labels (built from NAMESPACE_MAX_LEN). */
+	private const NAMESPACE_PATTERN = '/^[A-Za-z0-9_-]{1,' . self::NAMESPACE_MAX_LEN . '}$/';
+
+	/** Resolved root directory for all namespaced ledgers (no trailing separator). */
+	private string $rootDir = '';
+
+	/** Maximum byte length of an accepted nonce string. */
+	private int $maxLen = 128;
+
+	/** Compiled regex for nonce-string validation (built from $maxLen at init). */
+	private string $nonceCharPattern = '';
+
+	/** Probability divisor for opportunistic purge (1 in N). */
+	private int $purgeProbability = 50;
+
+	/** Maximum number of directory entries scanned in one opportunistic purge. */
+	private int $purgeLimit = 25;
+
+	/** Octal mode applied to created directories. */
+	private int $dirMode = 0775;
+
+	/** Octal mode applied to created nonce files. */
+	private int $fileMode = 0660;
+
+	/** @var array<string, true> Namespaces whose subdirectory has already been ensured this request. */
+	private array $ensuredNamespaces = [];
+
+
+
+
+	// ----------------------------------------------------------------
+	// Initialization
+	// ----------------------------------------------------------------
 
 	/**
-	 * Service bootstrap hook.
+	 * Read cfg.nonce, validate, and pre-derive immutable scalars.
 	 *
 	 * Behavior:
-	 * - Keep initialization minimal for cold-start performance.
-	 *
-	 * Notes:
-	 * - This service does not keep internal state; no warm-up required.
-	 *
-	 * Typical usage:
-	 *   // Nothing to call explicitly; the app constructs the service as needed.
+	 * - Verifies the configured hash algorithm is supported by ext-hash.
+	 * - Does NOT pre-create the root directory; subdirectories are ensured
+	 *   lazily on first use within each namespace. This keeps the service
+	 *   cheap to instantiate when not actually used.
 	 *
 	 * @return void
+	 * @throws NonceConfigException On invalid configuration.
 	 */
-	/* 
 	protected function init(): void {
-		// Intentionally empty (lean boot).
-	}
-	*/
+		$cfg = $this->app->cfg->nonce;
 
-
-	/**
-	 * Apply configuration for the Nonce service.
-	 *
-	 * Behavior:
-	 * - Accepts array or object with public property "dir".
-	 * - Fails fast if "dir" is missing or empty.
-	 * - Defers filesystem checks to ensureDir() on first use.
-	 *
-	 * Notes:
-	 * - Keeps hot path free of unnecessary IO.
-	 *
-	 * Typical usage:
-	 *   $this->app->nonce->setOptions(['dir' => CITOMNI_APP_PATH . '/var/nonces']);
-	 *
-	 * @param array|object $opts Associative array or stdClass with key "dir".
-	 * @return self Fluent self for chaining.
-	 * @throws \RuntimeException If "dir" is missing, empty, or contains null bytes.
-	 */
-	public function setOptions($opts): self {
-		// Tiny helper to extract values from array|object without overhead.
-		$get = static function ($src, string $key, $default = null) {
-			if (is_array($src) && array_key_exists($key, $src)) return $src[$key];
-			if (is_object($src) && isset($src->{$key})) return $src->{$key};
-			return $default;
-		};
-
-		// Fetch and minimally sanitize directory value.
-		$dir = $get($opts, 'dir', null);
-
-		// Validate presence and type (lean: avoid I/O here).
-		if (!is_string($dir) || $dir === '') {
-			throw new \RuntimeException('Missing required option: dir (nonce directory).');
+		$dir = (string)($cfg->dir ?? '');
+		$dir = \trim($dir);
+		if ($dir === '' || \strpos($dir, "\0") !== false) {
+			throw new NonceConfigException('Nonce: cfg.nonce.dir must be a non-empty path without null bytes.');
 		}
+		$this->rootDir = \rtrim($dir, "/\\");
 
-		// Defense-in-depth: trim and strip any embedded null bytes.
-		$dir = trim($dir);
-		if ($dir === '' || strpos($dir, "\0") !== false) {
-			throw new \RuntimeException('Invalid nonce directory path.');
+		$maxLen = (int)($cfg->max_len ?? 128);
+		if ($maxLen < 8 || $maxLen > 1024) {
+			throw new NonceConfigException('Nonce: cfg.nonce.max_len must be between 8 and 1024.');
 		}
+		$this->maxLen = $maxLen;
+		// Allowed characters cover hex, base64url ('_' and '-'), UUID-like
+		// formats with '.' and ':', and similar URL-safe identifier schemes.
+		$this->nonceCharPattern = '/^[A-Za-z0-9_.:-]{1,' . $maxLen . '}$/';
 
-		// Set as-is; actual path checks are deferred to ensureDir().
-		$this->dir = $dir;
+		$prob = (int)($cfg->purge_probability ?? 50);
+		if ($prob < 1) {
+			throw new NonceConfigException('Nonce: cfg.nonce.purge_probability must be >= 1.');
+		}
+		$this->purgeProbability = $prob;
 
-		return $this;
+		$limit = (int)($cfg->purge_limit ?? 25);
+		if ($limit < 1) {
+			throw new NonceConfigException('Nonce: cfg.nonce.purge_limit must be >= 1.');
+		}
+		$this->purgeLimit = $limit;
+
+		$this->dirMode  = (int)($cfg->dir_mode  ?? 0775);
+		$this->fileMode = (int)($cfg->file_mode ?? 0660);
+
+		if (!\in_array(self::HASH_ALGO, \hash_algos(), true)) {
+			throw new NonceConfigException('Nonce: required hash algorithm not available: ' . self::HASH_ALGO);
+		}
 	}
 
+
+
+
+
+
+
+
+	// ----------------------------------------------------------------
+	// Public API
+	// ----------------------------------------------------------------
+
 	/**
-	 * Validates and atomically stores a nonce if it has not been seen before.
+	 * Atomically claim a nonce within the given namespace.
+	 *
+	 * Returns true when this is the first time the nonce is seen (or the
+	 * previous occurrence has expired and was reaped). Returns false on
+	 * replay, on malformed input, or on any storage failure.
 	 *
 	 * Behavior:
-	 *  1. Validates TTL and nonce format (length + regex whitelist).
-	 *  2. Ensures the nonce directory exists and is writable.
-	 *  3. Attempts to atomically create a file: HASH_ALGO(nonce) + self::EXT
-	 *     - If file exists and is still fresh -> reject as replay.
-	 *     - If file exists but expired -> evict and retry once.
-	 *     - If filesystem error -> reject.
-	 *  4. On success, writes current timestamp and sets mtime/permissions.
-	 *  5. Opportunistically purges a few expired nonces to bound growth.
-	 *
-	 * Storage model:
-	 * - Filename: HASH_ALGO(nonce) + self::EXT
-	 * - Content:  UNIX timestamp (for reference; mtime is main source of truth).
-	 *
-	 * TTL bounds:
-	 * - Lower bound:  > 0
-	 * - Upper bound:  <= 86400 (24h)   // defensive cap to avoid near-permanent entries
-	 *
-	 * Typical usage:
-	 *   if (!$this->app->nonce->checkAndStore($nonce, 300)) {
-	 *       // Deny - replay or invalid input
-	 *   }
+	 * - Uses fopen 'x' for atomic create-or-fail semantics.
+	 * - On collision, checks file mtime against TTL; reaps and retries once
+	 *   if the existing entry has expired.
+	 * - May trigger an opportunistic purge of other expired entries in the
+	 *   namespace (probability 1 in cfg.nonce.purge_probability).
 	 *
 	 * Notes:
-	 * - Returns boolean instead of throwing to keep the hot path lean.
-	 * - TTL defensive cap avoids near-permanent retention (1..86400 seconds).
+	 * - The nonce string is treated as opaque; only its hash is persisted.
+	 * - TTL is owned by the caller. Pick whatever fits the use case
+	 *   (short-lived webhook windows, longer-lived email confirmation
+	 *   tokens, multi-step enrollment flows, etc.). Values <= 0 are
+	 *   rejected because they have no meaningful semantics.
 	 *
-	 * @param string $nonce      Raw nonce provided by the client.
-	 * @param int    $ttlSeconds Time-to-live window in seconds (1..86400).
-	 * @return bool              True if nonce was newly accepted, false on replay or failure.
+	 * @param  string  $namespace    Logical bucket name (e.g. 'webhooks', 'csrf').
+	 * @param  string  $nonce        Opaque single-use token string.
+	 * @param  int     $ttlSeconds   Validity window in seconds (must be > 0).
+	 * @return bool                  True on success, false on replay/storage failure.
 	 */
-	public function checkAndStore(string $nonce, int $ttlSeconds): bool {
-		// TTL bounds guard (defense-in-depth; avoids pathological long-lived files)
-		if ($ttlSeconds <= 0 || $ttlSeconds > 86400) {
+	public function checkAndStore(string $namespace, string $nonce, int $ttlSeconds): bool {
+		if ($ttlSeconds <= 0) {
+			return false;
+		}
+		if ($nonce === '' || \strlen($nonce) > $this->maxLen) {
+			return false;
+		}
+		if (!\preg_match($this->nonceCharPattern, $nonce)) {
+			return false;
+		}
+		if (!\preg_match(self::NAMESPACE_PATTERN, $namespace)) {
 			return false;
 		}
 
-		// Reject empty or overly long nonces
-		if ($nonce === '' || strlen($nonce) > $this->maxLen) {
+		$nsDir = $this->ensureNamespaceDir($namespace);
+		if ($nsDir === null) {
 			return false;
 		}
 
-		// Defense-in-depth: enforce character whitelist via regex
-		if (!preg_match($this->allowedPattern, $nonce)) {
-			return false;
-		}
+		$path = $nsDir . \DIRECTORY_SEPARATOR . \hash(self::HASH_ALGO, $nonce) . self::EXT;
+		$now  = \time();
 
-		// Ensure the target directory exists and is writable
-		if (!$this->ensureDir()) {
-			return false;
-		}
-
-		$now  = time();
-		$path = $this->buildPath($nonce);
-
-		// Attempt atomic file creation ("x" fails if file already exists)
-		$fh = @fopen($path, 'x');
+		$fh = @\fopen($path, 'x');
 		if ($fh === false) {
-			// File already exists -> possible replay or stale nonce
-			if (is_file($path)) {
-				$age = $now - (int)@filemtime($path);
-
-				// If expired, evict and retry once
-				if ($age >= $ttlSeconds) {
-					@unlink($path);
-					$fh = @fopen($path, 'x');
-					if ($fh === false) {
-						return false; // Race condition or FS error
-					}
-				} else {
-					return false; // Replay within TTL window
-				}
-			} else {
-				return false; // Filesystem error (permissions, path, etc.)
+			// Either it exists, or fopen failed for another reason. If it exists,
+			// we may be able to reap an expired entry and retry once.
+			if (!\is_file($path)) {
+				return false;
+			}
+			$mt = @\filemtime($path);
+			if ($mt === false) {
+				return false;
+			}
+			$age = $now - (int)$mt;
+			if ($age < $ttlSeconds) {
+				return false;
+			}
+			@\unlink($path);
+			$fh = @\fopen($path, 'x');
+			if ($fh === false) {
+				return false;
 			}
 		}
 
-		// Write current timestamp into the file (optional, mtime is canonical)
-		@fwrite($fh, (string)$now);
-		@fclose($fh);
+		// Best-effort write of the timestamp (file presence alone is what counts).
+		@\fwrite($fh, (string)$now);
+		@\fclose($fh);
+		@\touch($path, $now);
+		@\chmod($path, $this->fileMode);
 
-		// Ensure correct metadata for auditing and cleanup
-		@touch($path, $now);
-		@chmod($path, 0660);
-
-		// Opportunistically purge a handful of expired entries (~2% chance)
-		$this->purgeSomeExpired($ttlSeconds);
-
+		$this->maybePurge($nsDir, $ttlSeconds);
 		return true;
 	}
 
-	/**
-	 * Builds the absolute on-disk path for a given nonce.
-	 *
-	 * Nonce values are never used directly as filenames. Instead, a HASH_ALGO hash
-	 * of the raw nonce is taken and suffixed with EXT (".nonce"). This ensures
-	 * a fixed, safe filename length and prevents path traversal attacks or
-	 * unexpected characters from influencing the filesystem.
-	 *
-	 * Example:
-	 *   nonce = "abc123"
-	 *   => hash = HASH_ALGO("abc123")  // e.g., sha256 hex string
-	 *   => path = /var/.../nonces/<hex>.nonce
-	 *
-	 * Notes:
-	 * - Verifies once per process that HASH_ALGO is available.
-	 *
-	 * @param string $nonce Raw nonce string.
-	 * @return string       Absolute filesystem path where the nonce is stored.
-	 * @throws \RuntimeException If the configured HASH_ALGO is not available.
-	 */
-	private function buildPath(string $nonce): string {
-		// Verify the configured algorithm is available (very cheap, done on demand)
-		static $algoChecked = false;
-		if (!$algoChecked) {
-			
-			// Run this block only once per process (static guard)
-			$algoChecked = true;
-			
-			// Verify that the configured HASH_ALGO is supported by the current PHP build
-			if (!in_array(static::HASH_ALGO, hash_algos(), true)) {
-				
-				// Fail fast if the chosen algorithm is not available
-				throw new \RuntimeException('Nonce: unsupported hash algorithm: ' . static::HASH_ALGO);
-			}
-		}
-
-		// Derive a fixed-length hex filename from the nonce
-		$hash = hash(static::HASH_ALGO, $nonce);
-
-		// Append the configured directory and the static extension
-		return $this->dir . DIRECTORY_SEPARATOR . $hash . self::EXT;
-	}
-
 
 	/**
-	 * Ensures the nonce directory exists, resides under /var/, and is writable.
+	 * Deterministically prune expired nonces in a namespace.
 	 *
-	 * Behavior:
-	 * - Creates the directory with mode 0775 if it does not exist (recursive).
-	 * - Resolves the canonical path via realpath() and rejects if outside
-	 *   CITOMNI_APP_PATH . '/var/' (defense-in-depth).
-	 * - Returns a boolean instead of throwing to keep hot-path lean.
+	 * Intended for CLI cron usage. Scans up to $max entries in the namespace
+	 * directory and removes those whose mtime is older than $ttlSeconds.
 	 *
-	 * Notes:
-	 * - Suppresses warnings and leaves the caller to act on false.
-	 *
-	 * @return bool True if directory is valid and writable; false otherwise.
+	 * @param  string  $namespace    Logical bucket name.
+	 * @param  int     $ttlSeconds   Age threshold for removal.
+	 * @param  int     $max          Maximum entries to scan in one call.
+	 * @return int                   Number of files actually removed.
 	 */
-	private function ensureDir(): bool {
-		// Create directory lazily; suppress warnings (caller handles false return).
-		if (!is_dir($this->dir)) {
-			@mkdir($this->dir, 0775, true);
-			if (!is_dir($this->dir)) return false;
-		}
-
-		// Resolve canonical path; fail if it cannot be resolved.
-		$real = @realpath($this->dir);
-		if ($real === false) return false;
-
-		// Must be inside CITOMNI_APP_PATH . /var/ (prevents path traversal / symlink escape).
-		if (strpos($real, CITOMNI_APP_PATH . DIRECTORY_SEPARATOR . 'var' . DIRECTORY_SEPARATOR) !== 0) return false;
-
-		// Finally, require that the resolved directory is writable.
-		return is_writable($real);
-	}
-
-
-	/**
-	 * Opportunistically purges a bounded number of expired nonce files.
-	 *
-	 * Behavior:
-	 * - ~2 percent random trigger to keep overhead negligible.
-	 * - Inspects up to 25 relevant entries per sweep.
-	 * - Deletes files whose age (now - mtime) >= $ttlSeconds.
-	 *
-	 * Design:
-	 * - Probabilistic trigger (~2% per call) to keep hot-path overhead negligible.
-	 * - Processes at most `$limit` relevant entries per sweep (files with .nonce).
-	 * - A file is considered expired if (now - mtime) >= $ttlSeconds.
-	 * - Suppresses FS warnings to remain lean (caller doesn't need reasons here).
-	 *
-	 * Notes:
-	 * - Suppresses filesystem warnings; this is best-effort maintenance.
-	 *
-	 * @param int $ttlSeconds TTL threshold in seconds; non-positive values are ignored.
-	 * @return void
-	 */
-	private function purgeSomeExpired(int $ttlSeconds): void {
-		// Guard: ignore nonsensical TTL values (defense-in-depth).
-		if ($ttlSeconds <= 0) {
-			return;
-		}
-
-		// Random gate (~2%): adjust the denominator to tune frequency.
-		if (mt_rand(1, 50) !== 1) {
-			return;
-		}
-
-		// Try opening the directory; abort quietly if not available.
-		$dir = @opendir($this->dir);
-		if ($dir === false) {
-			return;
-		}
-
-		$now = time();
-		$limit = 25;     // Hard cap: max number of relevant entries to inspect this sweep.
-		$processed = 0;  // Count only entries that pass extension + is_file checks.
-
-		while (($entry = readdir($dir)) !== false) {
-			// Skip special entries
-			if ($entry === '.' || $entry === '..') continue;
-
-			// Consider only entries with the expected nonce extension
-			if (!$this->hasExt($entry)) continue;
-
-			$path = $this->dir . DIRECTORY_SEPARATOR . $entry;
-
-			// Ensure it's a regular file (ignore dirs/symlinks)
-			if (!is_file($path)) continue;
-
-			// If mtime retrieval fails, skip rather than treating as "very old"
-			$mt = @filemtime($path);
-			if ($mt !== false) {
-				$age = $now - (int)$mt;
-				if ($age >= $ttlSeconds) {
-					@unlink($path);
-				}
-			}
-
-			// Decrement cap only for relevant entries we actually processed
-			$processed++;
-			if ($processed >= $limit) {
-				break;
-			}
-		}
-
-		@closedir($dir);
-	}
-
-
-	/**
-	 * Purges up to $max expired nonce files (bulk cleanup).
-	 *
-	 * Behavior:
-	 * - Iterates relevant entries and deletes those with age >= $ttlSeconds.
-	 * - Bounded by $max to avoid long-running sweeps.
-	 *
-	 * Design:
-	 * - Iterates directory entries and deletes files with the expected extension
-	 *   whose mtime indicates age >= $ttlSeconds.
-	 * - Suppresses FS warnings to keep the call lean; returns number of deletions.
-	 * - Bounded by $max to avoid long-running sweeps.
-	 *
-	 * Typical usage:
-	 *   $removed = $this->app->nonce->purgeAllExpired(300, 1000);
-	 *
-	 * Notes:
-	 * - Returns number of files removed; suppresses filesystem warnings.
-	 *
-	 * @param int $ttlSeconds TTL threshold in seconds; non-positive disables purge.
-	 * @param int $max        Maximum number of relevant entries to inspect (>=1).
-	 * @return int            Number of files successfully removed.
-	 */
-	public function purgeAllExpired(int $ttlSeconds, int $max = 500): int {
-		// Guard: ignore nonsensical inputs
+	public function purgeExpired(string $namespace, int $ttlSeconds, int $max = 500): int {
 		if ($ttlSeconds <= 0 || $max <= 0) {
 			return 0;
 		}
-
-		// Quick existence check (no creation here)
-		if (!is_dir($this->dir)) {
+		if (!\preg_match(self::NAMESPACE_PATTERN, $namespace)) {
 			return 0;
 		}
 
-		$now = time();
-		$removed = 0;
+		$nsDir = $this->rootDir . \DIRECTORY_SEPARATOR . $namespace;
+		if (!\is_dir($nsDir)) {
+			return 0;
+		}
 
-		// Open directory (suppress warnings and bail out cleanly on failure)
-		$dh = @opendir($this->dir);
+		$dh = @\opendir($nsDir);
 		if ($dh === false) {
 			return 0;
 		}
 
-		// Only count "relevant" entries against $max (files with correct extension)
+		$now = \time();
+		$removed = 0;
 		$processed = 0;
 
-		while ($processed < $max && ($e = readdir($dh)) !== false) {
-			// Skip special entries
-			if ($e === '.' || $e === '..') {
+		while ($processed < $max && ($entry = \readdir($dh)) !== false) {
+			if ($entry === '.' || $entry === '..' || !$this->hasNonceExt($entry)) {
 				continue;
 			}
-
-			// Consider only files with the expected nonce extension
-			if (!$this->hasExt($e)) {
+			$path = $nsDir . \DIRECTORY_SEPARATOR . $entry;
+			if (!\is_file($path)) {
 				continue;
 			}
-
-			$path = $this->dir . DIRECTORY_SEPARATOR . $e;
-
-			// Ensure it's a regular file (skip dirs/symlinks)
-			if (!is_file($path)) {
-				continue;
-			}
-
-			// Retrieve mtime; if it fails, skip rather than assuming "very old"
-			$mt = @filemtime($path);
-			if ($mt !== false) {
-				$age = $now - (int)$mt;
-				if ($age >= $ttlSeconds) {
-					if (@unlink($path)) {
-						$removed++;
-					}
+			$mt = @\filemtime($path);
+			if ($mt !== false && ($now - (int)$mt) >= $ttlSeconds) {
+				if (@\unlink($path)) {
+					$removed++;
 				}
 			}
-
-			// Count only relevant entries that we inspected
 			$processed++;
 		}
+		@\closedir($dh);
 
-		@closedir($dh);
 		return $removed;
 	}
 
 
-	/**
-	 * Checks if a filename ends with the expected nonce file extension.
-	 *
-	 * Behavior & design:
-	 * - Uses strlen + substr for speed and clarity.
-	 * - Ensures name length is >= extension length before checking.
-	 * - Prevents accidental matches on short or unrelated names.
-	 *
-	 * @param string $name Filename to check (basename only, not full path).
-	 * @return bool        True if filename ends with self::EXT; false otherwise.
-	 */
-	private function hasExt(string $name): bool {
-		// Compute extension length once
-		$len = strlen(self::EXT);
 
-		// Guard: skip names shorter than extension
-		if (strlen($name) < $len) {
-			return false;
+
+
+
+
+
+	// ----------------------------------------------------------------
+	// Internal helpers
+	// ----------------------------------------------------------------
+
+	/**
+	 * Ensure the per-namespace subdirectory exists and is writable.
+	 *
+	 * The result is memoized per request to avoid repeated stat() calls when
+	 * the same namespace is hit multiple times.
+	 *
+	 * @param  string   $namespace
+	 * @return string|null  Absolute namespace directory, or null on failure.
+	 */
+	private function ensureNamespaceDir(string $namespace): ?string {
+		$nsDir = $this->rootDir . \DIRECTORY_SEPARATOR . $namespace;
+
+		if (isset($this->ensuredNamespaces[$namespace])) {
+			return $nsDir;
 		}
 
-		// Compare trailing substring against extension (strict match)
-		return substr($name, -$len) === self::EXT;
+		if (!\is_dir($nsDir)) {
+			@\mkdir($nsDir, $this->dirMode, true);
+			if (!\is_dir($nsDir)) {
+				return null;
+			}
+		}
+		if (!\is_writable($nsDir)) {
+			return null;
+		}
+
+		$this->ensuredNamespaces[$namespace] = true;
+		return $nsDir;
+	}
+
+
+	/**
+	 * Probabilistic, bounded scan for expired entries.
+	 *
+	 * Designed to keep amortized cost near zero while preventing unbounded
+	 * directory growth on busy ledgers. Failures are silent - purging is
+	 * housekeeping, not load-bearing.
+	 *
+	 * @param  string  $nsDir
+	 * @param  int     $ttlSeconds
+	 * @return void
+	 */
+	private function maybePurge(string $nsDir, int $ttlSeconds): void {
+		if (\mt_rand(1, $this->purgeProbability) !== 1) {
+			return;
+		}
+
+		$dh = @\opendir($nsDir);
+		if ($dh === false) {
+			return;
+		}
+
+		$now = \time();
+		$processed = 0;
+
+		while ($processed < $this->purgeLimit && ($entry = \readdir($dh)) !== false) {
+			if ($entry === '.' || $entry === '..' || !$this->hasNonceExt($entry)) {
+				continue;
+			}
+			$path = $nsDir . \DIRECTORY_SEPARATOR . $entry;
+			if (!\is_file($path)) {
+				continue;
+			}
+			$mt = @\filemtime($path);
+			if ($mt !== false && ($now - (int)$mt) >= $ttlSeconds) {
+				@\unlink($path);
+			}
+			$processed++;
+		}
+		@\closedir($dh);
+	}
+
+
+	/**
+	 * Cheap suffix check that avoids full pathinfo() overhead.
+	 */
+	private function hasNonceExt(string $name): bool {
+		$len = \strlen(self::EXT);
+		return \strlen($name) >= $len && \substr($name, -$len) === self::EXT;
 	}
 
 }

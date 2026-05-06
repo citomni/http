@@ -15,655 +15,765 @@ declare(strict_types=1);
 
 namespace CitOmni\Http\Service;
 
+use CitOmni\Http\Enum\WebhooksAuthFailureReason;
+use CitOmni\Http\Exception\WebhooksAuthConfigException;
+use CitOmni\Http\Exception\WebhooksAuthVerificationException;
+use CitOmni\Kernel\Cfg;
 use CitOmni\Kernel\Service\BaseService;
 
-
 /**
- * WebhooksAuth: HMAC-based verification for administrative webhook requests.
+ * WebhooksAuth: HMAC-authenticated webhook verification with TTL and replay protection.
  *
- * Responsibilities:
- * - Enforce a layered authorization policy for inbound webhooks:
- *   1) Feature switch (enabled)
- *   2) Optional source IP allow-list (exact or IPv4 CIDR)
- *   3) Required headers (timestamp, nonce, signature)
- *   4) Freshness window (TTL) with clock-skew tolerance
- *   5) Nonce uniqueness via the App's Nonce service (replay protection)
- *   6) Constant-time HMAC verification over a canonical base string
- * - Offer two caller interfaces:
- *   - guard(): boolean convenience that never throws
- *   - assertAuthorized(): strict validation that throws on failure
+ * Verifies inbound webhook requests against a side-effect-free HMAC scheme:
+ *   - Signature is computed over a canonical base string (simple or context-bound).
+ *   - Timestamp must fall inside a freshness window (TTL plus clock-skew tolerance).
+ *   - Nonce must be unique across the full timestamp acceptance window
+ *     (replay protection via Nonce service).
+ *   - Optional source-IP allow-list restricts traffic to known peers (exact or CIDR).
  *
- * Collaborators:
- * - $this->app->nonce (read/write) - persists single-use nonces for replay protection.
+ * API surface mirrors the CSRF service so adapters can pick the flow that fits:
+ *   - verify():           bool, never throws - for "swallow + log + 404" patterns.
+ *   - requireValid():     throws WebhooksAuthVerificationException - for fail-fast/API.
+ *   - requireOrAbort():   delegates to errorHandler->httpError(); never returns on failure.
  *
- * Configuration keys:
- * - webhooks.enabled (bool) - master enable switch (default true)
- * - webhooks.secret_file (string) - absolute path to a side-effect-free PHP file
- *   that returns ['secret' => <hex>, 'algo' => 'sha256'|'sha512' (optional)]
- * - webhooks.ttl_seconds (int) - max age for requests (default 300)
- * - webhooks.ttl_clock_skew_tolerance (int) - +/- seconds tolerance (default 60)
- * - webhooks.allowed_ips (string[]) - exact IPs or IPv4 CIDR
- * - webhooks.nonce_dir (string) - directory for the nonce ledger
- * - webhooks.algo (string) - "sha256" or "sha512" (default "sha256"); if omitted,
- *   and the secret file contains 'algo', the file's value is used.
- * - webhooks.bind_context (bool) - include method/path/query/body hash in HMAC base (default false)
- * - webhooks.header_signature (string) - server key for signature header (default "HTTP_X_CITOMNI_SIGNATURE")
- * - webhooks.header_timestamp (string) - server key for timestamp header (default "HTTP_X_CITOMNI_TIMESTAMP")
- * - webhooks.header_nonce (string) - server key for nonce header (default "HTTP_X_CITOMNI_NONCE")
+ * Behavior:
+ * - When cfg.webhooks.enabled is false, all verification methods report failure
+ *   with reason Disabled. This is intentional - a disabled webhook surface must
+ *   not silently accept any request, only reject every request.
+ * - The HMAC secret is loaded from a side-effect-free PHP file at init time.
+ *   The cfg never carries the secret value itself.
+ * - The HMAC algorithm precedence is: cfg.webhooks.algo > secret_file 'algo' > 'sha256'.
+ * - Source IP is resolved through Request::ip() first (which honors the
+ *   configured trusted-proxy whitelist for public traffic), then falls back
+ *   to $_SERVER['REMOTE_ADDR'] when Request::ip() reports 'unknown' or 'CLI'.
+ *   This widens matching to private/internal peers (Docker, LAN, localhost
+ *   cron) where Request::ip()'s "must be public" contract is too strict.
+ * - Logging goes through the log service when available and enabled. The service
+ *   never writes directly to files.
  *
- * Behavior
- *   Verifies admin webhook requests using an HMAC signature, TTL with clock-skew
- *   tolerance, optional IP allow‑list, and a nonce ledger to block replays.
- *
- *   Default signature base string: "<ts>.<nonce>.<rawBody>" (HMAC).
- *   If `bind_context=true`, the canonical string becomes a multi-line block:
- *   ts + "\n" + nonce + "\n" + method + "\n" + path + "\n" + query + "\n" + sha256(rawBody)
- *   which strengthens request binding at the cost of requiring your client to
- *   include these values consistently.
- *
- * Error handling:
- * - Fail fast in assertAuthorized() with a precise \RuntimeException reason.
- * - guard() intentionally catches all throwables and returns false for lean call sites that only need a boolean.
- *
- * Typical usage in a controller:
- *
- *   $rawBody = \file_get_contents('php://input') ?: '';
- *   $res = $this->app->webhooksAuth
- *          ->setOptions($this->app->cfg->webhooks)
- *          ->guard($_SERVER, $rawBody);
- *   if ($res) {
- *       // Authorized - perform the sensitive action
- *   }
- *
- * Examples:
- *
- *   // Strict path: throw on failure, let global error handler log.
- *   $this->app->webhooksAuth
- *       ->setOptions($this->app->cfg->webhooks)
- *       ->assertAuthorized($_SERVER, $rawBody);
- *   // If we reach here, authorization passed - proceed
- *
- *   // Enabling context binding for stronger request coupling:
- *   $this->app->webhooksAuth->setOptions([
- *       'enabled' => true,
- *       'secret_file' => CITOMNI_APP_PATH . '/var/secrets/webhooks.secret.php',
- *       'nonce_dir' => CITOMNI_APP_PATH . '/var/nonces',
- *       'bind_context' => true, // binds method, path, query, and body hash
- *       'allowed_ips' => ['203.0.113.0/24', '198.51.100.10'],
- *   ])->assertAuthorized($_SERVER, $rawBody);
- *
- * Failure:
- *
- *   // Missing nonce_dir or secret (when enabled) will fail fast:
- *   $this->app->webhooksAuth->setOptions(['enabled' => true])->assertAuthorized($_SERVER, $rawBody);
- *   // Throws \RuntimeException that bubbles to the global error handler
- *
- * Canonical HMAC base string:
- * - Simple mode (bind_context = false):
- *   "<ts>.<nonce>.<rawBody>"
- * - Context-bound mode (bind_context = true):
- *   ts + "\n" + nonce + "\n" + METHOD + "\n" + PATH + "\n" + QUERY + "\n" + sha256(rawBody)
- *
- * Expected headers (customizable via setOptions):
- * - X-Citomni-Timestamp : UNIX seconds when the signature was created.
- * - X-Citomni-Nonce     : Unique, single-use identifier per request.
- * - X-Citomni-Signature : Hex HMAC of the base string (see `algo`).
- *
- * Options object shape (stdClass or array-access):
- * - enabled (bool)                         default: true
- * - secret_file (string)                   required when enabled; absolute path to side-effect-free PHP file
- * - nonce_dir (string)                     required when enabled; writable directory for nonce ledger
- * - ttl_seconds (int)                      default: 300
- * - ttl_clock_skew_tolerance (int)         default: 60
- * - allowed_ips (string[])                 default: []
- * - algo (string)                          default: 'sha256'  // 'sha256' or 'sha512'
- * - bind_context (bool)                    default: false
- * - header_signature (string)              default: 'HTTP_X_CITOMNI_SIGNATURE'
- * - header_timestamp (string)              default: 'HTTP_X_CITOMNI_TIMESTAMP'
- * - header_nonce (string)                  default: 'HTTP_X_CITOMNI_NONCE'
+ * Canonical base strings (selected by cfg.webhooks.bind_context):
+ * - bind_context = false (loose):
+ *       <ts> "." <nonce> "." <rawBody>
+ * - bind_context = true (default, stricter):
+ *       <ts> "\n" <nonce> "\n" <METHOD> "\n" <PATH> "\n" <QUERY> "\n" sha256(rawBody)
  *
  * Notes:
- * - Nonces are persisted/checked via the App's Nonce service:
- *     $this->app->nonce->setOptions((object)['dir' => $this->nonceDir])->checkAndStore(...)
- * - `allowed_ips` supports exact matches and IPv4 CIDR blocks (IPv6 can be added later).
- * - `guard()` returns bool; `assertAuthorized()` throws \RuntimeException with a precise reason.
+ * - The body hash inside the context-bound base string is always SHA-256,
+ *   regardless of HMAC algorithm. This matches common public schemes and
+ *   keeps client implementations simple.
+ * - Body bytes are read from php://input once and cached for the request.
+ *
+ * Config node: webhooks
+ *   - enabled               bool      Master switch (default false).
+ *   - secret_file           string    Absolute path to side-effect-free PHP file returning array{secret:string,algo?:string}.
+ *   - ttl_seconds           int       Maximum age of a request in seconds (default 300).
+ *   - ttl_clock_skew_tolerance int    Tolerated clock drift on either side (default 60).
+ *   - allowed_ips           array     Empty = no IP restriction. Entries: exact IPv4/IPv6, or CIDR.
+ *   - algo                  ?string   'sha256' or 'sha512'. Null defers to secret file or default.
+ *   - bind_context          bool      Bind signature to METHOD/PATH/QUERY/body-hash (default true).
+ *   - header_signature      string    $_SERVER key for the signature header.
+ *   - header_timestamp      string    $_SERVER key for the timestamp header.
+ *   - header_nonce          string    $_SERVER key for the nonce header.
+ *   - log_failures          bool      Write failure events to the log service (default true).
+ *   - log_successes         bool      Write success events to the log service (default false).
+ *   - log_file              string    Log filename used by the log service (default 'webhooks.jsonl').
+ *
+ * Typical usage:
+ *
+ *   // Common case: terminate on failure, return raw body on success.
+ *   $body = $this->app->webhooksAuth->requireOrAbort();
+ *
+ *   // Bool flow (custom error response):
+ *   if (!$this->app->webhooksAuth->verify()) {
+ *       $reason = $this->app->webhooksAuth->getLastFailureReason();
+ *       // ...
+ *   }
+ *
+ *   // Fail-fast / API:
+ *   try {
+ *       $body = $this->app->webhooksAuth->requireValid();
+ *   } catch (WebhooksAuthVerificationException $e) {
+ *       // $e->reason === WebhooksAuthFailureReason::*
+ *   }
+ *
+ * @throws WebhooksAuthConfigException        On invalid config at init time.
+ * @throws WebhooksAuthVerificationException  On verification failure (requireValid only).
  */
-class WebhooksAuth extends BaseService {
+final class WebhooksAuth extends BaseService {
 
-	// Master enable/disable switch for webhook auth (fast bypass if false)
-	private bool $enabled = true;
-	
-	// Shared secret key used for HMAC signature validation
+	/** Nonce namespace passed to the Nonce service. */
+	private const NONCE_NAMESPACE = 'webhooks';
+
+	/** Default HMAC algorithm when neither cfg nor secret file specifies one. */
+	private const DEFAULT_ALGO = 'sha256';
+
+	/** Algorithms supported by this service. */
+	private const SUPPORTED_ALGOS = ['sha256', 'sha512'];
+
+	/** Expected hex signature length per algorithm. */
+	private const SIGNATURE_HEX_LENGTH = ['sha256' => 64, 'sha512' => 128];
+
+
+	// ---- Configuration (resolved once in init) ----------------------
+
+	private bool $enabled = false;
 	private string $secret = '';
-	
-	// Maximum allowed request age in seconds (rejects stale/replayed requests)
+	private string $algo = self::DEFAULT_ALGO;
+	private int $signatureHexLength = 64;
 	private int $ttlSeconds = 300;
-	
-	// Extra tolerance in seconds for clock skew between client and server
 	private int $clockSkew = 60;
-	
-	// Last failure reason; null on success or not called yet.
-	private ?string $lastError = null;
+	private bool $bindContext = true;
 
-	// Optional IP allow-list (supports exact match and IPv4 CIDR)
-	/** @var string[] */
+	/** @var array<int, string> Pre-trimmed allow-list entries (exact IPs or CIDRs). */
 	private array $allowedIps = [];
-	
-	// Filesystem directory for nonce storage (prevents replay attacks)
-	private string $nonceDir = '';
-	
-	// HMAC algorithm to use for signature generation (sha256 or sha512)
-	private string $algo = 'sha256';
-	
-	// Whether to bind signature to method, path, query, and body hash
-	private bool $bindContext = false;
 
-	// Filesystem path to secret file (side-effect free; returns array)
-	private string $secretFile = '';
+	private string $headerSignature = 'HTTP_X_CITOMNI_SIGNATURE';
+	private string $headerTimestamp = 'HTTP_X_CITOMNI_TIMESTAMP';
+	private string $headerNonce     = 'HTTP_X_CITOMNI_NONCE';
 
-	// Header keys (mapped from $_SERVER by PHP)
-	// Header carrying the computed HMAC signature
-	private string $hSignature = 'HTTP_X_CITOMNI_SIGNATURE';
-	
-	// Header carrying the client-supplied UNIX timestamp
-	private string $hTimestamp = 'HTTP_X_CITOMNI_TIMESTAMP';
-	
-	// Header carrying the client-supplied unique nonce
-	private string $hNonce = 'HTTP_X_CITOMNI_NONCE';
+	private bool $logFailures = true;
+	private bool $logSuccesses = false;
+	private string $logFile = 'webhooks.jsonl';
 
+
+	// ---- Per-request state ------------------------------------------
+
+	/** Cached raw request body (php://input is read at most once per request). */
+	private ?string $cachedBody = null;
+
+	/** Last verification failure reason, or null after a successful verify(). */
+	private ?WebhooksAuthFailureReason $lastFailureReason = null;
+
+
+
+
+
+	// ----------------------------------------------------------------
+	// Initialization
+	// ----------------------------------------------------------------
 
 	/**
-	 * Service bootstrap hook.
+	 * Read cfg.webhooks, validate, and resolve the signing secret.
 	 *
 	 * Behavior:
-	 * - Keep initialization minimal for cold-start performance.
-	 *
-	 * Notes:
-	 * - This service does not keep internal state; no warm-up required.
-	 *
-	 * Typical usage:
-	 *   // Nothing to call explicitly; the app constructs the service as needed.
+	 * - Always reads non-secret scalars from cfg so isEnabled() is accurate
+	 *   regardless of whether webhooks are active.
+	 * - Loads and validates the secret file only when enabled is true.
+	 *   When disabled, the service is constructed cheaply and rejects every
+	 *   verification call with reason Disabled.
 	 *
 	 * @return void
+	 * @throws WebhooksAuthConfigException On any invalid configuration.
 	 */
-	/* 
 	protected function init(): void {
-		// Intentionally empty (lean boot).
-	}
-	*/
+		$c = $this->app->cfg->webhooks;
 
+		$this->enabled = (bool)($c->enabled ?? false);
 
-	/**
-	 * Apply WebhooksAuth options from an array or object.
-	 *
-	 * Accepts either an associative array or an object (e.g., stdClass) with the following keys:
-	 *
-	 * Required when `enabled=true`:
-	 * - secret_file (string)   // path to PHP file that returns ['secret' => <hex>, 'algo' => ...]
-	 * - nonce_dir (string)     // writable directory for nonce ledger
-	 *
-	 * Optional:
-	 * - enabled (bool)                      default: true
-	 * - ttl_seconds (int)                   default: 300
-	 * - ttl_clock_skew_tolerance (int)      default: 60
-	 * - allowed_ips (string[])              default: []
-	 * - algo (string)                       default: 'sha256'  // 'sha256' or 'sha512'
-	 * - bind_context (bool)                 default: false
-	 * - header_signature (string)           default: 'HTTP_X_CITOMNI_SIGNATURE'
-	 * - header_timestamp (string)           default: 'HTTP_X_CITOMNI_TIMESTAMP'
-	 * - header_nonce (string)               default: 'HTTP_X_CITOMNI_NONCE'
-	 *
-	 * Behavior:
-	 * - Normalizes and stores configuration without performing IO.
-	 * - Validates only when enabled to keep overhead low.
-	 *
-	 * Notes:
-	 * - Options are validated only when `enabled=true`. Missing required pieces cause RuntimeException.
-	 * - Minimal overhead by design; disk checks for nonce_dir existence/writability are intentionally
-	 *   not performed here (can be handled by the Nonce service on first write).
-	 *
-	 * Typical usage:
-	 *   $this->app->webhooksAuth->setOptions($this->app->cfg->webhooks);
-	 *
-	 * @param array|object $opts Options payload (array or object with public properties).
-	 * @return self
-	 * @throws \RuntimeException If required values are missing or invalid when enabled.
-	 */
-	public function setOptions($opts): self {
-		
-		// Small local getter: returns $src[$key] or $src->{$key}, else $default.
-		$get = static function ($src, string $key, $default = null) {
-			if (is_array($src) && array_key_exists($key, $src)) return $src[$key];
-			if (is_object($src) && isset($src->{$key})) return $src->{$key};
-			return $default;
-		};
+		$this->ttlSeconds = (int)($c->ttl_seconds ?? 300);
+		$this->clockSkew  = (int)($c->ttl_clock_skew_tolerance ?? 60);
+		$this->bindContext = (bool)($c->bind_context ?? true);
 
-		// Core toggles and parameters
-		$this->enabled = (bool)$get($opts, 'enabled', true);
-		$this->ttlSeconds = (int)$get($opts, 'ttl_seconds', 300);
-		$this->clockSkew = (int)$get($opts, 'ttl_clock_skew_tolerance', 60);
-		$this->algo = strtolower((string)$get($opts, 'algo', 'sha256')); // normalize for comparison
-		$this->bindContext = (bool)$get($opts, 'bind_context', false);
-		
-		// Normalize allowed_ips: accept only scalar strings/ints; ignore arrays/objects/null.
-		$rawAllowed = (array)$get($opts, 'allowed_ips', []);
-		$allowed = [];
-		foreach ($rawAllowed as $item) {
-			if (\is_string($item) || \is_int($item)) {
-				$val = \trim((string)$item);
-				if ($val !== '') {
-					$allowed[] = $val;
-				}
-			}
-			// Non-scalar entries are ignored to avoid "Array to string conversion".
+		$this->headerSignature = (string)($c->header_signature ?? 'HTTP_X_CITOMNI_SIGNATURE');
+		$this->headerTimestamp = (string)($c->header_timestamp ?? 'HTTP_X_CITOMNI_TIMESTAMP');
+		$this->headerNonce     = (string)($c->header_nonce     ?? 'HTTP_X_CITOMNI_NONCE');
+
+		$this->logFailures  = (bool)($c->log_failures  ?? true);
+		$this->logSuccesses = (bool)($c->log_successes ?? false);
+		$this->logFile      = (string)($c->log_file ?? 'webhooks.jsonl');
+
+		// allowed_ips - may be a Cfg instance (empty array) or a list (non-empty).
+		$rawAllowed = $c->allowed_ips ?? [];
+		if ($rawAllowed instanceof Cfg) {
+			$rawAllowed = $rawAllowed->toArray();
 		}
-		$this->allowedIps = $allowed;
+		$this->allowedIps = $this->normalizeAllowedIps((array)$rawAllowed);
 
-		// nonce_dir: prefer explicit option; fallback to cfg->webhooks->nonce_dir; else empty (validated below if enabled)
-		$nonceDir = $get($opts, 'nonce_dir', null);
-
-		if ($nonceDir === null) {
-			// use ArrayAccess so we don't blow up if 'webhooks' node doesn't exist at all
-			if (isset($this->app->cfg['webhooks']) && isset($this->app->cfg['webhooks']['nonce_dir'])) {
-				$nonceDir = $this->app->cfg['webhooks']['nonce_dir'];
+		// Algo from cfg is meaningful only when present as a non-empty string.
+		// Note: PHP's ?? falls back to RHS when __get() returns null even though
+		// __isset() returns true, so 'algo' => null in baseline correctly defers
+		// to the file's algo or the default. See SUPPORTED_ALGOS for valid values.
+		$cfgAlgo = '';
+		$cfgAlgoRaw = $c->algo ?? null;
+		if (\is_string($cfgAlgoRaw) && $cfgAlgoRaw !== '') {
+			$cfgAlgo = \strtolower($cfgAlgoRaw);
+			if (!\in_array($cfgAlgo, self::SUPPORTED_ALGOS, true)) {
+				throw new WebhooksAuthConfigException(
+					"WebhooksAuth: cfg.webhooks.algo must be one of " . \implode('|', self::SUPPORTED_ALGOS) . " (got '{$cfgAlgo}')."
+				);
 			}
 		}
 
-		$this->nonceDir = (string)$nonceDir;
-		
-		// Pick up secret_file (defaulting to baseline path if desired)
-		$this->secretFile = (string)$get($opts, 'secret_file', CITOMNI_APP_PATH . '/var/secrets/webhooks.secret.php');
-
-		// Load secret (and maybe algo) from file immediately
-		$this->loadSecretFromFile($this->secretFile);
-
-		// Header keys as seen in $_SERVER (can be overridden)
-		$this->hSignature = (string)$get($opts, 'header_signature', 'HTTP_X_CITOMNI_SIGNATURE');
-		$this->hTimestamp = (string)$get($opts, 'header_timestamp', 'HTTP_X_CITOMNI_TIMESTAMP');
-		$this->hNonce = (string)$get($opts, 'header_nonce', 'HTTP_X_CITOMNI_NONCE');
-
-		// Fail fast if enabled and required pieces are missing/invalid
-		if ($this->enabled) {
-			
-			// Secret must be found in valid secret-file
-			if ($this->secret === '') {
-				throw new \RuntimeException('WebhooksAuth: Missing HMAC secret (expected via secret_file).');
-			}
-			// Nonce directory path must be provided (existence/writability is validated lazily by the Nonce service)
-			if ($this->nonceDir === '') {
-				throw new \RuntimeException('WebhooksAuth: Missing nonce_dir.');
-			}
-			// TTL must be positive (0 disables all requests instantly)
-			if ($this->ttlSeconds < 1) {
-				throw new \RuntimeException('WebhooksAuth: ttl_seconds must be >= 1.');
-			}
-			// Clock skew must be non-negative
-			if ($this->clockSkew < 0) {
-				throw new \RuntimeException('WebhooksAuth: ttl_clock_skew_tolerance must be >= 0.');
-			}
-			// Only allow known algorithms
-			if ($this->algo !== 'sha256' && $this->algo !== 'sha512') {
-				throw new \RuntimeException('WebhooksAuth: Unsupported algo (expected sha256 or sha512).');
-			}
+		if (!$this->enabled) {
+			// Resolve algo from cfg only (file not loaded when disabled), so
+			// signatureHexLength has a sane value should isEnabled() be ignored.
+			$this->algo = $cfgAlgo !== '' ? $cfgAlgo : self::DEFAULT_ALGO;
+			$this->signatureHexLength = self::SIGNATURE_HEX_LENGTH[$this->algo];
+			return;
 		}
 
-		return $this;
+		// Enabled path: validate the rest and load the secret.
+		if ($this->ttlSeconds < 1) {
+			throw new WebhooksAuthConfigException('WebhooksAuth: cfg.webhooks.ttl_seconds must be >= 1.');
+		}
+		if ($this->clockSkew < 0) {
+			throw new WebhooksAuthConfigException('WebhooksAuth: cfg.webhooks.ttl_clock_skew_tolerance must be >= 0.');
+		}
+		if ($this->headerSignature === '' || $this->headerTimestamp === '' || $this->headerNonce === '') {
+			throw new WebhooksAuthConfigException('WebhooksAuth: header_signature, header_timestamp, and header_nonce must be non-empty.');
+		}
+
+		$secretFile = (string)($c->secret_file ?? '');
+		if ($secretFile === '') {
+			throw new WebhooksAuthConfigException('WebhooksAuth: cfg.webhooks.secret_file is required when enabled.');
+		}
+
+		$loaded = $this->loadSecretFile($secretFile);
+		$fileAlgo = $loaded['algo'];
+
+		// Algo precedence: cfg > file > default.
+		$resolvedAlgo = $cfgAlgo !== ''
+			? $cfgAlgo
+			: ($fileAlgo !== null ? $fileAlgo : self::DEFAULT_ALGO);
+
+		$this->algo = $resolvedAlgo;
+		$this->signatureHexLength = self::SIGNATURE_HEX_LENGTH[$this->algo];
+		$this->secret = $loaded['secret'];
 	}
 
 
+
+
+
+
+
+
+	// ----------------------------------------------------------------
+	// Verification (public API)
+	// ----------------------------------------------------------------
+
 	/**
-	 * Performs a soft authorization check for incoming webhook requests.
+	 * Verify the current request without throwing.
 	 *
-	 * This is a convenience wrapper around {@see assertAuthorized()}:
-	 * - Returns true if the request is authorized.
-	 * - Returns false if any validation step fails.
+	 * On failure, records the reason (retrievable via getLastFailureReason())
+	 * and returns false. On success, clears the last reason and returns true.
 	 *
-	 * Diagnostics:
-	 * - Never throws. On failure, the last failure reason is captured internally
-	 *   and can be retrieved via {@see WebhooksAuth::getLastError()}.
-	 * - On success, the internal failure state is cleared.
-	 *
-	 * Notes:
-	 * - This method is suitable when the caller only needs a boolean and logging
-	 *   is handled centrally. The failure reason is *not* sent to the client.
-	 * - The stored last error is per-service instance; do not rely on it across
-	 *   concurrent requests/processes.
-	 *
-	 * Example:
-	 *   if ($this->app->webhooksAuth->guard($_SERVER, $rawBody)) {
-	 *       // Authorized
-	 *   } else {
-	 *       // Failed; fetch internal reason for logs/metrics:
-	 *       $reason = $this->app->webhooksAuth->getLastError();
-	 *   }
-	 *
-	 * @param array  $server  Typically the $_SERVER superglobal.
-	 * @param string $rawBody Raw request body (as read from php://input).
-	 * @return bool           True if authorized; false otherwise.
+	 * @return bool True if the request authenticates, false otherwise.
 	 */
-	public function guard(array $server, string $rawBody): bool {
+	public function verify(): bool {
 		try {
-			// Attempt full authorization, throws on any failure.
-			$this->assertAuthorized($server, $rawBody);
-			
-			// Clear previous error on success
-			$this->lastError = null; 
+			$this->verifyOrThrow();
+			$this->lastFailureReason = null;
 
-			// If no exception was thrown, the request is authorized.
+			if ($this->logSuccesses) {
+				$this->logEvent('webhook.ok', 'Webhook authenticated', null);
+			}
 			return true;
-		} catch (\Throwable $e) {
-			// Swallow all errors/exceptions and return false instead.
-			// Reason for failure is intentionally suppressed.
-			// return false;
-			
-			$this->lastError = $e->getMessage(); // capture precise reason
+		} catch (WebhooksAuthVerificationException $e) {
+			$this->lastFailureReason = $e->reason;
+
+			if ($this->logFailures) {
+				$this->logEvent('webhook.fail', 'Webhook authentication failed', $e->reason);
+			}
 			return false;
 		}
 	}
 
 
 	/**
-	 * Performs strict authorization for an incoming webhook request.
+	 * Verify the current request and return the raw request body.
 	 *
-	 * Behavior:
-	 * - Validates enabled/configured, allow-list, headers, timestamp window, nonce uniqueness, and HMAC.
-	 * - Throws \RuntimeException with a precise reason on the first failure encountered.
+	 * Same engine as verify(), but throws on failure. Use this in API/fail-fast
+	 * flows where the caller wants the body and an exception cleanly aborts the
+	 * handler.
 	 *
-	 * This method validates the request against multiple layers of defense:
-	 *  1. Service enabled & configured (secret + nonce_dir).
-	 *  2. Optional IP allow-list (exact match or IPv4 CIDR).
-	 *  3. Required authentication headers (signature, timestamp, nonce).
-	 *  4. Timestamp freshness within configured TTL and clock skew tolerance.
-	 *  5. Nonce uniqueness, enforced by the Nonce service (atomic storage).
-	 *  6. HMAC signature verification in constant time.
-	 *
-	 * On any failure, a \RuntimeException is thrown with a clear reason.
-	 * Callers can either let the global error handler log these, or catch
-	 * them in a wrapper like {@see guard()} for boolean checks.
-	 *
-	 * Notes:
-	 * - Use this in strict flows and let the global error handler log failures.
-	 *
-	 * Typical usage:
-	 *   $this->app->webhooksAuth->assertAuthorized($_SERVER, $rawBody); // throws on failure
-	 *
-	 * @param array  $server   Typically the $_SERVER superglobal.
-	 * @param string $rawBody  Raw HTTP request body (from php://input).
-	 * @throws \RuntimeException If the request fails validation at any step.
+	 * @return string Raw request body (may be an empty string).
+	 * @throws WebhooksAuthVerificationException On any verification failure.
 	 */
-	public function assertAuthorized(array $server, string $rawBody): void {
-		
-		// Ensure service is enabled and minimally configured
-		if (!$this->enabled) {
-			throw new \RuntimeException('Webhooks are disabled.');
-		}
-		if ($this->secret === '' || $this->nonceDir === '') {
-			throw new \RuntimeException('Webhooks not configured (missing secret or nonce_dir).');
-		}
+	public function requireValid(): string {
+		try {
+			$this->verifyOrThrow();
+			$this->lastFailureReason = null;
 
-		// 1) IP allow-list (supports exact match and CIDR like "203.0.113.0/24")
-		if (!empty($this->allowedIps)) {
-			$ip = isset($server['REMOTE_ADDR']) ? (string)$server['REMOTE_ADDR'] : '';
-			if ($ip === '' || !$this->ipAllowed($ip, $this->allowedIps)) {
-				throw new \RuntimeException('Source IP not allowed.');
+			if ($this->logSuccesses) {
+				$this->logEvent('webhook.ok', 'Webhook authenticated', null);
 			}
-		}
+			return $this->getRawBody();
+		} catch (WebhooksAuthVerificationException $e) {
+			$this->lastFailureReason = $e->reason;
 
-		// 2) Required authentication headers
-		$sig   = isset($server[$this->hSignature]) ? (string)$server[$this->hSignature] : '';
-		$tsRaw = isset($server[$this->hTimestamp]) ? (string)$server[$this->hTimestamp] : '';
-		$nonce = isset($server[$this->hNonce])     ? (string)$server[$this->hNonce]     : '';
-
-		if ($sig === '' || $tsRaw === '' || $nonce === '') {
-			throw new \RuntimeException('Missing required authentication headers.');
-		}
-
-		// Sanity-check signature format (hex string, expected length for algo)
-		$wantLen = ($this->algo === 'sha512') ? 128 : 64;
-		if (strlen($sig) !== $wantLen || !ctype_xdigit($sig)) {
-			throw new \RuntimeException('Malformed signature.');
-		}
-
-		// 3) Timestamp validation (must be within TTL + skew tolerance)
-		$now    = time();
-		$ts     = (int)$tsRaw;
-		$maxAge = $this->ttlSeconds + $this->clockSkew;
-
-		// Reject if timestamp is invalid, too old, or too far in the future
-		if ($ts <= 0 || ($now - $ts) > $maxAge || ($ts - $now) > $this->clockSkew) {
-			throw new \RuntimeException('Request timestamp outside allowed window.');
-		}
-
-		// 4) Nonce check: must be unused; persisted via Nonce service
-		$nonceOk = $this->app->nonce
-			->setOptions((object)['dir' => $this->nonceDir])
-			->checkAndStore($nonce, $this->ttlSeconds);
-
-		if (!$nonceOk) {
-			throw new \RuntimeException('Nonce already used or storage failure.');
-		}
-
-		// 5) Signature verification
-		$base = $this->buildBaseString($server, $rawBody, $ts, $nonce);
-		$calc = hash_hmac($this->algo, $base, $this->secret);
-
-		// Compare in constant time; normalize client-sent hex to lowercase
-		if (!hash_equals($calc, strtolower($sig))) {
-			throw new \RuntimeException('Invalid HMAC signature.');
+			if ($this->logFailures) {
+				$this->logEvent('webhook.fail', 'Webhook authentication failed', $e->reason);
+			}
+			throw $e;
 		}
 	}
 
 
 	/**
-	 * Builds the canonical string used as HMAC input.
+	 * Verify the current request or terminate via errorHandler->httpError().
+	 *
+	 * Convenience wrapper used by controllers that want a single-line guard.
+	 * On failure the call does not return - errorHandler->httpError() emits
+	 * the response and exits.
 	 *
 	 * Behavior:
-	 * - Simple mode (bind_context = false): "<ts>.<nonce>.<rawBody>"
-	 * - Context-bound (bind_context = true): newline-delimited block
-	 *   ts, nonce, METHOD (uppercased), PATH (no query), QUERY (no leading "?"),
-	 *   and sha256(rawBody) in hex.
+	 * - The default failureStatus of 404 implements "endpoint hiding": all
+	 *   authentication failures look identical to a missing route, so an
+	 *   attacker cannot probe whether the webhook endpoint exists.
+	 * - Title and message are not passed; errorHandler picks status-appropriate
+	 *   defaults. Callers that need a custom HTTP body should use verify() or
+	 *   requireValid() and shape their own response.
 	 *
-	 * Two modes exist:
-	 * - Simple mode (bind_context = false):
-	 *     "<ts>.<nonce>.<rawBody>"
+	 * @param  int  $failureStatus  HTTP status sent on failure (default 404).
+	 * @return string  Raw request body on success.
+	 */
+	public function requireOrAbort(int $failureStatus = 404): string {
+		if ($this->verify()) {
+			return $this->getRawBody();
+		}
+
+		$this->app->errorHandler->httpError($failureStatus, [
+			'meta' => $this->failureMeta(),
+		]);
+
+		// errorHandler->httpError() always terminates; this return is unreachable
+		// but required by PHP's return-type system for the success branch above.
+		return ''; // @codeCoverageIgnore
+	}
+
+
+
+
+
+
+
+	// ----------------------------------------------------------------
+	// Inspection helpers
+	// ----------------------------------------------------------------
+
+	/**
+	 * Whether webhook authentication is enabled at all.
+	 */
+	public function isEnabled(): bool {
+		return $this->enabled;
+	}
+
+
+	/**
+	 * Last verification failure reason, or null after a successful verify().
+	 */
+	public function getLastFailureReason(): ?WebhooksAuthFailureReason {
+		return $this->lastFailureReason;
+	}
+
+
+	/**
+	 * Last verification failure reason as a stable string identifier, or null.
 	 *
-	 * - Context-bound mode (bind_context = true): a newline-delimited block
-	 *     ts        + "\n" +
-	 *     nonce     + "\n" +
-	 *     METHOD    + "\n" +   // uppercased
-	 *     PATH      + "\n" +   // no query string, always begins with "/"
-	 *     QUERY     + "\n" +   // without leading "?"
-	 *     SHA256    // hex of rawBody (hash of empty string if body is empty)
+	 * Equivalent to getLastFailureReason()?->value - provided for callers that
+	 * only need the textual form (e.g. log context, Problem-Detail responses).
+	 */
+	public function getLastError(): ?string {
+		return $this->lastFailureReason?->value;
+	}
+
+
+	/**
+	 * Raw request body for the current request, cached after first read.
 	 *
-	 * Notes:
-	 * - Order and exact separators matter; callers must mirror this serialization.
-	 * - No trailing newline is appended.
+	 * Exposed so adapters can use the verified body without re-reading
+	 * php://input (which is single-shot in some SAPI configurations).
+	 */
+	public function getRawBody(): string {
+		if ($this->cachedBody === null) {
+			$body = @\file_get_contents('php://input');
+			$this->cachedBody = ($body === false) ? '' : $body;
+		}
+		return $this->cachedBody;
+	}
+
+
+
+
+
+
+
+	// ----------------------------------------------------------------
+	// Verification engine
+	// ----------------------------------------------------------------
+
+	/**
+	 * Run all verification stages in order. Throws on the first failure.
 	 *
-	 * @param array  $server   Typically the $_SERVER superglobal.
-	 * @param string $rawBody  Raw request body (as read from php://input).
-	 * @param int    $ts       UNIX timestamp already validated by caller.
-	 * @param string $nonce    Client-supplied unique nonce (already validated).
-	 * @return string          Canonical base string for HMAC.
+	 * @return void
+	 * @throws WebhooksAuthVerificationException
+	 */
+	private function verifyOrThrow(): void {
+
+		// -- 1. Master switch --------------------------------------------
+		if (!$this->enabled) {
+			throw new WebhooksAuthVerificationException(WebhooksAuthFailureReason::Disabled);
+		}
+
+		// -- 2. IP allow-list (cheap rejection before any crypto) --------
+		// Uses sourceIp() so we honor configured trusted proxies for public
+		// senders (CDN/LB rewriting) but still match private/internal peers.
+		if ($this->allowedIps !== []) {
+			$ip = $this->sourceIp();
+			if ($ip === '' || !$this->ipAllowed($ip)) {
+				throw new WebhooksAuthVerificationException(WebhooksAuthFailureReason::IpNotAllowed);
+			}
+		}
+
+		// -- 3. Required headers -----------------------------------------
+		$server = $_SERVER;
+		$sig   = isset($server[$this->headerSignature]) ? (string)$server[$this->headerSignature] : '';
+		$tsRaw = isset($server[$this->headerTimestamp]) ? (string)$server[$this->headerTimestamp] : '';
+		$nonce = isset($server[$this->headerNonce])     ? (string)$server[$this->headerNonce]     : '';
+
+		if ($sig === '' || $tsRaw === '' || $nonce === '') {
+			throw new WebhooksAuthVerificationException(WebhooksAuthFailureReason::HeadersMissing);
+		}
+
+		// -- 4. Signature shape ------------------------------------------
+		if (\strlen($sig) !== $this->signatureHexLength || !\ctype_xdigit($sig)) {
+			throw new WebhooksAuthVerificationException(WebhooksAuthFailureReason::SignatureMalformed);
+		}
+
+		// -- 5. Timestamp window -----------------------------------------
+		$ts = (int)$tsRaw;
+		$now = \time();
+		$maxAge = $this->ttlSeconds + $this->clockSkew;
+		if ($ts <= 0 || ($now - $ts) > $maxAge || ($ts - $now) > $this->clockSkew) {
+			throw new WebhooksAuthVerificationException(WebhooksAuthFailureReason::TimestampOutOfWindow);
+		}
+
+		// -- 6. HMAC verification (constant-time) ------------------------
+		// HMAC is checked BEFORE claiming the nonce. This protects the nonce
+		// ledger from being filled with junk by attackers who don't know the
+		// secret: a garbage signature is rejected here without filesystem IO,
+		// while genuine signed replays are still caught at step 7 below.
+		$base = $this->buildBaseString($server, $this->getRawBody(), $ts, $nonce);
+		$calc = \hash_hmac($this->algo, $base, $this->secret);
+		if (!\hash_equals($calc, \strtolower($sig))) {
+			throw new WebhooksAuthVerificationException(WebhooksAuthFailureReason::SignatureMismatch);
+		}
+
+		// -- 7. Replay protection ----------------------------------------
+		// Only valid signed requests reach this point, so the nonce ledger
+		// only ever stores nonces from authenticated callers.
+		//
+		// TTL must cover the FULL timestamp acceptance window. A single
+		// timestamp ts is valid on the verifier's clock from (ts - skew) to
+		// (ts + ttl + skew), a span of (ttl + 2*skew). Worst case: a sender
+		// whose clock is skew seconds ahead stamps ts = T1 + skew, where T1
+		// is the verifier's arrival time. The nonce is stored at T1, and a
+		// captured replay is still accepted by the timestamp check until
+		// T1 + ttl + 2*skew. Anything shorter leaves a replay gap at the
+		// upper bound of the window.
+		$nonceTtl = $this->ttlSeconds + (2 * $this->clockSkew);
+		if (!$this->app->nonce->checkAndStore(self::NONCE_NAMESPACE, $nonce, $nonceTtl)) {
+			throw new WebhooksAuthVerificationException(WebhooksAuthFailureReason::NonceRejected);
+		}
+	}
+
+
+	/**
+	 * Build the canonical base string used as input to HMAC.
+	 *
+	 * @param  array<string,mixed>  $server  $_SERVER snapshot.
+	 * @param  string               $rawBody Raw request body.
+	 * @param  int                  $ts      Timestamp from header.
+	 * @param  string               $nonce   Nonce from header.
+	 * @return string
 	 */
 	private function buildBaseString(array $server, string $rawBody, int $ts, string $nonce): string {
-		
-		// Simple mode: timestamp, nonce, raw body concatenated with dots.
 		if (!$this->bindContext) {
-			return (string)$ts . '.' . (string)$nonce . '.' . $rawBody;
+			return $ts . '.' . $nonce . '.' . $rawBody;
 		}
 
-		// Context-bound mode: include method, path, query, and body hash.
+		$method = isset($server['REQUEST_METHOD']) ? \strtoupper((string)$server['REQUEST_METHOD']) : '';
+		$uri    = isset($server['REQUEST_URI'])    ? (string)$server['REQUEST_URI']               : '';
 
-		// HTTP method (uppercased). Missing key yields empty string (keeps deterministic shape).
-		$method = isset($server['REQUEST_METHOD']) ? strtoupper((string)$server['REQUEST_METHOD']) : '';
-
-		// Full request-target (path + optional query). Use REQUEST_URI to avoid server-specific recomposition.
-		$uri = isset($server['REQUEST_URI']) ? trim((string)$server['REQUEST_URI']) : '';
-
-		// Split on first "?" into path and query parts.
 		$path = $uri;
 		$query = '';
-		$parts = explode('?', $uri, 2);
-		if (count($parts) === 2) {
-			$path = $parts[0];
-			$query = $parts[1];
+		$qPos = \strpos($uri, '?');
+		if ($qPos !== false) {
+			$path  = \substr($uri, 0, $qPos);
+			$query = \substr($uri, $qPos + 1);
 		}
-
-		// Defensive whitespace normalization.
-		$path = trim($path);
-		$query = trim($query);
-
-		// Ensure path always starts with "/" to keep canonical shape ("/" for empty paths).
+		$path = \trim($path);
 		if ($path === '' || $path[0] !== '/') {
-			$path = '/' . ltrim($path, '/');
+			$path = '/' . \ltrim($path, '/');
 		}
+		$query = \trim($query);
 
-		// SHA-256 of the raw request body (hex). Empty body -> hash of empty string.
-		$bodySha = hash('sha256', $rawBody);
+		// Body hash is always SHA-256, independent of HMAC algo, so clients
+		// have one rule to follow regardless of the chosen HMAC strength.
+		$bodySha = \hash('sha256', $rawBody);
 
-		// Canonical multi-line string in strict order (no trailing newline).
-		return implode("\n", [
-			(string)$ts,    // Timestamp
-			(string)$nonce, // Nonce
-			$method,        // HTTP method (uppercased)
-			$path,          // Path without query
-			$query,         // Query without leading '?'
-			$bodySha,       // SHA-256 of body (hex)
+		return \implode("\n", [
+			(string)$ts,
+			$nonce,
+			$method,
+			$path,
+			$query,
+			$bodySha,
 		]);
 	}
 
 
+
+
+
+
+
+	// ----------------------------------------------------------------
+	// IP matching (IPv4 + IPv6, exact + CIDR)
+	// ----------------------------------------------------------------
+
 	/**
-	 * Checks if a client IP is allowed by an allow-list.
+	 * Resolve the source IP for allow-list matching.
 	 *
 	 * Behavior:
-	 * - Fast exact match first.
-	 * - Then checks IPv4 CIDR ranges like "203.0.113.0/24".
-	 *
-	 * Supports:
-	 * - Exact matches (fast path).
-	 * - IPv4 CIDR ranges (e.g., "203.0.113.0/24").
+	 * - Prefers the request service's resolved client IP, which honors the
+	 *   configured trusted-proxy whitelist for public traffic (CDN, LB).
+	 * - Falls back to $_SERVER['REMOTE_ADDR'] when the request service
+	 *   reports 'unknown' or 'CLI' (which happens for private peers, Docker
+	 *   networks, localhost cron, and similar internal scenarios where there
+	 *   is no public client IP to resolve).
+	 * - Returns an empty string only when no peer address is available at all.
 	 *
 	 * Notes:
-	 * - IPv6 entries are skipped (not implemented in lean core).
-	 * - Malformed or non-string entries in the list are ignored.
+	 * - This intentionally widens beyond Request::ip() because webhook
+	 *   senders are often inside the perimeter (internal services, dev
+	 *   loopback, container networks) where Request::ip()'s "must be public"
+	 *   contract is too strict.
 	 *
-	 * @param string $ip   Client IP address (typically from $_SERVER['REMOTE_ADDR']).
-	 * @param array  $list Array of allowed entries (exact IPs or CIDR blocks).
-	 * @return bool        True if allowed, false otherwise.
+	 * @return string  Source IP suitable for inet_pton()/CIDR matching, or empty string.
 	 */
-	private function ipAllowed(string $ip, array $list): bool {
-		
-		// Exact match check first (fast path)
-		if (in_array($ip, $list, true)) {
-			return true;
+	private function sourceIp(): string {
+		$ip = $this->app->request->ip();
+		if ($ip !== '' && $ip !== 'unknown' && $ip !== 'CLI') {
+			return $ip;
+		}
+		$remote = isset($_SERVER['REMOTE_ADDR']) ? (string)$_SERVER['REMOTE_ADDR'] : '';
+		return \trim($remote);
+	}
+
+
+	/**
+	 * Check whether the given IP matches any allow-list entry.
+	 *
+	 * Supports exact IPv4/IPv6 strings and CIDR notation for both families.
+	 * Mixed-family comparisons (IPv4 against IPv6 CIDR or vice versa) are
+	 * always rejected.
+	 */
+	private function ipAllowed(string $ip): bool {
+		$ipBin = @\inet_pton($ip);
+		if ($ipBin === false) {
+			return false;
 		}
 
-		// CIDR range checks (currently only IPv4 implemented)
-		foreach ($list as $entry) {
-			if (!is_string($entry)) {
-				continue; // ignore non-string entries
-			}
-
-			// Must contain a slash to be a CIDR entry
-			$slash = strpos($entry, '/');
+		foreach ($this->allowedIps as $entry) {
+			$slash = \strpos($entry, '/');
 			if ($slash === false) {
-				continue;
-			}
-
-			$net  = substr($entry, 0, $slash);  // Network address part before the slash (e.g. "203.0.113.0")
-			$bits = (int)substr($entry, $slash + 1);  // Prefix length after the slash (e.g. 24 -> means /24 subnet)
-
-			// Skip invalid prefix lengths (must be 1..32 for IPv4)
-			if ($bits <= 0 || $bits > 32) {
-				continue;
-			}
-
-			// Only support IPv4 here; skip if not both valid IPv4
-			if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) && filter_var($net, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) {
-				
-				$ipLong  = ip2long($ip);  // Convert client IP to 32-bit integer
-				$netLong = ip2long($net);  // Convert network address to 32-bit integer
-				
-				// If either conversion failed (invalid IPv4 format), skip this entry
-				if ($ipLong === false || $netLong === false) {
-					continue;
-				}
-
-				// Build subnet mask and apply bitwise check
-				$mask = -1 << (32 - $bits);
-				$mask = $mask & 0xFFFFFFFF;
-
-				// Apply subnet mask to both IP and network, then compare.
-				// If masked values match, the client IP is inside the allowed subnet.
-				if (($ipLong & $mask) === ($netLong & $mask)) {
+				$entryBin = @\inet_pton($entry);
+				if ($entryBin !== false && $entryBin === $ipBin) {
 					return true;
 				}
+				continue;
+			}
+
+			$net  = \substr($entry, 0, $slash);
+			$bits = (int)\substr($entry, $slash + 1);
+			if ($this->ipMatchesCidr($ipBin, $net, $bits)) {
+				return true;
 			}
 		}
-
-		// No match found
 		return false;
 	}
 
 
 	/**
-	 * Loads the HMAC secret (and optionally algo) from a side-effect-free PHP file.
+	 * Bitwise CIDR comparison on packed binary addresses.
 	 *
-	 * File must return an array like:
-	 *   ['secret' => <hex>, 'algo' => 'sha256'|'sha512' (optional), ...metadata]
-	 *
-	 * Precedence:
-	 * - If cfg provided 'algo', it wins over the file's 'algo'.
-	 *
-	 * @param string|null $file Absolute path to secret file. If empty/missing, no-op.
-	 * @return void
+	 * @param  string  $ipBin    Packed binary form of the candidate IP.
+	 * @param  string  $netStr   Network base address (textual).
+	 * @param  int     $bits     Prefix length.
 	 */
-	private function loadSecretFromFile(?string $file): void {
-		$file = (string)$file;
-		if ($file === '' || !is_file($file)) {
-			// Keep $this->secret empty; validation will fail on use if enabled.
-			return;
+	private function ipMatchesCidr(string $ipBin, string $netStr, int $bits): bool {
+		$netBin = @\inet_pton($netStr);
+		if ($netBin === false) {
+			return false;
+		}
+		// Reject mixed-family comparisons.
+		if (\strlen($netBin) !== \strlen($ipBin)) {
+			return false;
 		}
 
-		$data = @include $file;
-		if (!is_array($data)) {
-			throw new \RuntimeException('WebhooksAuth: secret_file did not return an array.');
+		$maxBits = \strlen($ipBin) * 8;
+		if ($bits < 0 || $bits > $maxBits) {
+			return false;
+		}
+		if ($bits === 0) {
+			return true;
+		}
+
+		$bytesFull = \intdiv($bits, 8);
+		$bitsRest  = $bits % 8;
+
+		if ($bytesFull > 0 && \substr($ipBin, 0, $bytesFull) !== \substr($netBin, 0, $bytesFull)) {
+			return false;
+		}
+		if ($bitsRest === 0) {
+			return true;
+		}
+
+		$mask = \chr((0xFF << (8 - $bitsRest)) & 0xFF);
+		return (($ipBin[$bytesFull] ?? "\0") & $mask) === (($netBin[$bytesFull] ?? "\0") & $mask);
+	}
+
+
+	/**
+	 * Filter and trim allow-list entries from cfg.
+	 *
+	 * Entries that are not non-empty strings/ints are silently dropped at init
+	 * time so the hot path can iterate without per-entry type checks.
+	 *
+	 * @param  array<int,mixed>  $list
+	 * @return array<int,string>
+	 */
+	private function normalizeAllowedIps(array $list): array {
+		$out = [];
+		foreach ($list as $item) {
+			if (\is_string($item) || \is_int($item)) {
+				$val = \trim((string)$item);
+				if ($val !== '') {
+					$out[] = $val;
+				}
+			}
+		}
+		return $out;
+	}
+
+
+
+
+
+
+
+
+	// ----------------------------------------------------------------
+	// Secret loading
+	// ----------------------------------------------------------------
+
+	/**
+	 * Load the side-effect-free secret file and validate its contract.
+	 *
+	 * The file MUST `return` an associative array with at minimum:
+	 *   - 'secret' => string (hex-only, non-empty)
+	 * It MAY also include:
+	 *   - 'algo'   => 'sha256' | 'sha512'
+	 *
+	 * @param  string  $file
+	 * @return array{secret:string, algo:?string}
+	 * @throws WebhooksAuthConfigException
+	 */
+	private function loadSecretFile(string $file): array {
+		if (!\is_file($file)) {
+			throw new WebhooksAuthConfigException("WebhooksAuth: secret_file does not exist: {$file}");
+		}
+		if (!\is_readable($file)) {
+			throw new WebhooksAuthConfigException("WebhooksAuth: secret_file is not readable: {$file}");
+		}
+
+		$data = require $file;
+		if (!\is_array($data)) {
+			throw new WebhooksAuthConfigException("WebhooksAuth: secret_file must return an array: {$file}");
 		}
 
 		$secret = (string)($data['secret'] ?? '');
-		if ($secret === '' || !ctype_xdigit($secret)) {
-			throw new \RuntimeException('WebhooksAuth: secret_file "secret" must be hex.');
+		if ($secret === '' || !\ctype_xdigit($secret)) {
+			throw new WebhooksAuthConfigException("WebhooksAuth: secret_file 'secret' must be a non-empty hex string: {$file}");
 		}
-		$this->secret = strtolower($secret);
 
-		// Accept file-provided algo only if cfg didn't explicitly set one different
+		$algo = null;
 		if (isset($data['algo'])) {
-			$maybe = strtolower((string)$data['algo']);
-			if (($this->algo === '' || $this->algo === 'sha256') && ($maybe === 'sha256' || $maybe === 'sha512')) {
-				$this->algo = $maybe;
+			$candidate = \strtolower((string)$data['algo']);
+			if (!\in_array($candidate, self::SUPPORTED_ALGOS, true)) {
+				throw new WebhooksAuthConfigException(
+					"WebhooksAuth: secret_file 'algo' must be one of " . \implode('|', self::SUPPORTED_ALGOS) . " (got '{$candidate}')."
+				);
 			}
+			$algo = $candidate;
+		}
+
+		return [
+			'secret' => \strtolower($secret),
+			'algo'   => $algo,
+		];
+	}
+
+
+
+
+
+
+
+	// ----------------------------------------------------------------
+	// Logging and meta
+	// ----------------------------------------------------------------
+
+	/**
+	 * Emit a structured log event when the log service is registered.
+	 *
+	 * Failures inside the log path are swallowed: a logging outage must never
+	 * mask the actual verification result delivered to the caller.
+	 *
+	 * @param  string                          $category
+	 * @param  string                          $message
+	 * @param  WebhooksAuthFailureReason|null  $reason
+	 */
+	private function logEvent(string $category, string $message, ?WebhooksAuthFailureReason $reason): void {
+		if (!$this->app->hasService('log')) {
+			return;
+		}
+
+		try {
+			$context = [
+				'reason'      => $reason?->value,
+				'remote_addr' => $_SERVER['REMOTE_ADDR'] ?? null,
+				'method'      => $_SERVER['REQUEST_METHOD'] ?? null,
+				'uri'         => $_SERVER['REQUEST_URI'] ?? null,
+				'have_sig'    => isset($_SERVER[$this->headerSignature]),
+				'have_ts'     => isset($_SERVER[$this->headerTimestamp]),
+				'have_nonce'  => isset($_SERVER[$this->headerNonce]),
+				'algo'        => $this->algo,
+				'bind_ctx'    => $this->bindContext,
+			];
+			$this->app->log->write($this->logFile, $category, $message, $context);
+		} catch (\Throwable) {
+			// Swallow: logging must not affect verification semantics.
 		}
 	}
 
 
 	/**
-	 * Returns the most recent failure reason captured by {@see guard()}.
+	 * Build a compact meta payload for errorHandler->httpError() context.
 	 *
-	 * Behavior:
-	 * - Returns a human-readable reason string (from the thrown exception) for the
-	 *   last failed guard() call in this instance, or null if the last guard()
-	 *   succeeded or guard() has not yet been called.
-	 * - The value is cleared on successful guard() calls.
-	 *
-	 * Notes:
-	 * - For diagnostics/logging only. Do not expose this directly in client responses.
-	 * - Instance-local state; not shared across requests/processes.
-	 *
-	 * @return ?string Reason string, or null when unavailable.
+	 * @return array<string,mixed>
 	 */
-	public function getLastError(): ?string {
-		return $this->lastError;
+	private function failureMeta(): array {
+		return [
+			'webhook_guard_reason' => $this->lastFailureReason?->value,
+			'remote_addr'          => $_SERVER['REMOTE_ADDR'] ?? null,
+			'have_sig'             => isset($_SERVER[$this->headerSignature]),
+			'have_ts'              => isset($_SERVER[$this->headerTimestamp]),
+			'have_nonce'           => isset($_SERVER[$this->headerNonce]),
+		];
 	}
+
 
 }

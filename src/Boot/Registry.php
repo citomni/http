@@ -915,8 +915,9 @@ final class Registry {
 		 *------------------------------------------------------------------
 		 *
 		 * Purpose
-		 * - Remote control endpoints for admin operations (e.g., maintenance, deploy).
-		 * - Auth model: HMAC over a canonical base string, TTL with clock-skew tolerance,
+		 * - Remote control endpoints for system/admin operations (e.g., cache warmup,
+		 *   maintenance toggles, deploy hooks, scheduled pruning).
+		 * - Auth model: HMAC over a canonical base string, timestamp freshness,
 		 *   optional source IP allow-list, and a nonce ledger to prevent replays.
 		 *
 		 * Secrets & file policy (IMPORTANT)
@@ -928,95 +929,194 @@ final class Registry {
 		 *
 		 * Secret file contract (side-effect free; returns array):
 		 *   return [
-		 *     'secret' => '<hex>',            // REQUIRED: hex string; recommended 64 (sha256) or 128 (sha512) hex chars
-		 *     'algo'   => 'sha256'|'sha512',  // OPTIONAL: used if cfg does not override 'algo'
+		 *     'secret' => '<hex>',            // REQUIRED: hex string; recommended 64 chars for sha256 or 128 for sha512
+		 *     'algo'   => 'sha256'|'sha512',  // OPTIONAL: used when cfg.webhooks.algo is null
 		 *     // Optional metadata for ops visibility (ignored by verifier):
 		 *     // 'rotated_at_utc' => '2025-10-17T11:12:00Z',
 		 *     // 'generator'      => 'CitOmni DevKit',
 		 *   ];
 		 *
-		 * Canonical signature base string (selected by 'bind_context'):
-		 * - Simple mode (bind_context=false; default):
-		 *     "<timestamp>.<nonce>.<rawBody>"
-		 * - Context-bound mode (bind_context=true):
-		 *     ts + "\n" + nonce + "\n" + METHOD + "\n" + PATH + "\n" + QUERY + "\n" + sha256(rawBody)
-		 *   Notes:
-		 *   - The body hash is always SHA-256 (independent of HMAC algo).
-		 *   - Stronger request coupling at the cost of a stricter client.
+		 * Algo precedence
+		 * - cfg.webhooks.algo > secret file 'algo' > 'sha256'.
+		 * - The baseline uses 'algo' => null so the secret file may choose the algo.
+		 * - Set cfg.webhooks.algo explicitly only when the app should override the
+		 *   secret file's algo.
 		 *
-		 * Required headers (server keys as seen in $_SERVER; names configurable below):
+		 * Canonical signature base string (selected by 'bind_context')
+		 * - Simple mode (bind_context=false):
+		 *     "<timestamp>.<nonce>.<rawBody>"
+		 * - Context-bound mode (bind_context=true; default):
+		 *     ts + "\n" + nonce + "\n" + METHOD + "\n" + PATH + "\n" + QUERY + "\n" + sha256(rawBody)
+		 *
+		 * Notes:
+		 * - Context-bound mode is stricter and binds the signature to method, path,
+		 *   query string, and body hash. Clients must mirror the exact shape.
+		 * - The body hash is always SHA-256, independent of HMAC algo.
+		 * - Raw body bytes are signed. Clients must not sign pretty-printed JSON and
+		 *   send minified JSON, or vice versa. Bytes are bytes. Annoying, but loyal.
+		 *
+		 * Required headers (server keys as seen in $_SERVER; names configurable below)
 		 * - X-Citomni-Timestamp : UNIX seconds when the signature was created.
 		 * - X-Citomni-Nonce     : Unique, single-use identifier (replay-protected).
 		 * - X-Citomni-Signature : Hex HMAC of the canonical base string.
 		 *
+		 * Timestamp and nonce window
+		 * - ttl_seconds controls the accepted request age.
+		 * - ttl_clock_skew_tolerance allows limited clock drift in both directions.
+		 * - Internally, the nonce ledger keeps webhook nonces for:
+		 *     ttl_seconds + (2 * ttl_clock_skew_tolerance)
+		 *   This covers the full timestamp acceptance window and prevents edge-case
+		 *   replay when the sender's clock is ahead of the verifier's clock.
+		 *
+		 * IP allow-list semantics
+		 * - allowed_ips empty => IP check is disabled (no IP restriction).
+		 * - allowed_ips non-empty => source IP must match an entry:
+		 *     * exact IPv4/IPv6 match, or
+		 *     * IPv4/IPv6 CIDR, e.g. '203.0.113.0/24' or '2001:db8::/32'.
+		 * - Source IP resolution:
+		 *     1) Request::ip(), which honors the configured trusted-proxy whitelist
+		 *        for public traffic.
+		 *     2) Fallback to $_SERVER['REMOTE_ADDR'] for private/internal peers,
+		 *        Docker, LAN, localhost cron, and similar non-public sources.
+		 *
+		 * Logging
+		 * - Failure/success logging is best-effort and only used when the log service
+		 *   is registered. Logging failures never change the auth result.
+		 * - log_successes should normally stay false unless debugging integration.
+		 *
 		 * Guarantees
-		 * - Deterministic verification (constant-time compare).
-		 * - Replay protection via Nonce service (filesystem-backed).
-		 * - Stale/future requests rejected based on TTL and clock-skew tolerance.
+		 * - Deterministic verification.
+		 * - Constant-time HMAC comparison.
+		 * - Replay protection through the shared Nonce service.
+		 * - Stale/future requests rejected before nonce filesystem writes.
+		 * - Garbage signatures rejected before nonce filesystem writes.
 		 *
-		 * Required when enabled:
-		 * - 'secret_file' : absolute path to the secret file (see contract above).
-		 * - 'nonce_dir'   : writable directory for the nonce ledger (prevents replays).
-		 *
-		 * IP allow-list semantics (important)
-		 * - 'allowed_ips' **empty** => IP check is **disabled** (no restriction).
-		 * - 'allowed_ips' non-empty => request IP **must** match an entry:
-		 *     * exact IP match, or
-		 *     * IPv4 CIDR (e.g., '203.0.113.0/24').
-		 * - Only IPv4 CIDR is supported in core (IPv6 lists will not match CIDR).
-		 * - Source IP is taken from $_SERVER['REMOTE_ADDR'].
-		 *   If behind a reverse proxy, either list the proxy IP/CIDR here or leave
-		 *   'allowed_ips' empty (until trusted-proxy client IP rewriting is in place).
-		 *
-		 * Algo precedence
-		 * - If 'algo' is set in cfg, it always wins.
-		 * - Otherwise, 'algo' from the secret file is used when present.
+		 * Required when enabled
+		 * - webhooks.secret_file must exist and be readable.
+		 * - nonce.dir must be writable because replay protection is mandatory.
 		 *
 		 * Typical app overrides (env files):
 		 *   'webhooks' => [
-		 *     'enabled'        => true,
-		 *     'secret_file'    => CITOMNI_APP_PATH . '/var/secrets/webhooks.secret.php',
-		 *     'nonce_dir'      => CITOMNI_APP_PATH . '/var/nonces',
-		 *     'allowed_ips'    => ['203.0.113.10', '198.51.100.0/24'], // leave empty to disable IP check
-		 *     // 'ttl_seconds'  => 180,
+		 *     'enabled' => true,
+		 *     'secret_file' => CITOMNI_APP_PATH . '/var/secrets/webhooks.secret.php',
+		 *     'allowed_ips' => ['203.0.113.10', '198.51.100.0/24'], // leave empty to disable IP check
+		 *     // 'ttl_seconds' => 180,
 		 *     // 'ttl_clock_skew_tolerance' => 30,
-		 *     // 'algo'         => 'sha512',
+		 *     // 'algo' => 'sha512',
 		 *     // 'bind_context' => true,
-		 *   ]
+		 *   ],
+		 *
+		 *   'nonce' => [
+		 *     'dir' => CITOMNI_APP_PATH . '/var/nonces',
+		 *   ],
 		 */
 		'webhooks' => [
+
 			// Master switch. Keep disabled unless actively used.
+			// Disabled means every verification fails with reason "Disabled".
 			'enabled' => false,
 
-			// Filesystem path to the secret file (side-effect free; returns array per contract).
-			// Default path is safe to keep unless your app relocates secrets.
+			// Filesystem path to the secret file.
+			// The file must be side-effect free and return an array per the contract above.
 			'secret_file' => CITOMNI_APP_PATH . '/var/secrets/webhooks.secret.php',
 
-			// Directory for the nonce ledger (replay protection). Must be writable.
-			'nonce_dir' => CITOMNI_APP_PATH . '/var/nonces',
-
-			// Freshness window and clock-skew tolerance (seconds).
+			// Freshness window and clock-skew tolerance in seconds.
+			// Defaults accept requests up to 5 minutes old plus 1 minute of clock drift.
 			'ttl_seconds' => 300,
 			'ttl_clock_skew_tolerance' => 60,
 
-			// Optional allow-list of source IPs (exact or IPv4 CIDR). Empty = no IP restriction.
+			// Optional allow-list of source IPs. Empty = no IP restriction.
+			// Supports exact IPv4/IPv6 and IPv4/IPv6 CIDR.
 			'allowed_ips' => [
 				// '203.0.113.10',
 				// '198.51.100.0/24',
+				// '2001:db8::/32',
 			],
 
-			// HMAC algorithm. If omitted and present in the secret file, the file's value is used.
-			// Allowed: 'sha256' (default) or 'sha512' (requires longer hex secret).
-			'algo' => 'sha256',
+			// HMAC algorithm override.
+			// Precedence: explicit cfg value > secret file 'algo' > 'sha256'.
+			// Null means this cfg layer defers to the secret file, or to 'sha256' if the file has no algo.
+			// Allowed explicit values: 'sha256' or 'sha512'.
+			'algo' => null,
 
-			// Bind signature to METHOD + PATH + QUERY + body-hash for stronger coupling (client must mirror exact shape).
-			'bind_context' => false,
+			// Bind signature to METHOD + PATH + QUERY + sha256(rawBody).
+			// Stronger default; clients must mirror the canonical base string exactly.
+			'bind_context' => true,
 
-			// Header keys as seen in $_SERVER (override only if your environment requires it).
+			// Header keys as seen in $_SERVER.
+			// Override only if your environment rewrites incoming headers.
 			'header_signature' => 'HTTP_X_CITOMNI_SIGNATURE',
 			'header_timestamp' => 'HTTP_X_CITOMNI_TIMESTAMP',
 			'header_nonce' => 'HTTP_X_CITOMNI_NONCE',
+
+			// Best-effort structured logging through the log service, when registered.
+			'log_failures' => true,
+			'log_successes' => false,
+			'log_file' => 'webhooks.jsonl',
 		],
+
+
+		/*
+		 *------------------------------------------------------------------
+		 * NONCE LEDGER (single-use token storage)
+		 *------------------------------------------------------------------
+		 *
+		 * Purpose
+		 * - Shared filesystem-backed ledger for single-use tokens.
+		 * - Used by WebhooksAuth for replay protection.
+		 * - Can be reused by other short- or long-lived single-use flows by using
+		 *   separate namespaces.
+		 *
+		 * Storage layout
+		 * - <dir>/<namespace>/<sha256(nonce)>.nonce
+		 * - The raw nonce is never written to disk; only its hash is used as filename.
+		 * - First writer wins via atomic fopen('x').
+		 *
+		 * Runtime behavior
+		 * - checkAndStore(namespace, nonce, ttlSeconds) returns:
+		 *     true  => first use, or previous entry expired and was reaped.
+		 *     false => replay, malformed input, or storage failure.
+		 * - Storage failures intentionally return false. From an auth perspective,
+		 *   "could not prove single-use" means "reject".
+		 *
+		 * Nonce format
+		 * - Configurable maximum length, default 128 bytes.
+		 * - Accepted characters cover common URL-safe tokens:
+		 *     A-Z a-z 0-9 _ . : -
+		 * - This includes hex, UUID-like values, ULID-like values, JWT-ish segments,
+		 *   and base64url tokens without padding.
+		 *
+		 * Directory policy
+		 * - The service lazily creates per-namespace subdirectories.
+		 * - The root dir and namespace dirs must be writable at runtime.
+		 * - Keep this directory out of VCS.
+		 *
+		 * Cleanup
+		 * - Opportunistic purge runs inside checkAndStore() with bounded work.
+		 * - CLI cron may call purgeExpired(namespace, ttlSeconds) for deterministic
+		 *   cleanup of busy or long-lived ledgers.
+		 */
+		'nonce' => [
+			// Root directory for all namespaced nonce ledgers.
+			// Default matches CitOmni's /var structure.
+			'dir' => CITOMNI_APP_PATH . '/var/nonces',
+
+			// Maximum byte length of accepted nonce strings.
+			'max_len' => 128,
+
+			// Opportunistic cleanup probability: 1 in N checkAndStore() calls.
+			// Keep > 1 for busy systems; use CLI pruning for deterministic cleanup.
+			'purge_probability' => 50,
+
+			// Maximum directory entries scanned during one opportunistic purge.
+			'purge_limit' => 25,
+
+			// Modes used for lazily created directories and nonce files.
+			// Effective permissions may still be narrowed by the process umask.
+			'dir_mode' => 0775,
+			'file_mode' => 0660,
+		],
+
 	];
 
 
