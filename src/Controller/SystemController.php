@@ -17,7 +17,6 @@ namespace CitOmni\Http\Controller;
 
 use CitOmni\Kernel\Controller\BaseController;
 
-
 /**
  * SystemController: Minimal operations and observability endpoints for HTTP mode.
  *
@@ -31,15 +30,16 @@ use CitOmni\Kernel\Controller\BaseController;
  * - Writes: Response (JSON/text/HTML), Maintenance state, cache files (reset/warmup).
  *
  * Security note:
+ * - Protected system actions use WebhooksAuth::requireOrAbort().
  * - Do NOT store webhook secrets in cfg. The HMAC secret is loaded from:
  *   CITOMNI_APP_PATH . '/var/secrets/webhooks.secret.php'
  * - The actual secret file must not be committed; keep only the `.tpl` template in VCS.
+ * - Replay protection is handled by the shared Nonce service via cfg.nonce.
  *
  * Configuration keys (via $this->app->cfg):
- * - webhooks.secret_file (string) - absolute path to side-effect-free PHP file
- *   returning ['secret' => <hex>, 'algo' => 'sha256'|'sha512' (optional)].
+ * - webhooks.* - HMAC verification, headers, TTL, IP allow-list, logging, and secret file path.
+ * - nonce.* - filesystem-backed single-use token ledger used for replay protection.
  * - http.base_url (string) - fallback for canonical links when CITOMNI_PUBLIC_ROOT_URL is unset.
- * - webhooks.allowed_ips (array<string>) - explicit allowlist for webhookDebug().
  *
  * Routing:
  * - Route definitions no longer live under cfg.
@@ -348,13 +348,7 @@ final class SystemController extends BaseController {
 	 *   _cfg_by_env_raw?:array<string,array<string,mixed>>
 	 * }
 	 */
-	private function appinfoGenerator(
-		bool $unredacted = false,
-		array $allowlistKeys = [],
-		bool $includeEnvMerged = false,
-		array $envs = ['dev', 'stage', 'prod'],
-		string $artifactEnv = 'prod'
-	): array {
+	private function appinfoGenerator(bool $unredacted = false, array $allowlistKeys = [], bool $includeEnvMerged = false, array $envs = ['dev', 'stage', 'prod'], string $artifactEnv = 'prod'): array {
 		// ------------------------------ Masking helpers ------------------------------
 
 		// Normalize allowlist for O(1) case-insensitive lookups.
@@ -1293,7 +1287,7 @@ final class SystemController extends BaseController {
 	 */
 	public function resetCache(): void {
 		$this->app->response->noCache();
-		$raw = $this->requireWebhookOrAbort(); // 404 on failure (central handler)
+		$raw = $this->app->webhooksAuth->requireOrAbort(self::PROTECTED_FAIL_STATUS);
 
 		$removed = [];
 		$failed  = [];
@@ -1307,7 +1301,8 @@ final class SystemController extends BaseController {
 		];
 
 		// Optional extra files from JSON body (parsed from captured $raw)
-		$body = \json_decode($raw, true) ?: [];
+		$body = \json_decode($raw, true);
+		$body = \is_array($body) ? $body : [];
 		if (!empty($body['paths']) && \is_array($body['paths'])) {
 			foreach ($body['paths'] as $p) {
 				$p = (string)$p;
@@ -1379,7 +1374,7 @@ final class SystemController extends BaseController {
 	 */
 	public function warmupCache(): void {
 		$this->app->response->noCache();
-		$this->requireWebhookOrAbort(); // 404 on failure
+		$this->app->webhooksAuth->requireOrAbort(self::PROTECTED_FAIL_STATUS);
 
 		$result = $this->app->warmCache(overwrite: true, opcacheInvalidate: true);
 
@@ -1417,7 +1412,7 @@ final class SystemController extends BaseController {
 	 */
 	public function maintenance(): void {
 		$this->app->response->noCache();
-		$this->requireWebhookOrAbort(); // read-only; no body needed
+		$this->app->webhooksAuth->requireOrAbort(self::PROTECTED_FAIL_STATUS);
 
 		$snap = $this->app->maintenance->snapshot();
 
@@ -1463,10 +1458,12 @@ final class SystemController extends BaseController {
 	 */
 	public function maintenanceEnable(): void {
 		$this->app->response->noCache();
-		$raw = $this->requireWebhookOrAbort();
+		$raw = $this->app->webhooksAuth->requireOrAbort(self::PROTECTED_FAIL_STATUS);
 
-		$body = \json_decode($raw, true) ?: [];
-		$ips  = \is_array($body['allowed_ips'] ?? null) ? (array)$body['allowed_ips'] : [];
+		$body = \json_decode($raw, true);
+		$body = \is_array($body) ? $body : [];
+
+		$ips = \is_array($body['allowed_ips'] ?? null) ? (array)$body['allowed_ips'] : [];
 		$retry = (int)($body['retry_after'] ?? -1);
 		if ($retry >= 0) {
 			$this->app->maintenance->setRetryAfter($retry);
@@ -1515,9 +1512,11 @@ final class SystemController extends BaseController {
 	 */
 	public function maintenanceDisable(): void {
 		$this->app->response->noCache();
-		$raw = $this->requireWebhookOrAbort();
+		$raw = $this->app->webhooksAuth->requireOrAbort(self::PROTECTED_FAIL_STATUS);
 
-		$body = \json_decode($raw, true) ?: [];
+		$body = \json_decode($raw, true);
+		$body = \is_array($body) ? $body : [];
+
 		$retry = (int)($body['retry_after'] ?? -1);
 		if ($retry >= 0) {
 			$this->app->maintenance->setRetryAfter($retry);
@@ -1535,151 +1534,88 @@ final class SystemController extends BaseController {
 
 
 	/**
-	 * Debug HMAC validation for webhooks (heavily gated).
+	 * Diagnose webhook authentication for the current request.
 	 *
 	 * Behavior:
-	 * - Access is allowed only when the caller IP is present in cfg.webhooks.allowed_ips (exact match).
-	 * - Deny-by-default: if the allow-list is empty or missing, the endpoint returns 404 (conceal).
-	 * - Still requires a valid HMAC via WebhooksAuth::assertAuthorized() on the exact raw body.
-	 * - Returns an explicit authorization result and echoes the seen headers.
+	 * - Uses the real WebhooksAuth verification engine.
+	 * - Returns structured, non-secret diagnostics for production troubleshooting.
+	 * - Does not expose the raw body, canonical base string, secret, signature value,
+	 *   or calculated HMAC.
 	 *
 	 * Notes:
-	 * - Reads the raw body directly from php://input to preserve exact HMAC bytes.
-	 * - Use this only for short-lived diagnostics; remove your IP from the allow-list afterwards.
-	 * - This endpoint intentionally responds with 404 for non-allowed IPs to avoid route disclosure.
-	 *
-	 * Typical usage:
-	 *   Temporary diagnostics during webhook setup to validate client signatures.
-	 *
-	 * Examples:
-	 *   // Authorized
-	 *   POST /_system/webhook-debug (HMAC ok, IP in allow-list)
-	 *   -> { "authorized": true, "message": "OK", "seen_headers": {...}, "remote_addr": "..." }
-	 *
-	 *   // Unauthorized (bad HMAC)
-	 *   POST /_system/webhook-debug (IP allowed, HMAC fails)
-	 *   -> { "authorized": false, "error": "...", "seen_headers": {...}, "remote_addr": "..." }
-	 *
-	 * Failure:
-	 * - Caller IP not in cfg.webhooks.allowed_ips -> 404 via ErrorHandler (conceal endpoint).
+	 * - A successful debug request consumes the nonce like any other webhook request.
+	 * - This endpoint should live under /_system/ and must be treated as diagnostic
+	 *   infrastructure. It uses the same webhook auth headers as real system endpoints,
+	 *   but returns controlled diagnostics instead of hiding every failure.
 	 *
 	 * @return void
 	 */
 	public function webhookDebug(): void {
 		$this->app->response->noCache();
 
-		$clientIp    = (string)$this->app->request->ip();
-		$allowedList = (array)($this->app->cfg->webhooks['allowed_ips'] ?? []);
+		$cfg = $this->app->cfg->webhooks;
 
-		// Deny-by-default: empty/missing list -> 404 (conceal the endpoint)
-		if ($allowedList === [] || !\in_array($clientIp, $allowedList, true)) {
-			$this->app->errorHandler->httpError(404, ['title' => 'Not Found']);
-			return;
+		$headerSignature = (string)($cfg->header_signature ?? 'HTTP_X_CITOMNI_SIGNATURE');
+		$headerTimestamp = (string)($cfg->header_timestamp ?? 'HTTP_X_CITOMNI_TIMESTAMP');
+		$headerNonce = (string)($cfg->header_nonce ?? 'HTTP_X_CITOMNI_NONCE');
+
+		$rawAllowedIps = $cfg->allowed_ips ?? [];
+		if ($rawAllowedIps instanceof \CitOmni\Kernel\Cfg) {
+			$rawAllowedIps = $rawAllowedIps->toArray();
 		}
 
-		// Read raw once; HMAC must verify against the exact bytes
-		$raw = (string)(@\file_get_contents('php://input') ?: '');
+		$allowedIpsConfigured = false;
+		foreach ((array)$rawAllowedIps as $item) {
+			if (!\is_string($item) && !\is_int($item)) {
+				continue;
+			}
 
-		try {
-			$this->app->webhooksAuth
-				->setOptions($this->app->cfg->webhooks)
-				->assertAuthorized($_SERVER, $raw);
+			if (\trim((string)$item) !== '') {
+				$allowedIpsConfigured = true;
+				break;
+			}
+		}
 
-			$this->app->response->jsonStatus([
-				'authorized'   => true,
-				'message'      => 'OK',
-				'seen_headers' => [
-					'signature' => $_SERVER['HTTP_X_CITOMNI_SIGNATURE'] ?? null,
-					'timestamp' => $_SERVER['HTTP_X_CITOMNI_TIMESTAMP'] ?? null,
-					'nonce'     => $_SERVER['HTTP_X_CITOMNI_NONCE'] ?? null,
-				],
+		$authorized = $this->app->webhooksAuth->verify();
+		$reason = $this->app->webhooksAuth->getLastFailureReason();
+
+		$timestamp = isset($_SERVER[$headerTimestamp]) ? (int)$_SERVER[$headerTimestamp] : 0;
+		$now = \time();
+
+		$this->app->response->jsonStatus([
+			'authorized' => $authorized,
+			'reason' => $reason?->value,
+			'message' => $authorized ? 'OK' : 'Webhook authentication failed.',
+
+			'request' => [
+				'method' => $_SERVER['REQUEST_METHOD'] ?? null,
+				'uri' => $_SERVER['REQUEST_URI'] ?? null,
 				'remote_addr' => $_SERVER['REMOTE_ADDR'] ?? null,
-			], 200);
-		} catch (\Throwable $e) {
-			// Debug mode returns explicit reason; do not replicate elsewhere
-			$this->app->response->jsonStatus([
-				'authorized'   => false,
-				'error'        => $e->getMessage(),
-				'seen_headers' => [
-					'signature' => $_SERVER['HTTP_X_CITOMNI_SIGNATURE'] ?? null,
-					'timestamp' => $_SERVER['HTTP_X_CITOMNI_TIMESTAMP'] ?? null,
-					'nonce'     => $_SERVER['HTTP_X_CITOMNI_NONCE'] ?? null,
-				],
-				'remote_addr' => $_SERVER['REMOTE_ADDR'] ?? null,
-			], 200);
-		}
+				'client_ip' => $this->app->request->ip(),
+				'content_type' => $_SERVER['CONTENT_TYPE'] ?? null,
+				'content_length' => isset($_SERVER['CONTENT_LENGTH']) ? (int)$_SERVER['CONTENT_LENGTH'] : null,
+				'body_bytes' => \strlen($this->app->webhooksAuth->getRawBody()),
+			],
+
+			'headers' => [
+				'signature_present' => isset($_SERVER[$headerSignature]),
+				'signature_length' => isset($_SERVER[$headerSignature]) ? \strlen((string)$_SERVER[$headerSignature]) : 0,
+				'timestamp_present' => isset($_SERVER[$headerTimestamp]),
+				'timestamp_value' => $timestamp > 0 ? $timestamp : null,
+				'timestamp_age_seconds' => $timestamp > 0 ? $now - $timestamp : null,
+				'nonce_present' => isset($_SERVER[$headerNonce]),
+				'nonce_length' => isset($_SERVER[$headerNonce]) ? \strlen((string)$_SERVER[$headerNonce]) : 0,
+			],
+
+			'webhooks' => [
+				'enabled' => $this->app->webhooksAuth->isEnabled(),
+				'bind_context' => (bool)($cfg->bind_context ?? true),
+				'ttl_seconds' => (int)($cfg->ttl_seconds ?? 300),
+				'ttl_clock_skew_tolerance' => (int)($cfg->ttl_clock_skew_tolerance ?? 60),
+				'allowed_ips_configured' => $allowedIpsConfigured,
+			],
+		], 200);
 	}
-
-
-
-
-
-// -----------------------
-// Helpers (no I/O)
-// -----------------------
-
-
-	/**
-	 * Enforce HMAC authorization for protected endpoints or abort with 404.
-	 * (require a valid WebhooksAuth signature or abort via central ErrorHandler).
-	 *
-	 * Behavior:
-	 * - Reads the raw request body exactly once from php://input.
-	 * - Applies cfg options to WebhooksAuth and runs guard() (fail-soft).
-	 * - On failure, delegates to ErrorHandler->httpError(PROTECTED_FAIL_STATUS).
-	 * - On success, returns the raw body for optional JSON decoding by callers.
-	 *
-	 * Notes:
-	 * - Uses guard() (boolean) instead of throwing; controllers stay linear.
-	 * - 404 is intentional to hide endpoint presence during brute checks.
-	 *
-	 * Typical usage:
-	 *   First line in protected action methods to centralize access control.
-	 *
-	 * Examples:
-	 *
-	 *   // Authorized
-	 *   $raw = requireWebhookOrAbort(); json_decode($raw, true);
-	 *
-	 *   // Unauthorized
-	 *   requireWebhookOrAbort(); // never returns; ErrorHandler emits 404
-	 *
-	 * Failure:
-	 * - On unauthorized, control never returns; ErrorHandler handles response.
-	 *
-	 * @return string Raw request body for subsequent parsing.
-	 */
-	private function requireWebhookOrAbort(): string {
-		$raw = (string)(@\file_get_contents('php://input') ?: '');
-
-		$ok = $this->app->webhooksAuth
-			->setOptions($this->app->cfg->webhooks)
-			->guard($_SERVER, $raw);
-
-		if (!$ok) {
-			// Add silent diagnostic for logs (not in response body)
-			$reason = $this->app->webhooksAuth->getLastError();
-			$this->app->errorHandler->httpError(
-				self::PROTECTED_FAIL_STATUS,
-				[
-					'title' => 'Not Found',
-					// error handler should log this metadata; it won't be echoed to the client
-					'meta'  => [
-						'webhook_guard_reason' => $reason,
-						'remote_addr'          => $_SERVER['REMOTE_ADDR'] ?? null,
-						'have_sig'             => isset($_SERVER['HTTP_X_CITOMNI_SIGNATURE']),
-						'have_ts'              => isset($_SERVER['HTTP_X_CITOMNI_TIMESTAMP']),
-						'have_nonce'           => isset($_SERVER['HTTP_X_CITOMNI_NONCE']),
-					],
-				]
-			);
-
-			return ''; // hard stop / satisfy analysis
-		}
-
-		return $raw;
-	}
-	
 	
 	
 }
