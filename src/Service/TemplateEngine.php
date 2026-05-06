@@ -28,7 +28,7 @@ use CitOmni\Kernel\Service\BaseService;
  * - Support partial reuse via `{% include "partial@layer" %}`, even across layers.
  * - Merge globals, dynamic (per-request) vars, and controller data for each render.
  *   Precedence: controller data > dynamic vars > globals.
- * - Expose helpers to templates (`$url`, `$asset`, `$txt`, `$dt`, `$role`, etc.)
+ * - Expose helpers to templates (`$url`, `$asset`, `$txt`, `$icon`, `$hasIcon`, `$dt`, `$role`, etc.)
  *   as closures bound to the current App.
  * - Support inline PHP tags `{? ... ?}` and `{?= ... ?}`. Inline PHP is enabled
  *   by default and can be disabled via config/constructor options.
@@ -62,9 +62,6 @@ use CitOmni\Kernel\Service\BaseService;
  *
  * - marketing_scripts (string)
  *     Raw HTML (analytics, tracking) injected into globals as $marketing_scripts.
- *
- * - icons (array<string,string>)
- *     Map icon name => inline SVG string. Used by $icon('name').
  *
  * - vars (array<string,array>)
  *     Declarative, path-scoped view variables.
@@ -134,9 +131,6 @@ final class TemplateEngine extends BaseService {
 	/** @var string */
 	private string $assetVersion = '';
 
-	/** @var array<string,string> Inline SVG icons (iconId => '<svg...>') */
-	private array $icons = [];
-
 	/** @var string Raw HTML snippet (analytics, marketing tags) injected globally */
 	private string $marketingScripts = '';
 
@@ -204,7 +198,7 @@ final class TemplateEngine extends BaseService {
 	 * Behavior:
 	 * - Reads relevant `cfg->view` nodes and snapshots them into cheap local scalars/arrays.
 	 *   We do this up front so later hot paths do not keep walking the cfg wrapper.
-	 * - Normalizes associative cfg maps (`template_layers`, `vars`, `icons`) into plain arrays.
+	 * - Normalizes associative cfg maps (`template_layers`, `vars`) into plain arrays.
 	 *   App::buildConfig() in the kernel already produced one merged config array
 	 *   (vendor -> providers -> app -> env; last wins). Each subtree (like cfg->view)
 	 *   is exposed through CitOmni\Kernel\Cfg, and we flatten those nodes here so we
@@ -295,13 +289,10 @@ final class TemplateEngine extends BaseService {
 		//
 		// - assetVersion is used by the $asset() helper for cache-busting (?v=...).
 		// - marketingScripts is dumped into all templates (e.g. analytics tags).
-		// - icons is also normalized into a flat associative array (id => raw <svg>).
-		//   This feeds the $icon('home') helper exposed in buildGlobals().
+		// - Icons are deliberately not loaded here. The $icon() helper delegates to
+		//   the lazy Icon service so requests without icons pay no icon payload cost.
 		$this->assetVersion		= (string)($opt['asset_version'] ?? $viewCfg->asset_version ?? '');
 		$this->marketingScripts	= (string)($viewCfg->marketing_scripts ?? '');
-
-		// Inline SVG icons (string id => SVG markup). Used by $icon('foo') in templates.
-		$this->icons = $this->normalizeCfgMap($viewCfg->icons ?? []);
 
 		// -- 5. Precompile scoped view vars --------------------------------
 		// Pre-compile scoped view vars (static + dynamic)
@@ -497,7 +488,7 @@ final class TemplateEngine extends BaseService {
 	 *   form_action_switching, captcha_protection.
 	 * - Environment info: env => { name: string, dev: bool }.
 	 * - Lazy helpers (closures): $txt, $dt, $dtNow, $dtMonth, $dtWeekday, $url,
-	 *   $asset, $hasService, $hasPackage, $csrfField, $currentPath, $role.
+	 *   $asset, $icon, $hasIcon, $hasService, $hasPackage, $csrfField, $currentPath, $role.
 	 *
 	 * Notes:
 	 * - csrf_protection reflects cfg->security->csrf->enabled.
@@ -798,31 +789,50 @@ final class TemplateEngine extends BaseService {
 			/**
 			 * $icon: Inline SVG icon lookup.
 			 *
-			 * Typical usage (TRIPLE braces for raw HTML):
+			 * Typical usage (TRIPLE braces for raw trusted markup):
 			 *   {{{ $icon('home') }}}
-			 *   <button class="nav-btn" aria-label="Profile">{{{ $icon('user') }}}</button>
+			 *   {{{ $icon('mfa_totp', 'icons', 'citomni/authenticate') }}}
+			 *   {{{ $icon('logo', 'brand', 'app') }}}
 			 *
 			 * Behavior:
+			 * - Delegates to the lazy Icon service.
 			 * - Returns a `<svg ...>` string with no wrapper span/div.
-			 * - SVGs are shipped with `stroke="currentColor"` (or fill), so you can
-			 *   tint via CSS `color:` on the parent.
+			 * - The default file is "icons"; the default layer is "citomni/http".
+			 * - SVGs are trusted view assets and must be rendered raw.
 			 *
-			 * Errors:
-			 * - In dev/stage, unknown icon keys throw \RuntimeException (fail fast).
-			 * - In prod, unknown icon keys return '' (quietly hide the icon instead
-			 *   of nuking the whole page for a missing cosmetic asset).
+			 * Failure:
+			 * - Missing files, missing ids, invalid payloads, and malformed SVG values
+			 *   fail fast through the Icon service. We do not hide missing icons in prod.
 			 */
-			'icon' => function (string $name): string {
-				$key = (string)$name;
-				if (isset($this->icons[$key])) {
-					return $this->icons[$key];
+			'icon' => function (string $id, string $file = 'icons', string $layer = 'citomni/http'): string {
+				if (!$this->app->hasService('icon')) {
+					throw new \RuntimeException("Icon service not available. Register 'icon' in the HTTP service map.");
 				}
 
-				$isDev = \defined('CITOMNI_ENVIRONMENT') && (\CITOMNI_ENVIRONMENT === 'dev' || \CITOMNI_ENVIRONMENT === 'stage');
-				if ($isDev) {
-					throw new \RuntimeException("Icon '{$key}' not found in view.icons.");
+				return $this->app->icon->get($id, $file, $layer);
+			},
+
+
+			/**
+			 * $hasIcon: Check whether an inline SVG icon exists.
+			 *
+			 * Typical usage:
+			 *   {% if $hasIcon('logo', 'brand', 'app') %}
+			 *   	{{{ $icon('logo', 'brand', 'app') }}}
+			 *   {% endif %}
+			 *
+			 * Behavior:
+			 * - Delegates to the lazy Icon service.
+			 * - Returns false when the requested icon file or id is missing.
+			 * - Invalid caller input and invalid existing icon file payloads still fail fast.
+			 * - The concrete SVG value is validated by $icon() / Icon::get().
+			 */
+			'hasIcon' => function (string $id, string $file = 'icons', string $layer = 'citomni/http'): bool {
+				if (!$this->app->hasService('icon')) {
+					return false;
 				}
-				return '';
+
+				return $this->app->icon->has($id, $file, $layer);
 			},
 
 
