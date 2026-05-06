@@ -14,7 +14,7 @@ declare(strict_types=1);
  */
 
 /*
- * Generic UI / CRUD icons.
+ * Default icons.
  *
  * Notes:
  * - Icons are trusted inline SVG view assets.
