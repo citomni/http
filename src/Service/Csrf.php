@@ -42,7 +42,9 @@ use CitOmni\Kernel\Service\BaseService;
  * - When mask_tokens is enabled, each token() call returns a differently
  *   masked representation of the same session token. This is correct and
  *   intentional - it prevents BREACH-style compression attacks.
- * - Logging goes through the log service when available and enabled.
+ * - Failure logging goes through the log service when available and enabled.
+ *   It includes generic request context, and callers may pass extra context
+ *   to verify()/requireValid() for adapter-specific audit details.
  *   The service never writes directly to files.
  * - The session is started automatically when needed. Callers do not need
  *   to ensure session state before calling token(), htmlField(), rotate(),
@@ -281,9 +283,10 @@ final class Csrf extends BaseService {
 	 *       $this->app->response->redirect($this->app->request->pathFromAppRoot());
 	 *   }
 	 *
+	 * @param array<string,mixed> $context Additional developer-supplied log context on failure.
 	 * @return bool True if the request is allowed, false if rejected.
 	 */
-	public function verify(): bool {
+	public function verify(array $context = []): bool {
 		if (!$this->enabled || !$this->isProtectedMethod()) {
 			return true;
 		}
@@ -293,7 +296,7 @@ final class Csrf extends BaseService {
 			return true;
 		}
 
-		$this->logFailure($reason);
+		$this->logFailure($reason, $context);
 		return false;
 	}
 
@@ -316,10 +319,11 @@ final class Csrf extends BaseService {
 	 *       $this->app->response->jsonProblem('CSRF rejected', 403, $e->reason->value);
 	 *   }
 	 *
+	 * @param array<string,mixed> $context Additional developer-supplied log context on failure.
 	 * @return void
 	 * @throws CsrfVerificationException With the specific failure reason.
 	 */
-	public function requireValid(): void {
+	public function requireValid(array $context = []): void {
 		if (!$this->enabled || !$this->isProtectedMethod()) {
 			return;
 		}
@@ -329,9 +333,10 @@ final class Csrf extends BaseService {
 			return;
 		}
 
-		$this->logFailure($reason);
+		$this->logFailure($reason, $context);
 		throw new CsrfVerificationException($reason);
 	}
+
 
 
 
@@ -957,36 +962,75 @@ final class Csrf extends BaseService {
 	/**
 	 * Log a CSRF verification failure via the log service.
 	 *
-	 * Silently skipped if log_failures is disabled, the log service is
-	 * unavailable, or the log service itself throws. Logging must never
-	 * break the verification flow.
+	 * Behavior:
+	 * - Writes one structured JSONL event when logging is enabled and the log service exists.
+	 * - Includes generic request/security context from failureLogContext().
+	 * - Merges caller-supplied context from verify()/requireValid() for adapter-specific
+	 *   details such as controller action, record id, or payload key names.
+	 * - Never adds CSRF token values to the log context itself.
+	 *   Caller-supplied context is written as provided and should not contain secrets.
+	 * - Silently returns if logging is disabled/unavailable and swallows log failures.
 	 *
-	 * @param CsrfFailureReason $reason The specific failure reason.
+	 * Notes:
+	 * - Logging must never mask or change the CSRF verification result.
+	 *
+	 * @param CsrfFailureReason $reason  The specific failure reason.
+	 * @param array<string,mixed> $context  Additional developer-supplied log context.
 	 * @return void
 	 */
-	private function logFailure(CsrfFailureReason $reason): void {
+	private function logFailure(CsrfFailureReason $reason, array $context = []): void {
 		if (!$this->logFailures || !$this->app->hasService('log')) {
 			return;
 		}
 
 		try {
-			$pathRaw = \method_exists($this->app->request, 'pathRaw')
-				? $this->app->request->pathRaw()
-				: $this->app->request->uri();
+			$this->app->log->write(
+				$this->logChannel,
+				'csrf.failure',
+				$reason->value,
+				$this->failureLogContext() + $context
+			);
 
-			$pathFromAppRoot = \method_exists($this->app->request, 'pathFromAppRoot')
-				? $this->app->request->pathFromAppRoot()
-				: null;
-
-			$this->app->log->write($this->logChannel, 'csrf.failure', $reason->value, [
-				'method' => $this->app->request->method(),
-				'path_raw' => $pathRaw,
-				'path_from_app_root' => $pathFromAppRoot,
-				'ip' => $this->app->request->ip(),
-			]);
 		} catch (\Throwable) {
 			// Logging failure must not mask the CSRF verification result.
 		}
 	}
+
+
+	/**
+	 * Build generic, non-secret log context for a CSRF verification failure.
+	 *
+	 * Behavior:
+	 * - Captures request metadata that is useful when investigating rejected requests.
+	 * - Records both transport-facing and app-facing paths when supported by Request.
+	 * - Includes CSRF field/header names, but never submitted token values or session token values.
+	 *
+	 * @return array<string,mixed> Generic CSRF failure log context.
+	 */
+	private function failureLogContext(): array {
+		$pathRaw = \method_exists($this->app->request, 'pathRaw')
+			? $this->app->request->pathRaw()
+			: $this->app->request->uri();
+
+		$pathFromAppRoot = \method_exists($this->app->request, 'pathFromAppRoot')
+			? $this->app->request->pathFromAppRoot()
+			: null;
+
+		return [
+			'method' => $this->app->request->method(),
+			'uri' => $this->app->request->uri(),
+			'path_raw' => $pathRaw,
+			'path_from_app_root' => $pathFromAppRoot,
+			'ip' => $this->app->request->ip(),
+			'referer' => $this->app->request->referer(),
+			'user_agent' => $this->app->request->getUserAgent(),
+			'origin' => $this->app->request->header('Origin'),
+			'sec_fetch_site' => $this->app->request->header('Sec-Fetch-Site'),
+			'content_type' => $this->app->request->contentType(),
+			'field_name' => $this->fieldName,
+			'header_name' => $this->headerName,
+		];
+	}
+
 
 }
