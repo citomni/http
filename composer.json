@@ -11,8 +11,7 @@
 	],
 	"require": {
 		"php": "^8.2",
-		"citomni/kernel": "*",
-		"larsgmortensen/liteview": "*"
+		"citomni/kernel": "*"
 	},
 	"autoload": {
 		"psr-4": {
