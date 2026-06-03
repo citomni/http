@@ -1,0 +1,195 @@
+<!doctype html>
+<!--
+ SPDX-License-Identifier: MIT
+ Copyright (C) 2012-2025 Lars Grove Mortensen
+ 
+ CitOmni HTTP Skeleton - Minimal starter for high-performance CitOmni HTTP apps.
+ Source:  https://github.com/citomni/http-skeleton
+ License: See the LICENSE file for full terms.
+-->
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta http-equiv="x-ua-compatible" content="ie=edge">
+	<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+	<title>Hello from the App Layer | CitOmni</title>
+	<meta name="description" content="A tiny, dependency-free Hello World demo page for the CitOmni app layer.">
+	<style>
+		/* ----------------------------- Reset-ish ------------------------------ */
+		* { box-sizing: border-box; }
+		html, body { height: 100%; margin: 0; }
+		:root {
+			--bg-1: #0f172a;   /* slate-900 */
+			--bg-2: #1e293b;   /* slate-800 */
+			--fg:   #e5e7eb;   /* slate-200 */
+			--muted:#94a3b8;   /* slate-400 */
+			--acc:  #22d3ee;   /* cyan-400 */
+			--acc2: #a78bfa;   /* violet-400 */
+			--card:#111827f2;  /* neutral overlay */
+		}
+		@media (prefers-color-scheme: light) {
+			:root {
+				--bg-1: #f8fafc; /* slate-50 */
+				--bg-2: #e2e8f0; /* slate-200 */
+				--fg:   #0f172a; /* slate-900 */
+				--muted:#334155; /* slate-700 */
+				--acc:  #0891b2; /* cyan-700 */
+				--acc2: #6d28d9; /* violet-700 */
+				--card:#ffffffee;/* white overlay */
+			}
+		}
+
+		/* --------------------------- Page layout ------------------------------ */
+		body {
+			font: 16px/1.6 system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+			color: var(--fg);
+			background: radial-gradient(1200px 800px at 10% 10%, var(--bg-2), var(--bg-1)) fixed;
+			display: grid;
+			place-items: center;
+			padding: 24px;
+		}
+		.wrapper {
+			width: min(920px, 100%);
+		}
+
+		/* ----------------------------- Card ---------------------------------- */
+		.card {
+			background: var(--card);
+			backdrop-filter: blur(6px);
+			border: 1px solid rgba(255,255,255,0.08);
+			border-radius: 18px;
+			padding: 28px;
+			box-shadow: 0 10px 30px rgba(0,0,0,0.25);
+			position: relative;
+			overflow: hidden;
+			isolation: isolate;
+		}
+		.card::before {
+			/* soft animated accent blob */
+			content: "";
+			position: absolute; inset: -30% auto auto -30%;
+			width: 60vmin; height: 60vmin; border-radius: 50%;
+			background: radial-gradient(closest-side, var(--acc), transparent 70%);
+			opacity: .25; filter: blur(20px);
+			animation: float 12s ease-in-out infinite alternate;
+			z-index: -1;
+		}
+		.card::after {
+			content: "";
+			position: absolute; inset: auto -30% -30% auto;
+			width: 55vmin; height: 55vmin; border-radius: 50%;
+			background: radial-gradient(closest-side, var(--acc2), transparent 70%);
+			opacity: .22; filter: blur(22px);
+			animation: float2 14s ease-in-out infinite alternate;
+			z-index: -1;
+		}
+		@keyframes float { from { transform: translateY(0) } to { transform: translateY(14px) } }
+		@keyframes float2 { from { transform: translateY(0) } to { transform: translateY(-12px) } }
+
+		/* ----------------------------- Title --------------------------------- */
+		h1 {
+			margin: 0 0 6px 0;
+			font-size: clamp(28px, 4.8vw, 44px);
+			line-height: 1.15;
+			letter-spacing: -0.02em;
+			font-weight: 800;
+			background: linear-gradient(90deg, var(--acc), var(--acc2));
+			-webkit-background-clip: text;
+			background-clip: text;
+			color: transparent;
+		}
+		.subtitle {
+			margin: 0 0 20px 0;
+			color: var(--muted);
+			font-size: clamp(14px, 2.4vw, 17px);
+		}
+
+		/* ----------------------------- Badge --------------------------------- */
+		.badges {
+			display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0 20px 0;
+		}
+		.badge {
+			border: 1px solid rgba(255,255,255,0.14);
+			padding: 6px 10px;
+			border-radius: 999px;
+			font-size: 12px;
+			user-select: none;
+			background: linear-gradient(180deg, rgba(255,255,255,0.04), rgba(255,255,255,0));
+		}
+
+		/* ------------------------------ CTA ---------------------------------- */
+		.cta {
+			margin-top: 18px;
+			display: inline-block;
+			padding: 10px 14px;
+			border-radius: 12px;
+			border: 1px solid rgba(255,255,255,0.16);
+			text-decoration: none;
+			color: var(--fg);
+			font-weight: 600;
+			transition: transform .12s ease, box-shadow .12s ease, background .12s ease;
+			background: linear-gradient(180deg, rgba(255,255,255,0.06), rgba(255,255,255,0));
+			box-shadow: 0 6px 18px rgba(0,0,0,0.18);
+		}
+		.cta:hover { transform: translateY(-1px); box-shadow: 0 10px 28px rgba(0,0,0,0.22); }
+		.cta:active { transform: translateY(0); }
+
+		/* ---------------------------- Footer row ------------------------------ */
+		.footer {
+			display: flex; flex-wrap: wrap; gap: 10px;
+			align-items: center; justify-content: space-between;
+			margin-top: 18px; color: var(--muted); font-size: 13px;
+		}
+		.kv {
+			display: grid; grid-template-columns: auto auto; gap: 2px 10px;
+			font-variant-numeric: tabular-nums;
+		}
+		.kv b { color: var(--fg); }
+
+		/* ---------------------------- Visually hidden ------------------------- */
+		.visually-hidden {
+			position: absolute !important; height: 1px; width: 1px;
+			overflow: hidden; clip: rect(1px, 1px, 1px, 1px);
+			white-space: nowrap; border: 0; padding: 0; margin: -1px;
+		}
+	</style>
+</head>
+<body>
+	<a href="#content" class="visually-hidden">Skip to content</a>
+
+	<main id="content" class="wrapper">
+		<section class="card" role="region" aria-labelledby="hello-title">
+			<header>
+				<h1 id="hello-title">Hello, World! 👋</h1>
+				<p class="subtitle">This page is served from the <b>App layer</b>. If you can read this, your routing and template wiring work. Nice.</p>
+				<div class="badges" aria-label="Status badges">
+					<span class="badge">Low overhead</span>
+					<span class="badge">High performance</span>
+					<span class="badge">Ready for anything</span>
+				</div>
+			</header>
+
+			<p>
+				Welcome to your shiny new CitOmni app. This tiny demo intentionally uses:
+			</p>
+			<ul>
+				<li>Inline CSS only (no external files, no JS).</li>
+				<li>System fonts for speed and accessibility.</li>
+				<li>A gentle animated accent that won’t roast your CPU.</li>
+			</ul>
+
+			<a class="cta" href="/" rel="nofollow">Back to home</a>
+
+			<footer class="footer" aria-label="Meta">
+				<div class="kv" role="group" aria-label="Quick facts">
+					<span>Layer:</span><b>App</b>
+					<span>Mode:</span><b>{{ CITOMNI_ENVIRONMENT }}</b>
+					<span>Framework:</span><a href="https://www.citomni.com/" target="_blank">CitOmni</a>
+					<span>License:</span><b>GPL-3.0-or-later</b>
+				</div>
+				<small>Tip: Replace this with your own content whenever you’re ready.</small>
+			</footer>
+		</section>
+	</main>
+</body>
+</html>
