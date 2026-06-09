@@ -1,9 +1,10 @@
 # Normalize text files unless overridden below.
-* text=auto
+* text=auto eol=lf
 
 # Core project files.
 *.php text eol=lf
 *.md text eol=lf
+*.txt text eol=lf
 *.json text eol=lf
 *.lock text eol=lf
 *.xml text eol=lf
@@ -11,6 +12,7 @@
 *.yaml text eol=lf
 *.neon text eol=lf
 *.ini text eol=lf
+*.sql text eol=lf
 *.env.example text eol=lf
 
 # Web and template files.
@@ -42,3 +44,39 @@
 *.zip binary
 *.gz binary
 *.phar binary
+
+# Repository-only metadata.
+/.github                 export-ignore
+/.github/**              export-ignore
+/.gitignore              export-ignore
+/.gitattributes          export-ignore
+
+# Internal/private working folders.
+/_backups                export-ignore
+/_backups/**             export-ignore
+/_internal               export-ignore
+/_internal/**            export-ignore
+**/_backups              export-ignore
+**/_backups/**           export-ignore
+**/_internal             export-ignore
+**/_internal/**          export-ignore
+
+# Tests and local QA artifacts.
+/tests                   export-ignore
+/tests/**                export-ignore
+/phpunit.xml*            export-ignore
+/.phpunit.result.cache   export-ignore
+/phpstan*.neon*          export-ignore
+/psalm*.xml*             export-ignore
+/.php-cs-fixer.php       export-ignore
+/.php-cs-fixer.dist.php  export-ignore
+
+# Editor/IDE files.
+/.editorconfig           export-ignore
+/.idea                   export-ignore
+/.idea/**                export-ignore
+/.vscode                 export-ignore
+/.vscode/**              export-ignore
+
+# Composer lock is normally not shipped with libraries.
+composer.lock            export-ignore
