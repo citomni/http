@@ -29,6 +29,12 @@ return [
 			'policy' => 'create-only',
 		],
 		[
+			'target' => 'config/services_http.php',
+			'source' => 'install/scaffold/config/services_http.php.stub',
+			'type' => 'service-map',
+			'policy' => 'create-only',
+		],
+		[
 			'target' => 'config/citomni_http_routes.php',
 			'source' => 'install/scaffold/config/citomni_http_routes.php.stub',
 			'type' => 'routes',

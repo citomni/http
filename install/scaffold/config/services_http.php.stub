@@ -1,0 +1,71 @@
+<?php
+declare(strict_types=1);
+/*
+ * SPDX-License-Identifier: MIT
+ * Copyright (C) 2012-present Lars Grove Mortensen
+ *
+ * CitOmni HTTP - HTTP-specific service map scaffold.
+ * Source:  https://github.com/citomni/http
+ * License: See the LICENSE file for full terms.
+ */
+
+/**
+ * HTTP SERVICE MAP
+ * ------------------------------------------------------------------
+ * Deterministic app-level HTTP service wiring by id.
+ *
+ * This file is the app-owned HTTP service map and has the highest
+ * precedence for HTTP requests when service ids collide.
+ *
+ * Contract:
+ *   - This file is only loaded in HTTP mode.
+ *   - Keys are service ids accessed as $this->app->{id}.
+ *   - Values may be:
+ *       1) FQCN string
+ *       2) ['class' => FQCN, 'options' => [...]]
+ *   - Services are resolved as singletons per request.
+ *   - Service constructors must follow:
+ *       new Service(App $app, array $options = []).
+ *
+ * Effective HTTP precedence (services, left wins via PHP array union +):
+ *   1) App HTTP services: /config/services_http.php
+ *   2) App common services: /config/services.php
+ *   3) Provider HTTP services: MAP_HTTP from registries listed in /config/providers.php
+ *   4) Provider common services: MAP_COMMON from registries listed in /config/providers.php
+ *   5) Vendor HTTP baseline: MAP_HTTP from citomni/http
+ *
+ * Policy:
+ *   - Keep this file minimal.
+ *   - Only declare HTTP-only app services or deliberate HTTP overrides.
+ *   - Put services shared by HTTP and CLI in /config/services.php instead.
+ *   - Do not mirror vendor or provider service maps here.
+ *   - Keep definitions explicit and deterministic.
+ *   - Pure data only. No logic, closures, factories, or side effects.
+ *
+ * Notes:
+ *   - Order inside this array does not matter for resolution.
+ *   - Duplicate keys in this file follow normal PHP array rules.
+ *   - Invalid service classes or definitions should fail fast by design.
+ */
+return [
+
+	/*
+	|--------------------------------------------------------------------------
+	| Example: HTTP-only app service
+	|--------------------------------------------------------------------------
+	*/
+	// 'myHttpService' => \App\Http\Service\MyHttpService::class,
+
+	/*
+	|--------------------------------------------------------------------------
+	| Example: HTTP-only app service with options
+	|--------------------------------------------------------------------------
+	*/
+	// 'myHttpServiceWithOptions' => [
+	// 	'class' => \App\Http\Service\MyHttpService::class,
+	// 	'options' => [
+	// 		'example' => true,
+	// 	],
+	// ],
+
+];
