@@ -183,9 +183,8 @@
 			<footer class="footer" aria-label="Meta">
 				<div class="kv" role="group" aria-label="Quick facts">
 					<span>Layer:</span><b>App</b>
-					<span>Mode:</span><b>{{ CITOMNI_ENVIRONMENT }}</b>
 					<span>Framework:</span><a href="https://www.citomni.com/" target="_blank">CitOmni</a>
-					<span>License:</span><b>GPL-3.0-or-later</b>
+					<span>License:</span><b>MIT</b>
 				</div>
 				<small>Tip: Replace this with your own content whenever you’re ready.</small>
 			</footer>
