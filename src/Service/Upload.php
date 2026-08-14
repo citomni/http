@@ -71,7 +71,7 @@ final class Upload extends BaseService {
 	 * - When deleteOld=true, deletes previous column file and its thumbs.
 	 *
 	 * Notes:
-	 * - Fullsize keys at root of $uploadCfg: w, h, fit ('crop'|'stretch'), suffix (string).
+	 * - Fullsize keys at root of $uploadCfg: w, h, fit ('crop'|'stretch'), suffix (string), upscale (bool, default true).
 	 * - Thumbnails are configured under $uploadCfg['thumbnails'] as before.
 	 *
 	 * @param string      $fieldName   Input name in $_FILES.
@@ -229,11 +229,12 @@ final class Upload extends BaseService {
 		$targetQuality  = (int)($encoding['quality'] ?? 82);
 		$ext            = $this->normalizeExt($targetFormat);
 
-		// Fullsize controls (always resize when both > 0)
+		// Fullsize controls. Upscaling stays enabled by default for existing callers.
 		$fullW      = (int)($uploadCfg['w'] ?? 0);
 		$fullH      = (int)($uploadCfg['h'] ?? 0);
 		$fullFit    = (string)($uploadCfg['fit'] ?? 'crop');   // 'crop' | 'stretch'
 		$fullSuffix = (string)($uploadCfg['suffix'] ?? '');    // added before extension
+		$upscale    = (bool)($uploadCfg['upscale'] ?? true);
 
 		// Compose final fullsize target path (suffix before extension)
 		$fullBaseName = $base . ($fullSuffix !== '' ? $fullSuffix : '');
@@ -301,28 +302,26 @@ final class Upload extends BaseService {
 				];
 			}
 
-			// Optional EXIF orientation (JPEG only)
+			// Optional EXIF orientation (JPEG only).
 			$exifOn = (bool)($uploadCfg['exifOrient'] ?? false);
+			$exifAdjusted = false;
 			if ($exifOn && $mime === 'image/jpeg' && \function_exists('exif_read_data')) {
-				$oriented = $this->applyExifOrientation($src, $f['tmp_name']);
-				if ($oriented) { $src = $oriented; }
+				$exifAdjusted = $this->orientImageFromExif($src, $f['tmp_name']);
 			}
+
+			// EXIF rotation may swap width and height.
+			$w = \imagesx($src);
+			$h = \imagesy($src);
 
 			// --- Fullsize (from original, obviously) ---
 			$fullOk = false;
-			
-			// Compute target size if only one dimension is given.
-			$targetW = $fullW;
-			$targetH = $fullH;
-			if ($fullW > 0 && $fullH <= 0) {
-				// Width fixed, derive height from aspect ratio.
-				$targetW = $fullW;
-				$targetH = (int)\round($fullW * ($h / $w));
-			} elseif ($fullH > 0 && $fullW <= 0) {
-				// Height fixed, derive width from aspect ratio.
-				$targetH = $fullH;
-				$targetW = (int)\round($fullH * ($w / $h));
-			}
+			[$targetW, $targetH] = $this->resolveTargetDimensions(
+				$w,
+				$h,
+				$fullW,
+				$fullH,
+				$upscale
+			);
 
 			if ($targetW > 0 && $targetH > 0) {
 				$dst = ($fullFit === 'stretch')
@@ -334,15 +333,16 @@ final class Upload extends BaseService {
 				}
 			} else {
 				// No explicit fullsize (w,h) -> reencode if format differs/encoding set; else move file.
-				$needReencode = ($encoding !== []) || !$this->sameFamily($mime, $ext);
+				$needReencode = ($encoding !== []) || !$this->sameFamily($mime, $ext) || $exifAdjusted;
 				if ($needReencode) {
 					$fullOk = $this->imageSave($src, $targetPath, $ext, $targetQuality);
 				} else {
 					// We still want single decode for thumbs, but moving the uploaded tmp is OK now.
 					// Make sure targetPath uniqueness was handled above.
-					\imagedestroy($src); // free decoded; thumbs will not be created below in this branch (since no thumbs require src)
+					\imagedestroy($src);
+					$src = false;
 					$fullOk = $this->moveUploadedFile($f['tmp_name'], $targetPath, $overwrite, false);
-					// Reload original if thumbs exist (so we keep the "from original" guarantee)
+					// Reload the written original if thumbnails are requested.
 					if (($uploadCfg['thumbnails'] ?? []) !== []) {
 						$src = $this->imageLoad($targetPath);
 					}
@@ -501,7 +501,8 @@ final class Upload extends BaseService {
 	 * - exifOrient: bool               If true, apply EXIF orientation for JPEG inputs
 	 *
 	 * Fullsize controls at root (optional):
-	 * - w: int, h: int                 If both > 0, always resample fullsize
+	 * - w: int, h: int                 If either is > 0, resolve and resample fullsize
+	 * - upscale: bool                  Allow enlargement; default true for backward compatibility
 	 * - fit: "crop"|"stretch"          Default "crop"
 	 * - suffix: string                 Added before extension for fullsize (e.g. "_1280x720")
 	 *
@@ -555,12 +556,13 @@ final class Upload extends BaseService {
 		$quality      = (int)($enc['quality'] ?? 82);
 		$ext          = $this->normalizeExt($targetFormat);
 
-		// Fullsize controls (optional). If both > 0, we ALWAYS resample.
+		// Fullsize controls. Upscaling stays enabled by default for existing callers.
 		$fullW      = (int)($attachedCfg['w'] ?? 0);
 		$fullH      = (int)($attachedCfg['h'] ?? 0);
 		$fullFit    = (string)($attachedCfg['fit'] ?? 'crop');      // 'crop' | 'stretch'
 		$fullSuffix = (string)($attachedCfg['suffix'] ?? '');       // added before extension
 		$exifOn     = (bool)($attachedCfg['exifOrient'] ?? false);
+		$upscale    = (bool)($attachedCfg['upscale'] ?? true);
 
 		$maxCount   = (int)($attachedCfg['maxCount'] ?? 0);
 		$remaining  = $maxCount > 0 ? \max(0, $maxCount - \max(0, $currentCount)) : 0;
@@ -659,25 +661,24 @@ final class Upload extends BaseService {
 				continue;
 			}
 
-			// Optional EXIF orientation for JPEG source
+			// Optional EXIF orientation for JPEG source.
 			if ($exifOn && $mime === 'image/jpeg' && \function_exists('exif_read_data')) {
-				$oriented = $this->applyExifOrientation($src, $f['tmp_name']);
-				if ($oriented) { $src = $oriented; }
+				$this->orientImageFromExif($src, $f['tmp_name']);
 			}
+
+			// EXIF rotation may swap width and height.
+			$w = \imagesx($src);
+			$h = \imagesy($src);
 
 			// ---- Fullsize (from original) ----
 			$fullOk = false;
-			
-			// Derive missing dimension if exactly one is set.
-			$targetW = $fullW;
-			$targetH = $fullH;
-			if ($fullW > 0 && $fullH <= 0) {
-				$targetW = $fullW;
-				$targetH = (int)\round($fullW * ($h / $w));
-			} elseif ($fullH > 0 && $fullW <= 0) {
-				$targetH = $fullH;
-				$targetW = (int)\round($fullH * ($w / $h));
-			}
+			[$targetW, $targetH] = $this->resolveTargetDimensions(
+				$w,
+				$h,
+				$fullW,
+				$fullH,
+				$upscale
+			);
 			
 			if ($targetW > 0 && $targetH > 0) {
 				$dst = ($fullFit === 'stretch')
@@ -1124,6 +1125,53 @@ final class Upload extends BaseService {
 	}
 
 
+	/**
+	 * Resolve fullsize target dimensions.
+	 *
+	 * Behavior:
+	 * - A single configured dimension preserves the source aspect ratio.
+	 * - Two configured dimensions preserve the requested target aspect ratio.
+	 * - Upscaling remains enabled by default at the public API call sites.
+	 * - When upscaling is disabled, the target is reduced to fit within the source.
+	 *
+	 * @param int $srcW Source width.
+	 * @param int $srcH Source height.
+	 * @param int $targetW Configured target width.
+	 * @param int $targetH Configured target height.
+	 * @param bool $upscale Whether enlargement is allowed.
+	 * @return array{0:int,1:int} Resolved target width and height.
+	 */
+	private function resolveTargetDimensions(int $srcW, int $srcH, int $targetW, int $targetH, bool $upscale): array {
+		if ($srcW <= 0 || $srcH <= 0) {
+			return [0, 0];
+		}
+
+		if ($targetW > 0 && $targetH <= 0) {
+			$targetH = (int)\round($targetW * ($srcH / $srcW));
+		} elseif ($targetH > 0 && $targetW <= 0) {
+			$targetW = (int)\round($targetH * ($srcW / $srcH));
+		}
+
+		if (
+			!$upscale
+			&& $targetW > 0
+			&& $targetH > 0
+			&& ($targetW > $srcW || $targetH > $srcH)
+		) {
+			$scale = \min(
+				1.0,
+				$srcW / $targetW,
+				$srcH / $targetH
+			);
+
+			$targetW = \max(1, (int)\round($targetW * $scale));
+			$targetH = \max(1, (int)\round($targetH * $scale));
+		}
+
+		return [$targetW, $targetH];
+	}
+
+
 	/** Resolve a unique target path by suffixing on collision (hex(ts)+rand4). */
 	private function resolveUniqueTargetPath(string $desiredAbsPath): string {
 		if (!\is_file($desiredAbsPath)) {
@@ -1534,11 +1582,29 @@ final class Upload extends BaseService {
 		if (!$img) { return false; }
 
 		if ($applyExif && \function_exists('exif_read_data')) {
-			$img = $this->applyExifOrientation($img, $tmpPath) ?: $img;
+			$this->orientImageFromExif($img, $tmpPath);
 		}
 		$ok = $this->imageSave($img, $targetPath, $fmt, $q);
 		\imagedestroy($img);
 		return $ok;
+	}
+
+	/**
+	 * Apply EXIF orientation and replace the owned GD image when rotation creates a new object.
+	 *
+	 * @param \GdImage $img Owned GD image, replaced by reference when orientation changes it.
+	 * @param string $path Source JPEG path used for EXIF metadata.
+	 * @return bool True when a new oriented image replaced the original.
+	 */
+	private function orientImageFromExif(\GdImage &$img, string $path): bool {
+		$oriented = $this->applyExifOrientation($img, $path);
+		if ($oriented === null || $oriented === $img) {
+			return false;
+		}
+
+		\imagedestroy($img);
+		$img = $oriented;
+		return true;
 	}
 
 	/** @return \GdImage|null */
