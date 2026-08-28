@@ -24,10 +24,11 @@ final class Registry {
 	 * Behavior:
 	 * - This is tier 1 in the deterministic HTTP service map merge:
 	 *   1) Vendor baseline: \CitOmni\Http\Boot\Registry::MAP_HTTP
-	 *   2) Providers: /config/providers.php (their MAP_HTTP blocks)
-	 *   3) App map: /config/services.php
-	 * - Service merge semantics use PHP array union (`+`):
-	 *   left wins, later layers only fill keys not already defined.
+	 *   2) Providers: /config/providers.php (MAP_COMMON, then MAP_HTTP)
+	 *   3) App common map: /config/services.php
+	 *   4) App HTTP map: /config/services_http.php
+	 * - Service merge semantics use PHP array union (`+`) with each later
+	 *   source placed on the left, so later sources override earlier sources.
 	 *
 	 * Notes:
 	 * - Service IDs are resolved via $this->app->{id}.
@@ -35,8 +36,8 @@ final class Registry {
 	 * - Definitions must be either:
 	 *   - 'id' => FQCN
 	 *   - 'id' => ['class' => FQCN, 'options' => [...]]
-	 * - /config/services.php has highest precedence and can override both providers
-	 *   and vendor baseline.
+	 * - /config/services_http.php has highest precedence in HTTP mode, followed by
+	 *   /config/services.php, providers, and the vendor baseline.
 	 */
 	public const MAP_HTTP = [
 
@@ -73,9 +74,11 @@ final class Registry {
 	 * Behavior:
 	 * - This is tier 1 in the deterministic HTTP config merge:
 	 *   1) Vendor baseline: \CitOmni\Http\Boot\Registry::CFG_HTTP
-	 *   2) Providers: /config/providers.php (their CFG_HTTP blocks)
-	 *   3) App base: /config/citomni_http_cfg.php
-	 *   4) Env overlay: /config/citomni_http_cfg.{ENV}.php
+	 *   2) Providers: /config/providers.php (CFG_COMMON, then CFG_HTTP)
+	 *   3) App common: /config/citomni_cfg.php
+	 *   4) App HTTP: /config/citomni_http_cfg.php
+	 *   5) App common env: /config/citomni_cfg.{ENV}.php
+	 *   6) App HTTP env: /config/citomni_http_cfg.{ENV}.php
 	 * - Config merge semantics are deep associative merge with last wins.
 	 *
 	 * Notes:
@@ -88,61 +91,6 @@ final class Registry {
 	 *   remains the final authority.
 	 */
 	public const CFG_HTTP = [
-
-		/*
-		 *------------------------------------------------------------------
-		 * APPLICATION IDENTITY
-		 *------------------------------------------------------------------
-		 */
-		
-		'identity' => [
-
-			// Human-readable application name.
-			// - Shown in HTML titles, error pages, or fallback legal pages.
-			// - Keep it short and brand-like, e.g. "My CitOmni App".
-			'app_name' => 'My CitOmni App',
-
-			// Legal owner of the application and its content.
-			// - Use the full legal entity name (company, org, or person).
-			// - Displayed on legal pages like /legal/website-license.
-			'owner_name' => 'ACME Ltd',
-
-			// Contact address for legal/permissions requests.
-			// - Typically a compliance, legal, or admin mailbox.
-			// - Shown on the website-license page.
-			'owner_email'=> 'legal@acme.com',
-
-			// Public homepage of the legal owner.
-			// - Used for attribution links in license/terms pages.
-			// - Should be a stable corporate URL, not a product subpage.
-			'owner_url'  => 'https://www.acme.com',
-
-			// Public-facing support contact (user questions, helpdesk).
-			// - This is what end-users see on "Contact us" pages or footers.
-			// - Localized labels (see language/contact.php) decide if shown as
-			//   "Support", "Helpdesk", "Customer Service", etc.
-			'contact_email' => 'support@mycitomniapp.com',
-
-			// Public phone number for end-user support.
-			// - Only include if you actually staff the line.
-			// - Format: international + local, human-readable.
-			'contact_phone' => '(+45) 12 34 56 78',
-		],
-
-
-		/*
-		 *------------------------------------------------------------------
-		 * LOCALE
-		 *------------------------------------------------------------------
-		 */
-		 
-		'locale' => [
-			'language'		=> 'en',	// used for <html lang="..."> etc.
-			'icu_locale'	=> 'en_US',	// used by Intl (dates/numbers)
-			'timezone' 		=> 'UTC',	
-			'charset'		=> 'UTF-8',	// PHP default_charset + HTML output
-		],		
-
 
 		/*
 		 *------------------------------------------------------------------
