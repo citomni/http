@@ -1012,13 +1012,6 @@ final class Registry {
 			'action' => 'appinfoJson',
 			'methods' => ['GET'],
 		],
-		'/_system/appinfo-old.html' => [
-			'controller' => \CitOmni\Http\Controller\SystemController::class,
-			'action' => 'appinfo',
-			'methods' => ['GET'],
-			'template_file' => 'public/appinfo.html',
-			'template_layer' => 'citomni/http'
-		],
 		
 		// --- Regex routes (matches BEFORE top-level placeholders) ---
 		'regex' => [

@@ -104,27 +104,27 @@
 	}
 
 	.panel--routes::before{
-		content: "Routes (prod)";
+		content: "Routes";
+	}
+
+	.panel--commands::before{
+		content: "Commands";
 	}
 
 	.panel--cfg::before{
-		content: "Config (prod)";
-	}
-
-	.panel--cfg-flat::before{
-		content: "Flat config (prod)";
+		content: "Active config";
 	}
 
 	.panel--cfg-dev::before{
-		content: "Complete CFG (dev)";
+		content: "Projected config (dev)";
 	}
 
 	.panel--cfg-stage::before{
-		content: "Complete CFG (stage)";
+		content: "Projected config (stage)";
 	}
 
 	.panel--cfg-prod::before{
-		content: "Complete CFG (prod)";
+		content: "Projected config (prod)";
 	}
 		
 {% endblock %}
@@ -132,43 +132,58 @@
 
 {% block main_content %}
 
+	{% set $json_options = \JSON_PRETTY_PRINT | \JSON_UNESCAPED_SLASHES | \JSON_UNESCAPED_UNICODE | \JSON_THROW_ON_ERROR %}
+	{% set $system_info = [
+		'citomni' => $appInfo['citomni'],
+		'app' => $appInfo['app'],
+		'runtime' => $appInfo['runtime'],
+		'metrics' => $appInfo['metrics'],
+		'opcache' => $appInfo['opcache'],
+	] %}
+
 	<p class="lead">{{ $lead_text }}</p>
 
 	<!-- Optional key/value quick facts -->
 	<dl class="meta">
-		<dt>Status:</dt><dd>{{ $status_code }}{# {{ $status_text }} #}</dd>
+		<dt>Status:</dt><dd>{{ $status_code }}</dd>
 	</dl>
 
 	<div class="panel panel--header panel--sysinfo" role="region" aria-label="System information">
-		<pre>{{ $sysinfoJson }}</pre>
+		<pre>{{ \json_encode($system_info, $json_options) }}</pre>
 	</div>
 
 	<div class="panel panel--header panel--packages" role="region" aria-label="Packages">
-		<pre>{{ $packagesJson }}</pre>
+		<pre>{{ \json_encode($appInfo['packages'], $json_options) }}</pre>
 	</div>
 
-	<div class="panel panel--header panel--routes" role="region" aria-label="Routes (prod)">
-		<pre>{{ $routesPhpBody }}</pre>
+	<div class="panel panel--header panel--routes" role="region" aria-label="Routes">
+		<pre>{{ \json_encode($appInfo['routes'], $json_options) }}</pre>
 	</div>
 
-	<div class="panel panel--header panel--cfg" role="region" aria-label="Config (prod)">
-		<pre>{{ $cfgPhpExRoutesBody }}</pre>
+	<div class="panel panel--header panel--commands" role="region" aria-label="Commands">
+		<pre>{{ \json_encode($appInfo['commands'], $json_options) }}</pre>
 	</div>
 
-	<div class="panel panel--header panel--cfg-flat" role="region" aria-label="Flat config (prod)">
-		<pre>{{ $cfgFlatJson }}</pre>
+	<div class="panel panel--header panel--cfg" role="region" aria-label="Active config">
+		<pre>{{ \json_encode($appInfo['cfg'], $json_options) }}</pre>
 	</div>
 
-	<div class="panel panel--header panel--cfg-dev" role="region" aria-label="Complete CFG (dev)">
-		<pre>{{ $cfgEnvDevJson }}</pre>
-	</div>
+	{% if(isset($appInfo['cfg_by_env']['dev'])) %}
+		<div class="panel panel--header panel--cfg-dev" role="region" aria-label="Projected config (dev)">
+			<pre>{{ \json_encode($appInfo['cfg_by_env']['dev'], $json_options) }}</pre>
+		</div>
+	{% endif %}
 
-	<div class="panel panel--header panel--cfg-stage" role="region" aria-label="Complete CFG (stage)">
-		<pre>{{ $cfgEnvStageJson }}</pre>
-	</div>
+	{% if(isset($appInfo['cfg_by_env']['stage'])) %}
+		<div class="panel panel--header panel--cfg-stage" role="region" aria-label="Projected config (stage)">
+			<pre>{{ \json_encode($appInfo['cfg_by_env']['stage'], $json_options) }}</pre>
+		</div>
+	{% endif %}
 
-	<div class="panel panel--header panel--cfg-prod" role="region" aria-label="Complete CFG (prod)">
-		<pre>{{ $cfgEnvProdJson }}</pre>
-	</div>
+	{% if(isset($appInfo['cfg_by_env']['prod'])) %}
+		<div class="panel panel--header panel--cfg-prod" role="region" aria-label="Projected config (prod)">
+			<pre>{{ \json_encode($appInfo['cfg_by_env']['prod'], $json_options) }}</pre>
+		</div>
+	{% endif %}
 	
 {% endblock %}
