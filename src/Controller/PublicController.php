@@ -165,38 +165,34 @@ class PublicController extends BaseController {
 	}
 
 
-
 	/**
 	 * GET /legal/website-license/
 	 *
 	 * Outputs a simple "Website Content License" page.
 	 *
 	 * Behavior:
-	 * - Pulls legal/branding info from $this->app->cfg->identity (owner_name,
-	 *   owner_email, owner_url, etc.). That info lives in config, not in routes.
-	 *
+	 * - Pulls application and operator identity from $this->app->cfg->identity.
+	 * - Does not imply that the application operator owns third-party content.
 	 * - Sends "noindex" and no-cache headers using Response::noIndex().
-	 *
-	 * - If CITOMNI_PUBLIC_ROOT_URL is defined, we also emit a Link: rel="canonical"
-	 *   header and can use that for redirects from alternative URLs.
+	 * - If CITOMNI_PUBLIC_ROOT_URL is defined, emits a canonical Link header.
 	 *
 	 * @return void
 	 *
-	 * @throws \RuntimeException if we cannot determine an owner name at all
-	 *                           (identity.owner_name or identity.app_name should exist).
+	 * @throws \RuntimeException When neither identity.operator.name nor
+	 *                           identity.app_name is configured.
 	 */
 	public function websiteLicense(): void {
 		$cfg = $this->app->cfg;
 		$identity = $cfg->identity ?? (object)[];
+		$operator = $identity->operator ?? null;
 
-		$ownerName  = (string)($identity->owner_name ?? ($identity->app_name ?? ''));
-		$ownerEmail = (string)($identity->owner_email ?? '');
-		$ownerUrl   = (string)($identity->owner_url ?? '');
-		$year       = (int)\date('Y');
+		$operatorName  = (string)($operator->name ?? ($identity->app_name ?? ''));
+		$operatorEmail = (string)($operator->email ?? '');
+		$operatorUrl   = (string)($operator->url ?? '');
 
-		if ($ownerName === '') {
-			// Fail fast; config should provide either owner_name or app_name.
-			throw new \RuntimeException('Missing identity.owner_name (or app_name) in configuration.');
+		if ($operatorName === '') {
+			// Fail fast; config should provide either operator.name or app_name.
+			throw new \RuntimeException('Missing identity.operator.name (or identity.app_name) in configuration.');
 		}
 
 		// Robots + no-cache; also safe for member-only pages.
@@ -218,17 +214,22 @@ class PublicController extends BaseController {
 		$html .= '<title>Website Content License</title>';
 		$html .= '<body style="margin:0;padding:24px;font:16px/1.6 ui-serif,Georgia,Cambria,Times,serif">';
 		$html .= '<h1>Website Content License</h1>';
-		$html .= '<p>All textual and visual content on this website is &copy; '
-			. $e((string)$year) . ' ' . $e($ownerName) . ', unless stated otherwise.</p>';
-		$html .= '<p>Content may not be copied, redistributed, or modified without prior written consent.</p>';
-		$html .= '<p>This website is built on the <a href="https://www.citomni.com/" target="_blank" rel="noopener">CitOmni framework</A> <a href="https://raw.githubusercontent.com/citomni/kernel/refs/heads/main/LICENSE" target="_blank" rel="noopener noreferrer">(MIT)</a>. '
-			. 'The framework’s license applies to the framework only, not to the website content.</p>';
-		if ($ownerEmail !== '') {
-			$html .= '<p>Permissions: ' . $e($ownerEmail) . '</p>';
+		$html .= '<p>This website is operated by ' . $e($operatorName) . '.</p>';
+		$html .= '<p>Unless explicitly stated otherwise, no license is granted to copy, redistribute, or modify content published on this website.</p>';
+		$html .= '<p>Copyright and other intellectual property rights in individual content may belong to '
+			. $e($operatorName) . ' or to identified third-party rights holders.</p>';
+		$html .= '<p>This website is built on the <a href="https://www.citomni.com/" target="_blank" rel="noopener">CitOmni framework</a> '
+			. '<a href="https://raw.githubusercontent.com/citomni/kernel/refs/heads/main/LICENSE" target="_blank" rel="noopener noreferrer">(MIT)</a>. '
+			. 'The framework&rsquo;s license applies to the framework only, not to website content.</p>';
+
+		if ($operatorEmail !== '') {
+			$html .= '<p>Permissions: ' . $e($operatorEmail) . '</p>';
 		}
-		if ($ownerUrl !== '') {
-			$html .= '<p>Owner: <a href="' . $e($ownerUrl) . '">' . $e($ownerUrl) . '</a></p>';
+
+		if ($operatorUrl !== '') {
+			$html .= '<p>Operator: <a href="' . $e($operatorUrl) . '">' . $e($operatorUrl) . '</a></p>';
 		}
+
 		$html .= '</body></html>';
 
 		// Emits Content-Type and exits.
