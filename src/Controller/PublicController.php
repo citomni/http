@@ -168,11 +168,13 @@ class PublicController extends BaseController {
 	/**
 	 * GET /legal/website-license/
 	 *
-	 * Outputs a simple "Website Content License" page.
+	 * Outputs the application's "Website Content License" page.
 	 *
 	 * Behavior:
-	 * - Pulls application and operator identity from $this->app->cfg->identity.
-	 * - Does not imply that the application operator owns third-party content.
+	 * - Pulls application, operator, and public contact identity from $this->app->cfg->identity.
+	 * - Identifies the application operator without implying ownership of third-party content.
+	 * - Uses public_contact.email for permission requests, falling back to operator.email.
+	 * - Distinguishes operator-controlled content, third-party content, and CitOmni licensing.
 	 * - Sends "noindex" and no-cache headers using Response::noIndex().
 	 * - If CITOMNI_PUBLIC_ROOT_URL is defined, emits a canonical Link header.
 	 *
@@ -185,10 +187,11 @@ class PublicController extends BaseController {
 		$cfg = $this->app->cfg;
 		$identity = $cfg->identity ?? (object)[];
 		$operator = $identity->operator ?? null;
+		$publicContact = $identity->public_contact ?? null;
 
-		$operatorName  = (string)($operator->name ?? ($identity->app_name ?? ''));
-		$operatorEmail = (string)($operator->email ?? '');
-		$operatorUrl   = (string)($operator->url ?? '');
+		$operatorName = (string)($operator->name ?? ($identity->app_name ?? ''));
+		$operatorUrl = (string)($operator->url ?? '');
+		$permissionsEmail = (string)($publicContact->email ?? ($operator->email ?? ''));
 
 		if ($operatorName === '') {
 			// Fail fast; config should provide either operator.name or app_name.
@@ -208,29 +211,62 @@ class PublicController extends BaseController {
 
 		$e = static fn(?string $s): string => \htmlspecialchars((string)$s, \ENT_QUOTES | \ENT_SUBSTITUTE, 'UTF-8');
 
-		$html  = '<!doctype html><html lang="en"><meta charset="utf-8">';
+		$html  = '<!doctype html><html lang="en"><head><meta charset="utf-8">';
 		$html .= '<meta name="viewport" content="width=device-width,initial-scale=1">';
 		$html .= '<meta name="robots" content="noindex,follow">';
 		$html .= '<title>Website Content License</title>';
-		$html .= '<body style="margin:0;padding:24px;font:16px/1.6 ui-serif,Georgia,Cambria,Times,serif">';
-		$html .= '<h1>Website Content License</h1>';
-		$html .= '<p>This website is operated by ' . $e($operatorName) . '.</p>';
-		$html .= '<p>Unless explicitly stated otherwise, no license is granted to copy, redistribute, or modify content published on this website.</p>';
-		$html .= '<p>Copyright and other intellectual property rights in individual content may belong to '
-			. $e($operatorName) . ' or to identified third-party rights holders.</p>';
-		$html .= '<p>This website is built on the <a href="https://www.citomni.com/" target="_blank" rel="noopener">CitOmni framework</a> '
-			. '<a href="https://raw.githubusercontent.com/citomni/kernel/refs/heads/main/LICENSE" target="_blank" rel="noopener noreferrer">(MIT)</a>. '
-			. 'The framework&rsquo;s license applies to the framework only, not to website content.</p>';
+		$html .= '<style>';
+		$html .= '*{box-sizing:border-box}';
+		$html .= 'body{margin:0;background:#f5f7fa;color:#202124;font:16px/1.65 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}';
+		$html .= 'main{max-width:880px;margin:0 auto;padding:56px 24px 72px}';
+		$html .= 'article{background:#fff;border:1px solid #e1e5ea;border-radius:12px;padding:44px 48px;box-shadow:0 1px 3px rgba(0,0,0,.04)}';
+		$html .= 'h1{margin:0 0 8px;font-size:2rem;line-height:1.2;letter-spacing:-.02em}';
+		$html .= 'h2{margin:36px 0 10px;font-size:1.2rem;line-height:1.35}';
+		$html .= 'p{margin:0 0 16px}';
+		$html .= '.lead{margin-bottom:28px;color:#5f6368;font-size:1.05rem}';
+		$html .= '.operator{margin:0 0 32px;padding:15px 18px;border:1px solid #e1e5ea;border-radius:8px;background:#fafbfc}';
+		$html .= '.contact{margin-top:14px;padding:16px 18px;border-radius:8px;background:#f5f7fa}';
+		$html .= '.contact p:last-child{margin-bottom:0}';
+		$html .= '.meta{margin-top:40px;padding-top:20px;border-top:1px solid #e1e5ea;color:#5f6368;font-size:.925rem}';
+		$html .= 'a{color:#1558d6;text-decoration-thickness:1px;text-underline-offset:2px}';
+		$html .= '@media(max-width:640px){main{padding:24px 14px 40px}article{padding:28px 22px}h1{font-size:1.7rem}}';
+		$html .= '</style></head><body><main><article>';
+		$html .= '<header><h1>Website Content License</h1>';
+		$html .= '<p class="lead">Copyright, permitted use and third-party rights.</p></header>';
+		$html .= '<p class="operator"><strong>Website operator</strong><br>' . $e($operatorName) . '</p>';
 
-		if ($operatorEmail !== '') {
-			$html .= '<p>Permissions: ' . $e($operatorEmail) . '</p>';
+		$html .= '<h2>Copyright</h2>';
+		$html .= '<p>Content created and published by the website operator is protected by copyright unless otherwise stated.</p>';
+
+		$html .= '<h2>Third-party content</h2>';
+		$html .= '<p>Images, trademarks, texts and other third-party material remain subject to the rights and licenses of their respective rights holders.</p>';
+
+		$html .= '<h2>Permitted use</h2>';
+		$html .= '<p>Content protected by rights held or administered by the website operator may not be copied, redistributed, modified or commercially exploited without permission, except where permitted by applicable law or an explicitly stated license.</p>';
+
+		$html .= '<h2>Permissions</h2>';
+
+		if ($permissionsEmail !== '') {
+			$html .= '<div class="contact">';
+			$html .= '<p>Requests concerning use of content for which the website operator holds or administers the relevant rights may be directed to:</p>';
+			$html .= '<p><a href="mailto:' . $e($permissionsEmail) . '">' . $e($permissionsEmail) . '</a></p>';
+			$html .= '</div>';
+		} else {
+			$html .= '<p>Permission must be obtained from the relevant rights holder where required.</p>';
 		}
+
+		$html .= '<h2>Software</h2>';
+		$html .= '<p>This website is powered by the <a href="https://www.citomni.com/" target="_blank" rel="noopener">CitOmni framework</a>. '
+			. 'CitOmni is separately licensed under the <a href="https://raw.githubusercontent.com/citomni/kernel/refs/heads/main/LICENSE" target="_blank" rel="noopener noreferrer">MIT License</a>. '
+			. 'That license applies to the CitOmni framework and does not grant rights to the website&rsquo;s content or other separately licensed software.</p>';
+
+		$html .= '<footer class="meta"><strong>Operator</strong><br>' . $e($operatorName);
 
 		if ($operatorUrl !== '') {
-			$html .= '<p>Operator: <a href="' . $e($operatorUrl) . '">' . $e($operatorUrl) . '</a></p>';
+			$html .= ' &middot; <a href="' . $e($operatorUrl) . '">' . $e($operatorUrl) . '</a>';
 		}
 
-		$html .= '</body></html>';
+		$html .= '</footer></article></main></body></html>';
 
 		// Emits Content-Type and exits.
 		$this->app->response->html($html, 200);
