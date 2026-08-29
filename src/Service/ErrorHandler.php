@@ -56,7 +56,9 @@ use CitOmni\Kernel\Service\BaseService;
  * - error_handler.render.detail.trace.ellipsis (string, default "...")
  * - error_handler.log.trigger (int bitmask, default E_ALL) - Which PHP errors to log (non-fatal path).
  * - error_handler.log.path (string) - Directory for JSONL logs.
- * - error_handler.log.max_bytes (int, default 2_000_000) - Rotation threshold per live file.
+ * - error_handler.log.max_bytes (int, default 2_000_000) - Soft rotation threshold per live
+ *   file. Under concurrent writers the live file may temporarily exceed it before a subsequent
+ *   writer rotates (rotate() re-checks the size under lock and skips if already rotated).
  * - error_handler.log.max_files (int, default 10) - Max rotated siblings to retain (pruned newest-first).
  * - error_handler.templates.html (string) - Primary HTML template path.
  * - error_handler.templates.html_failsafe (string) - Minimal fallback template path.
@@ -101,6 +103,9 @@ use CitOmni\Kernel\Service\BaseService;
  */
 final class ErrorHandler extends BaseService {
 	
+	/** Shared JSON encoding policy for responses, logs, dev details, and trace keys. */
+	private const JSON_FLAGS = \JSON_UNESCAPED_SLASHES | \JSON_UNESCAPED_UNICODE | \JSON_PARTIAL_OUTPUT_ON_ERROR | \JSON_INVALID_UTF8_SUBSTITUTE;
+
 	/** Frozen options: cfg.error_handler merged with ctor $options (last-wins). */
 	private array $opt = [];
 
@@ -113,7 +118,7 @@ final class ErrorHandler extends BaseService {
 	/** Absolute log directory (no trailing slash). */
 	private string $logDir = '';
 
-	/** Max size in bytes of the live JSONL file before rotation. */
+	/** Soft rotation threshold in bytes; under concurrent writers the live file may temporarily exceed it. */
 	private int $maxBytes = 2_000_000;
 
 	/** How many rotated siblings to keep (newest first). */
@@ -543,12 +548,18 @@ final class ErrorHandler extends BaseService {
 	 * - Short-circuits for fatal-class errors; they are owned by the shutdown handler.
 	 * - Logs non-fatal errors when the log mask matches.
 	 * - Optionally renders a response when the render mask matches (typically only in dev).
-	 * - Always returns true to suppress PHP's internal error handler.
+	 * - Returns true for handled non-fatals; returns false to defer (E_USER_ERROR, or errors
+	 *   suppressed via @ / below error_reporting()) so PHP's own handling proceeds.
 	 *
 	 * Notes:
 	 * - E_USER_ERROR: Some setups route E_USER_ERROR through set_error_handler(). We treat it as fatal and
 	 *   defer to the shutdown handler to avoid duplicate logging and half-rendered responses. The isFatal()
 	 *   guard enforces this.
+	 * - Honors @-suppression / error_reporting(): suppressed diagnostics are ignored
+	 *   (returns false) so the @ operator keeps working and our own fail-soft I/O does
+	 *   not recurse back through this handler.
+	 * - Re-entrancy: while already inside a handler/render (self::$inHandler), the
+	 *   client render is skipped; logging still happens.
 	 * - Never throws; write failures are fail-soft inside writeJsonl().
 	 *
 	 * Typical usage:
@@ -561,17 +572,33 @@ final class ErrorHandler extends BaseService {
 	 *   // Development (render mask includes E_WARNING, etc.):
 	 *   // Warning triggers an immediate HTML/JSON error response with developer details.
 	 *
-	 * @return bool True to indicate the error was handled (prevents PHP's internal handler).
+	 * @return bool True when handled here; false to defer to PHP (E_USER_ERROR, @-suppressed, or out-of-mask).
 	 */
 	public function handlePhpError(int $errno, string $errstr, string $errfile, int $errline): bool {
 
-		// Fatal territory belongs to the shutdown handler: No logging or rendering here.
-		// Rationale: Avoid duplicate records and avoid appending to a half-sent response.
-		if ($this->isFatal($errno)) {
-			return true;
+		// Respect @-suppression and the active error_reporting() level.
+		// Since PHP 8.0 this handler is still invoked for @-suppressed diagnostics, but
+		// with a reduced error_reporting() mask. Skipping them keeps the @ operator
+		// working and prevents our own fail-soft, @-guarded logging/rotation I/O from
+		// being re-reported (and potentially recursing) through this handler.
+		if ((\error_reporting() & $errno) === 0) {
+			return false;
 		}
 
-		// Log when this level is enabled in the mask
+		// E_USER_ERROR is the only fatal-class error that can reach a user error handler
+		// (real engine fatals bypass set_error_handler()). Returning true here would
+		// SILENTLY resume execution - verified: the error then never reaches
+		// error_get_last() at shutdown, so it would be swallowed with no log and no
+		// response. Returning false hands it back to PHP, which halts the request and
+		// populates error_get_last(), so handleShutdown() owns the terminal log+render
+		// (display_errors is forced to 0 in install(), so PHP emits nothing meanwhile).
+		if ($this->isFatal($errno)) {
+			return false;
+		}
+
+		// Log when this level is enabled in the mask (fail-soft; safe even mid-render).
+		$errorId = '';
+		$rec     = null;
 		if (($errno & $this->logMask) !== 0) {
 			$errorId = $this->newErrorId();
 			$rec = $this->baseRecord('php_error', $errorId, (int)($this->statusDefaults['php_error'] ?? 500)) + [
@@ -581,19 +608,29 @@ final class ErrorHandler extends BaseService {
 				'line'    => $errline,
 			];
 			$this->writeJsonl($this->logDir . '/http_err_phperror.jsonl', $rec);
+		}
 
-			// Optional surface to the client (usually only in dev)
-			if (($errno & $this->renderMask) !== 0) {
+		// Optional surface to the client (usually only in dev). Never re-enter: if we
+		// are already inside a handler/render, skip rendering to avoid nested responses,
+		// duplicated headers, and a premature exit().
+		if (($errno & $this->renderMask) !== 0 && !self::$inHandler) {
+			self::$inHandler = true;
+			try {
+				if ($errorId === '') {
+					$errorId = $this->newErrorId();
+				}
 				$this->renderResponse((int)($this->statusDefaults['php_error'] ?? 500), $errorId, [
 					'title'   => 'PHP Error',
 					'message' => $errstr,
 					'details' => $this->devDetail ? $rec : null,
 					'type'    => 'php_error',
 				]);
+			} finally {
+				self::$inHandler = false;
 			}
 		}
 
-		// Tell PHP we took care of it (prevents the internal handler)
+		// Tell PHP we took care of it (prevents the internal handler / double logging).
 		return true;
 	}
 
@@ -655,6 +692,10 @@ final class ErrorHandler extends BaseService {
 		// Best-effort logging: Never throw from shutdown.
 		$this->writeJsonl($this->logDir . '/http_err_shutdown.jsonl', $rec);
 
+		// Claim the handler guard so any diagnostic emitted while we render cannot
+		// re-enter handlePhpError() and produce a nested/duplicate response.
+		self::$inHandler = true;
+
 		// Own the last word on the wire: Render a clean error page or a minimal tail.
 		$this->renderResponse($status, $errorId, [
 			'title'   => 'Fatal Error',
@@ -678,7 +719,7 @@ final class ErrorHandler extends BaseService {
  *
  * NOTES
  *   - If headers were already sent, never change status/headers; append tail only.
- *   - Clear all output buffers before writing a full replacement response.
+ *   - Discard buffered partial output where possible before writing the error response.
  *   - Include X-Request-Id and no-cache headers; set X-Content-Type-Options:nosniff.
  *
  */
@@ -687,8 +728,8 @@ final class ErrorHandler extends BaseService {
 	 * Emits a complete, negotiated error response (HTML or JSON) with safe replacement semantics, and stops execution.
 	 *
 	 * Behavior:
-	 * - If headers are not sent, replace the response atomically:
-	 *   1) Clear all output buffers
+	 * - If headers are not sent, replace the response where buffering permits:
+	 *   1) Discard buffered partial output where possible
 	 *   2) Set HTTP status, no-cache headers, X-Content-Type-Options, and X-Request-Id
 	 *   3) Negotiate body (HTML or JSON), set Content-Type, and emit the full body
 	 * - If headers/bytes are already sent, do not change headers or status:
@@ -699,6 +740,9 @@ final class ErrorHandler extends BaseService {
 	 * - Developer details are only included when $this->devDetail is true and a details payload is provided
 	 * - JSON uses JSON_PARTIAL_OUTPUT_ON_ERROR for resilience; better a partial payload than a broken response
 	 * - HEAD requests are not special-cased; sending a body is acceptable here (error path, not a normal handler)
+	 * - Status is forced via a raw "HTTP/<proto> <code>" header (last-write-wins),
+	 *   not http_response_code(): the latter emits an E_WARNING on PHP 8.5+ (and has
+	 *   no effect) when a status line was already queued by a prior layer
 	 * - Idempotent per request: Once called, control flow ends predictably from this method
 	 *
 	 * Typical usage:
@@ -731,8 +775,19 @@ final class ErrorHandler extends BaseService {
 			// Clean slate: Drop any partial output so we present one coherent response
 			$this->clearAllBuffers();
 
-			// Status and safety headers: No cache, no sniff, and include correlation id
-			\http_response_code($status);
+			// Status line: Force the status ourselves, overriding any raw "HTTP/..." line
+			// a prior layer (Response/Router) may have queued. We intentionally avoid
+			// http_response_code() here: since PHP 8.5 it emits an E_WARNING ("has no
+			// effect") when a raw status line was already set - and in that case it would
+			// not override it anyway. Emitting the status line ourselves is last-write-wins
+			// and warning-free.
+			$proto = (string)($_SERVER['SERVER_PROTOCOL'] ?? '');
+			if ($proto === '' || \strncasecmp($proto, 'HTTP/', 5) !== 0) {
+				$proto = 'HTTP/1.1';
+			}
+			\header($proto . ' ' . $status . ' ' . $this->statusText($status), true, $status);
+
+			// Safety headers: No cache, no sniff, and include correlation id
 			\header('Cache-Control: no-store, max-age=0', true);
 			\header('Pragma: no-cache', true);
 			\header('Expires: 0', true);
@@ -753,10 +808,7 @@ final class ErrorHandler extends BaseService {
 				if ($this->devDetail && isset($payload['details'])) {
 					$out['details'] = $payload['details'];
 				}
-				echo \json_encode(
-					$out,
-					\JSON_UNESCAPED_SLASHES | \JSON_UNESCAPED_UNICODE | \JSON_PARTIAL_OUTPUT_ON_ERROR
-				);
+				echo \json_encode($out, self::JSON_FLAGS);
 			} else {
 				\header('Content-Type: text/html; charset=UTF-8', true);
 				echo $this->renderHtml(
@@ -842,10 +894,10 @@ final class ErrorHandler extends BaseService {
 	 * Clear all active output buffers
 	 *
 	 * Behavior:
-	 * - Repeatedly calls ob_end_clean() until no buffers remain
+	 * - Pops removable buffers; a non-removable buffer is content-cleared (if cleanable) and left in place
 	 *
 	 * Notes:
-	 * - Ensures we can emit a full replacement response without leftovers
+	 * - Removes leftovers where possible; a non-removable buffer may remain but is emptied when cleanable
 	 *
 	 * Typical usage:
 	 *   $this->clearAllBuffers(); // Right before writing status line + headers + body
@@ -856,8 +908,17 @@ final class ErrorHandler extends BaseService {
 	 * @return void
 	 */
 	private function clearAllBuffers(): void {
-		while (\ob_get_level() > 0) {
-			@\ob_end_clean(); // Best-effort: Silence if a layer refuses to close
+		// Drop partial output so the error response is coherent. Removable buffers are
+		// popped; a non-removable buffer (e.g. zlib.output_compression, or one whose flags
+		// lack REMOVABLE) cannot be popped, so we at least discard its content when it is
+		// cleanable, then stop - we can neither remove it nor reach the buffers beneath it.
+		// Stopping also avoids an infinite loop in the one place that must never hang.
+		while (($level = \ob_get_level()) > 0) {
+			if (@\ob_end_clean() && \ob_get_level() < $level) {
+				continue; // Removed a buffer and made progress.
+			}
+			@\ob_clean(); // Non-removable: discard content if cleanable (no-op otherwise).
+			break;        // Cannot pop past a buffer we cannot remove.
 		}
 	}
 
@@ -891,9 +952,20 @@ final class ErrorHandler extends BaseService {
 	 */
 	private function renderHtml(int $status, string $errorId, array $payload): string {
 		
+		// Locale is read defensively: On the terminal error path we must assume config
+		// or application state may itself be broken (often the very reason we are
+		// rendering an error), so a missing/defective locale must never be able to throw
+		// before the primary/failsafe/inline fallback chain runs. This targeted catch is
+		// the sanctioned ErrorHandler exception to the no-broad-catch rule.
+		try {
+			$language = (string)($this->app->cfg->locale->language ?? '');
+		} catch (\Throwable) {
+			$language = '';
+		}
+
 		// Build a compact context for templates; only safe, bounded values
 		$data = [
-			'language'   => $this->app->cfg->locale->language,  // Exposed for templates that localize copy
+			'language'   => $language,  // Exposed for templates that localize copy
 			'status'     => $status,
 			'status_text'=> $this->statusText($status),
 			'error_id'   => $errorId,
@@ -931,7 +1003,7 @@ final class ErrorHandler extends BaseService {
 		if ($this->devDetail && isset($payload['details'])) {
 			$detail = '<pre style="white-space:pre-wrap;font:12px/1.4 ui-monospace,Consolas,monospace;">'
 				. \htmlspecialchars(
-					\json_encode($payload['details'], \JSON_UNESCAPED_SLASHES | \JSON_UNESCAPED_UNICODE),
+					\json_encode($payload['details'], self::JSON_FLAGS),
 					\ENT_QUOTES | \ENT_SUBSTITUTE,
 					'UTF-8'
 				  )
@@ -1035,7 +1107,8 @@ HTML;
 	 * Behavior:
 	 * - Encodes $record once and appends it under an exclusive file lock (best effort).
 	 * - Checks current size under lock; if the next line would exceed $this->maxBytes,
-	 *   it unlocks/closes, rotates the file, then reopens and appends.
+	 *   it unlocks/closes, rotates the file, then reopens and appends. maxBytes is a soft
+	 *   threshold: under concurrent writers the live file may temporarily exceed it before rotating.
 	 * - Never throws to callers; any failure is soft-logged via PHP's error_log.
 	 *
 	 * Notes:
@@ -1054,7 +1127,7 @@ HTML;
 	 *
 	 * Examples:
 	 *   $this->writeJsonl($this->logDir . '/http_err_exception.jsonl', $rec);
-	 *   // Appends one JSON line; rotates first if the write would exceed maxBytes.
+	 *   // Appends one JSON line; rotation is triggered around the configured soft threshold.
 	 *
 	 * @param string               $file   Absolute path to the live JSONL file (e.g., ".../http_err_exception.jsonl").
 	 * @param array<string, mixed> $record Event payload to encode and append.
@@ -1069,10 +1142,7 @@ HTML;
 			}
 
 			// Encode once; partial output beats losing the whole event
-			$encoded = \json_encode(
-				$record,
-				\JSON_UNESCAPED_SLASHES | \JSON_UNESCAPED_UNICODE | \JSON_PARTIAL_OUTPUT_ON_ERROR
-			);
+			$encoded = \json_encode($record, self::JSON_FLAGS);
 			if ($encoded === false) {
 				// Extremely rare with PARTIAL_OUTPUT_ON_ERROR, but keep the line.
 				$encoded = '{"encode_error":true}';
@@ -1210,7 +1280,7 @@ HTML;
 				// Paranoid but cheap: Handle extremely rare microtime collisions
 				$try = 0;
 				while (\is_file($rotated) && $try++ < 5) {
-					$suffix = '-' . \substr(\bin2hex(\random_bytes(2)), 0, 4);
+					$suffix = '-' . \substr($this->randomHex(2), 0, 4);
 					$rotated = $prefix . '.' . $ts . $suffix . $ext;
 				}
 
@@ -1408,15 +1478,17 @@ HTML;
 	 */
 	private function detectRequestId(): string {
 		
-		$hdr = (string)($_SERVER['HTTP_X_REQUEST_ID'] ?? '');
+		// Sanitize FIRST, then test: a header made only of characters the whitelist
+		// strips would otherwise pass the "!== ''" check and yield an empty id.
+		$hdr = $this->sanitizeId((string)($_SERVER['HTTP_X_REQUEST_ID'] ?? ''));
 		
 		if ($hdr !== '') {
-			return $this->sanitizeId($hdr); // Trust but sanitize
+			return $hdr; // Trusted-but-sanitized inbound id
 		}
 		
 		// Very cheap, unique-enough id: time + random
 		// Example: 20251001-7H2X-6f4d91c8
-		return \date('YmdHis') . '-' . \strtoupper(\bin2hex(\random_bytes(2))) . '-' . \substr(\bin2hex(\random_bytes(5)), 0, 8);
+		return \date('YmdHis') . '-' . \strtoupper($this->randomHex(2)) . '-' . \substr($this->randomHex(5), 0, 8);
 	}
 
 
@@ -1456,12 +1528,39 @@ HTML;
 	 *   $errorId = $this->newErrorId(); // e_1a2b3c4d5e6f7a8b
 	 *
 	 * Failure:
-	 * - None. random_bytes() may throw in extreme environments, but is reliable on supported OSes.
+	 * - None. Random generation degrades to a non-cryptographic fallback if random_bytes() fails.
+	 *   Random generation is fail-soft via randomHex().
 	 *
 	 * @return string
 	 */
 	private function newErrorId(): string {
-		return 'e_' . \substr(\bin2hex(\random_bytes(8)), 0, 16);  // 8 bytes -> 16 hex chars
+		return 'e_' . \substr($this->randomHex(8), 0, 16);  // 8 bytes -> 16 hex chars
+	}
+
+
+	/**
+	 * Return N random bytes as lowercase hex, without ever throwing.
+	 *
+	 * Behavior:
+	 * - Uses random_bytes() for cryptographic quality on the happy path.
+	 * - On the (astronomically rare) failure, falls back to mt_rand() so the handlers
+	 *   keep their "never throw" contract. The fallback is not cryptographically
+	 *   strong, but correlation ids do not require that.
+	 *
+	 * @param  int    $bytes Number of random bytes to produce.
+	 * @return string Lowercase hex string of length 2*$bytes.
+	 */
+	private function randomHex(int $bytes): string {
+		try {
+			return \bin2hex(\random_bytes($bytes));
+		} catch (\Throwable) {
+			// Fail-soft: Never throw from within an error handler.
+			$s = '';
+			for ($i = 0; $i < $bytes; $i++) {
+				$s .= \sprintf('%02x', \mt_rand(0, 255));
+			}
+			return $s;
+		}
 	}
 	
 	
@@ -1786,7 +1885,7 @@ HTML;
 			}
 			
 			// json_encode() keeps keys unambiguous (quotes, escapes)
-			$items[] = \json_encode($k) . '=>' . $this->dumpArg($v, $depth);
+			$items[] = \json_encode($k, self::JSON_FLAGS) . '=>' . $this->dumpArg($v, $depth);
 		}
 
 		return '[' . \implode(', ', $items) . ']';
