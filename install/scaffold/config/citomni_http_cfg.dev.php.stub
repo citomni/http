@@ -13,16 +13,22 @@ declare(strict_types=1);
  * ------------------------------------------------------------------
  * HTTP CONFIG OVERLAY (dev)
  * ------------------------------------------------------------------
- * This file overrides /config/citomni_http_cfg.php for the "dev" environment.
+ * This is the final HTTP-specific config layer for the "dev" environment.
  *
  * Merge model (last wins):
- *   vendor baseline -> providers -> app base -> this file (dev overlay)
- *   See: \CitOmni\Http\Boot\Config::CFG and classes listed in /config/providers.php
+ *   1) Vendor HTTP baseline:  \CitOmni\Http\Boot\Registry::CFG_HTTP
+ *   2) Providers:             each CFG_COMMON, then CFG_HTTP, in providers.php order
+ *   3) App common base:       /config/citomni_cfg.php
+ *   4) App HTTP base:         /config/citomni_http_cfg.php
+ *   5) App common env:        /config/citomni_cfg.{ENV}.php
+ *   6) App HTTP env:          /config/citomni_http_cfg.{ENV}.php  (this file)
+ *
+ * This file wins over all earlier cfg layers when the resolved {ENV} is "dev".
  *
  * Typical usage:
  *   - Allow auto-detected base URL during local development (no need to hardcode).
- *   - Enable developer-friendly error rendering for non-fatal levels.
- *   - Keep tracing on (bounded) and leave logging verbose.
+ *   - Render selected non-fatal PHP errors and expose developer details.
+ *   - Force E_ALL so runtime error_reporting() does not hide configured diagnostics.
  *   - Disable view caching to see template changes immediately.
  *
  * Policy:
@@ -69,9 +75,9 @@ return [
 	 * ------------------------------------------------------------------
 	 * ERROR HANDLER
 	 * ------------------------------------------------------------------
-	 * Show non-fatal errors to the developer with bounded traces.
-	 * Do NOT include fatal classes in render.trigger; the handler
-	 * will sanitize them away even if misconfigured.
+	 * Render selected non-fatal PHP errors and expose developer details.
+	 * Force E_ALL so the active runtime mask cannot suppress diagnostics
+	 * selected below. Trace bounds, log paths and rotation inherit baseline.
 	 */
 	'error_handler' => [
 		'render' => [
@@ -79,23 +85,12 @@ return [
 				| E_USER_WARNING | E_USER_NOTICE | E_RECOVERABLE_ERROR
 				| E_DEPRECATED | E_USER_DEPRECATED,
 			'detail' => [
-				'level' => 1, // developer details (effective only when ENV === 'dev')
-				'trace' => [
-					'max_frames'      => 120,
-					'max_arg_strlen'  => 512,
-					'max_array_items' => 20,
-					'max_depth'       => 3,
-					'ellipsis'        => '...',
-				],
+				'level' => 1,
 			],
-			// 'force_error_reporting' => E_ALL, // optional: override ini in dev
+			'force_error_reporting' => E_ALL,
 		],
 		'log' => [
-			// Keep logs verbose in dev; defaults are already sensible.
-			// 'trigger'    => E_ALL,
-			// 'path'       => \CITOMNI_APP_PATH . '/var/logs',
-			// 'max_bytes'  => 2_000_000,
-			// 'max_files'  => 10,
+			'trigger' => E_ALL,
 		],
 	],
 

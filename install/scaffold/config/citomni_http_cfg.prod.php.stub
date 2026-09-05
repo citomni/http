@@ -13,11 +13,17 @@ declare(strict_types=1);
  * ------------------------------------------------------------------
  * HTTP CONFIG OVERLAY (prod)
  * ------------------------------------------------------------------
- * This file overrides /config/citomni_http_cfg.php for the "prod" environment.
+ * This is the final HTTP-specific config layer for the "prod" environment.
  *
  * Merge model (last wins):
- *   vendor baseline -> providers -> app base -> this file (prod overlay)
- *   See: \CitOmni\Http\Boot\Config::CFG and classes listed in /config/providers.php
+ *   1) Vendor HTTP baseline:  \CitOmni\Http\Boot\Registry::CFG_HTTP
+ *   2) Providers:             each CFG_COMMON, then CFG_HTTP, in providers.php order
+ *   3) App common base:       /config/citomni_cfg.php
+ *   4) App HTTP base:         /config/citomni_http_cfg.php
+ *   5) App common env:        /config/citomni_cfg.{ENV}.php
+ *   6) App HTTP env:          /config/citomni_http_cfg.{ENV}.php  (this file)
+ *
+ * This file wins over all earlier cfg layers when the resolved {ENV} is "prod".
  *
  * Typical usage:
  *   - Set an absolute http.base_url (required in stage/prod unless the constant
@@ -65,7 +71,7 @@ return [
 	 * - Enable trust_proxy only if behind a known reverse proxy or LB.
 	 */
 	'http' => [
-		'base_url' => '%PROD_ROOT_URL%',  // Replace %PROD_ROOT_URL% with your prod-url, i.e. https://www.example.com <- REMEMBER: No trailing slash!
+		'base_url' => '{{PROD_ROOT_URL}}',  // Replace %PROD_ROOT_URL% with your prod-url, i.e. https://www.example.com <- REMEMBER: No trailing slash!
 		// 'trust_proxy' => true,                 // Enable only when reverse-proxied
 		// 'trusted_proxies' => ['10.0.0.0/8'],  // Optional IP/CIDR allow-list
 	],
@@ -108,6 +114,25 @@ return [
 
 	/*
 	 * ------------------------------------------------------------------
+	 * ERROR HANDLER
+	 * ------------------------------------------------------------------
+	 * Enforce production-safe non-fatal behavior even if an earlier cfg
+	 * layer enabled development diagnostics. Keep PHP's runtime
+	 * error_reporting() mask untouched and log all active non-fatal levels.
+	 */
+	'error_handler' => [
+		'render' => [
+			'trigger' => 0,
+			'force_error_reporting' => null,
+		],
+		'log' => [
+			'trigger' => E_ALL,
+		],
+	],
+
+
+	/*
+	 * ------------------------------------------------------------------
 	 * VIEW
 	 * ------------------------------------------------------------------
 	 * Template caching should be enabled in production for performance.
@@ -124,7 +149,7 @@ return [
 	 * Keep admin webhooks disabled unless actively used.
 	 * Secrets do NOT live in cfg. The HMAC secret is loaded from:
 	 *   CITOMNI_APP_PATH . '/var/secrets/webhooks.secret.php'
-	 * Baseline keys live in \CitOmni\Http\Boot\Config::CFG - override here only if needed.
+	 * Baseline keys live in \CitOmni\Http\Boot\Registry::CFG_HTTP - override here only if needed.
 	 */
 	/*
 	'webhooks' => [

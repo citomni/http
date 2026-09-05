@@ -169,7 +169,7 @@ final class Registry {
 		 *
 		 * Templates:
 		 *   - Optional: Plain-PHP files receiving $data with:
-		 *       status, status_text, error_id, title, message, details*null, request_id, year
+		 *       language, status, status_text, error_id, title, message, details|null, request_id, year
 		 *   - If missing/unreadable, the handler falls back to a built-in minimal HTML page.
 		 */
 		'error_handler' => [
@@ -179,6 +179,7 @@ final class Registry {
 				/*
 				 * Which non-fatal PHP errors (bitmask) should trigger **rendering**?
 				 * - 0 (baseline): do not render non-fatal errors (prod/stage-friendly).
+				 * - The active PHP error_reporting() mask is honored first.
 				 * - DO NOT include fatal classes (E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR, E_USER_ERROR).
 				 *   The handler will sanitize those away even if misconfigured.
 				 *
@@ -197,13 +198,17 @@ final class Registry {
 					 * 1 = developer details (stack traces, structured context) – ONLY active when
 					 *     CITOMNI_ENVIRONMENT === 'dev'. In non-dev envs this behaves as 0.
 					 *
-					 * Logs are always detailed regardless of this flag.
+					 * This flag gates client-facing detail only; logging is never gated by it.
+					 * (Logged exception traces are still bounded by the 'trace' caps below.)
 					 */
 					'level' => 0,
 
 					/*
-					 * Trace formatting limits (apply only when detail.level = 1 AND we are in 'dev').
-					 * Keep bounded to avoid huge responses; logs still carry full structured info.
+					 * Trace formatting limits. These caps ALWAYS bound the trace written to the
+					 * exception log (http_err_exception.jsonl), in every environment - they are the
+					 * only control over logged trace depth/size. detail.level + 'dev' additionally
+					 * gate whether the same bounded exception trace is exposed to the client; they
+					 * do not widen the caps.
 					 */
 					'trace' => [
 						'max_frames'      => 120,   // Maximum number of frames included in traces.
@@ -225,9 +230,12 @@ final class Registry {
 			'log' => [
 
 				/*
-				 * Which PHP errors (bitmask) should be **logged**?
-				 * - Baseline: log everything (E_ALL). Logs are for developers/ops, not end users.
-				 * - Router 404/405/5xx are always logged into separate files:
+				 * Which non-fatal PHP errors (bitmask) should be **logged**?
+				 * - Baseline: allow all active non-fatal PHP errors through the log mask (E_ALL).
+				 * - The active PHP error_reporting() mask is honored first.
+				 * - Exceptions, shutdown fatals and Router HTTP errors are logged independently
+				 *   of this mask.
+				 * - Router errors use separate files:
 				 *   http_router_404.jsonl, http_router_405.jsonl, http_router_5xx.jsonl
 				 */
 				'trigger'   => E_ALL,
@@ -241,13 +249,14 @@ final class Registry {
 
 				/*
 				 * Rotate before the next write would exceed this many bytes.
+				 * A single record larger than this is written whole (an empty live file is not rotated).
 				 * Keep conservative to protect disk on shared hosts.
 				 */
 				'max_bytes' => 2_000_000, // ~2 MB
 
 				/*
 				 * Maximum number of rotated files to keep per base (live file excluded).
-				 * Example: Keep last 10 rotations of http_err_exception.jsonl.*.jsonl
+				 * Example: Keep the last 10 http_err_exception.<timestamp>.jsonl rotations.
 				 */
 				'max_files' => 10,
 			],
@@ -272,12 +281,10 @@ final class Registry {
 				 * Default HTTP status codes used by the handler when a specific mapping is not set.
 				 * - 'exception' and 'shutdown' are almost always 500.
 				 * - 'php_error' applies when rendering non-fatal PHP errors (usually only in dev).
-				 * - 'http_error' is a fallback; router typically passes explicit status (404/405/5xx).
 				 */
 				'exception' => 500,
 				'shutdown'  => 500,
 				'php_error' => 500,
-				'http_error'=> 500,
 			],
 		],
 

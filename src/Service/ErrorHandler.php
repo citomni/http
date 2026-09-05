@@ -34,7 +34,7 @@ use CitOmni\Kernel\Service\BaseService;
  *   2) Size-based rotation via sidecar lock; timestamped files.
  *   3) Prunes rotated siblings according to max_files.
  * - Respect environment and developer ergonomics.
- *   1) Hides details by default; shows traces only in dev and when enabled.
+ *   1) Hides client details by default; exposes traces to clients only in dev and when enabled.
  *   2) Redacts sensitive keys in router context (authorization, tokens, etc.).
  *   3) Never throws from handlers; failures degrade to error_log.
  *
@@ -56,13 +56,13 @@ use CitOmni\Kernel\Service\BaseService;
  * - error_handler.render.detail.trace.ellipsis (string, default "...")
  * - error_handler.log.trigger (int bitmask, default E_ALL) - Which PHP errors to log (non-fatal path).
  * - error_handler.log.path (string) - Directory for JSONL logs.
- * - error_handler.log.max_bytes (int, default 2_000_000) - Soft rotation threshold per live
- *   file. Under concurrent writers the live file may temporarily exceed it before a subsequent
- *   writer rotates (rotate() re-checks the size under lock and skips if already rotated).
+ * - error_handler.log.max_bytes (int, default 2_000_000) - Soft pre-write rotation threshold per
+ *   live file. rotate() re-checks the current size plus the pending record under lock; concurrent
+ *   writers may still temporarily push the live file past the threshold before a later rotation.
  * - error_handler.log.max_files (int, default 10) - Max rotated siblings to retain (pruned newest-first).
  * - error_handler.templates.html (string) - Primary HTML template path.
  * - error_handler.templates.html_failsafe (string) - Minimal fallback template path.
- * - error_handler.status_defaults.exception|shutdown|php_error|http_error (int HTTP status, default 500).
+ * - error_handler.status_defaults.exception|shutdown|php_error (int HTTP status, default 500).
  *
  * Error handling:
  * - Fail-soft inside handlers: Never throw; unexpected failures are sent to PHP's error_log.
@@ -118,7 +118,7 @@ final class ErrorHandler extends BaseService {
 	/** Absolute log directory (no trailing slash). */
 	private string $logDir = '';
 
-	/** Soft rotation threshold in bytes; under concurrent writers the live file may temporarily exceed it. */
+	/** Soft pre-write rotation threshold in bytes; concurrent writers may temporarily exceed it. */
 	private int $maxBytes = 2_000_000;
 
 	/** How many rotated siblings to keep (newest first). */
@@ -137,7 +137,6 @@ final class ErrorHandler extends BaseService {
 		'exception' => 500,
 		'shutdown'  => 500,
 		'php_error' => 500,
-		'http_error'=> 500,
 	];
 
 	/** Reentrancy guard: Prevents recursive handling/loops. */
@@ -149,7 +148,7 @@ final class ErrorHandler extends BaseService {
 	/** When true, include developer details (only effective in dev). */
 	private bool $devDetail = false;
 
-	/** Trace shaping: Hard caps to keep output safe and bounded. */
+	/** Trace shaping: Hard caps applied to exception logs and developer detail output. */
 	private int $traceMaxFrames = 120;
 	private int $traceMaxArgStr = 512;
 	private int $traceMaxItems  = 20;
@@ -288,7 +287,7 @@ final class ErrorHandler extends BaseService {
 		$this->templates['html_failsafe'] = (string)($this->opt['templates']['html_failsafe'] ?? '');
 
 		// Status defaults: Only known buckets are honored
-		foreach (['exception','shutdown','php_error','http_error'] as $k) {
+		foreach (['exception','shutdown','php_error'] as $k) {
 			if (isset($this->opt['status_defaults'][$k])) {
 				$this->statusDefaults[$k] = (int)$this->opt['status_defaults'][$k];
 			}
@@ -487,7 +486,7 @@ final class ErrorHandler extends BaseService {
 	 * - Renders an HTML/JSON error response and ends execution (no blank page).
 	 *
 	 * Notes:
-	 * - Client-facing detail is gated by $this->devDetail; logs are always verbose.
+	 * - Client-facing detail is gated by $this->devDetail; exception logs always include the same bounded trace data.
 	 * - The response format is negotiated in renderResponse(...); headers are set there.
 	 * - Never throws; control flow ends inside renderResponse(...).
 	 *
@@ -1107,14 +1106,15 @@ HTML;
 	 * Behavior:
 	 * - Encodes $record once and appends it under an exclusive file lock (best effort).
 	 * - Checks current size under lock; if the next line would exceed $this->maxBytes,
-	 *   it unlocks/closes, rotates the file, then reopens and appends. maxBytes is a soft
-	 *   threshold: under concurrent writers the live file may temporarily exceed it before rotating.
+	 *   it unlocks/closes and asks rotate(...) to re-check current size plus the pending
+	 *   line under the rotation lock before rotating. maxBytes remains a soft threshold
+	 *   under concurrent writers.
 	 * - Never throws to callers; any failure is soft-logged via PHP's error_log.
 	 *
 	 * Notes:
 	 * - Uses JSON_PARTIAL_OUTPUT_ON_ERROR to avoid losing the whole event on edge cases.
 	 * - clearstatcache(...) is called before size checks to avoid stale FS metadata.
-	 * - Rotation is delegated to rotate($file), which serializes rotations with a sidecar lock.
+	 * - Rotation is delegated to rotate($file, $pendingBytes), which serializes rotations with a sidecar lock.
 	 * - This method is safe to call from within error/exception/shutdown handlers.
 	 *
 	 * Concurrency notes:
@@ -1148,6 +1148,7 @@ HTML;
 				$encoded = '{"encode_error":true}';
 			}
 			$line = $encoded . "\n";
+			$lineBytes = \strlen($line);
 
 			$threshold = \max(1, (int)$this->maxBytes);
 
@@ -1165,13 +1166,13 @@ HTML;
 				$size = @\filesize($file) ?: 0;
 
 				// If this write would cross the threshold, rotate first.
-				if (($size + \strlen($line)) > $threshold) {
+				if (($size + $lineBytes) > $threshold) {
 					// Important: Release the main lock before rotating to avoid deadlocks
 					@\flock($fh, \LOCK_UN);
 					@\fclose($fh);
 
 					// Rotation takes a sidecar lock and does copy+truncate
-					$this->rotate($file);  // sidecar-locked, copy+truncate, timestamped name
+					$this->rotate($file, $lineBytes);  // sidecar-locked, copy+truncate, timestamped name
 
 					// Back to appending on the fresh file (reopen and re-lock after rotation).
 					$fh = @\fopen($file, 'ab');
@@ -1204,7 +1205,7 @@ HTML;
 	 * Behavior:
 	 * - Serializes rotations per file using a sidecar lock: "<file>.lock" (LOCK_EX).
 	 * - Locks the live file exclusively, then:
-	 *   1) Rechecks size under lock and bails if below threshold.
+	 *   1) Rechecks current size plus the pending write under lock and bails if it still fits.
 	 *   2) Builds a unique UTC timestamped sibling name (colon-free; Windows-safe).
 	 *   3) Copies current content to a temp file and truncates the live file to zero.
 	 *   4) Atomically renames the temp to the final rotated name and sets permissions.
@@ -1213,6 +1214,9 @@ HTML;
 	 * Notes:
 	 * - Fail-soft by design: This method never throws; errors are logged via error_log.
 	 * - Retention is delegated to prune(...), called at the end to keep at most $maxFiles.
+	 * - A single record larger than maxBytes may exceed the threshold when the live file is empty;
+	 *   rotating an empty file would not reduce that record. Consecutive oversized records rotate
+	 *   the previous live record before appending the next, so retention may churn one file per record.
 	 * - Works across typical FPM/Apache/Nginx deployments and on Windows (no colons in names).
 	 * - The live file path remains stable; only content is truncated (tailers survive).
 	 * 
@@ -1228,12 +1232,13 @@ HTML;
 	 *
 	 * Examples:
 	 *   // Internal call path when threshold is hit:
-	 *   // writeJsonl($file, $record) -> rotate($file) -> prune($file, $this->maxFiles)
+	 *   // writeJsonl($file, $record) -> rotate($file, strlen($line)) -> prune($file, $this->maxFiles)
 	 *
-	 * @param string $file Absolute path to the live JSONL file (e.g., ".../http_err_exception.jsonl").
+	 * @param string $file         Absolute path to the live JSONL file (e.g., ".../http_err_exception.jsonl").
+	 * @param int    $pendingBytes Number of bytes waiting to be appended after rotation.
 	 * @return void
 	 */
-	private function rotate(string $file): void {
+	private function rotate(string $file, int $pendingBytes): void {
 		
 		$lockPath = $file . '.lock';
 
@@ -1244,6 +1249,8 @@ HTML;
 		}
 
 		try {
+			$threshold = \max(1, (int)$this->maxBytes);
+
 			// Open and exclusively lock the live file; abort if it vanished
 			$main = @\fopen($file, 'c+b');
 			if ($main === false) {
@@ -1258,8 +1265,8 @@ HTML;
 				\clearstatcache(true, $file);
 				$stat = @\fstat($main);
 				$size = (int)($stat['size'] ?? 0);
-				if ($size <= $this->maxBytes) {
-					return; // Already below threshold; skip.
+				if ($size === 0 || ($size + $pendingBytes) <= $threshold) {
+					return; // The pending write still fits, or rotating an empty file cannot help.
 				}
 
 				// Compute a Windows-safe, UTC-timestamped target name (no colons)

@@ -13,11 +13,17 @@ declare(strict_types=1);
  * ------------------------------------------------------------------
  * HTTP CONFIG OVERLAY (stage)
  * ------------------------------------------------------------------
- * This file overrides /config/citomni_http_cfg.php for the "stage" environment.
+ * This is the final HTTP-specific config layer for the "stage" environment.
  *
  * Merge model (last wins):
- *   vendor baseline -> providers -> app base -> this file (stage overlay)
- *   See: \CitOmni\Http\Boot\Config::CFG and classes listed in /config/providers.php
+ *   1) Vendor HTTP baseline:  \CitOmni\Http\Boot\Registry::CFG_HTTP
+ *   2) Providers:             each CFG_COMMON, then CFG_HTTP, in providers.php order
+ *   3) App common base:       /config/citomni_cfg.php
+ *   4) App HTTP base:         /config/citomni_http_cfg.php
+ *   5) App common env:        /config/citomni_cfg.{ENV}.php
+ *   6) App HTTP env:          /config/citomni_http_cfg.{ENV}.php  (this file)
+ *
+ * This file wins over all earlier cfg layers when the resolved {ENV} is "stage".
  *
  * Typical usage:
  *   - Set an absolute http.base_url (required in stage/prod unless the constant
@@ -61,7 +67,7 @@ return [
 	 * Enable trust_proxy only if your staging sits behind a proxy/LB.
 	 */
 	'http' => [
-		'base_url' => '%STAGE_ROOT_URL%',  // Replace %STAGE_ROOT_URL% with your stage-url, i.e. https://stage.example.com <- REMEMBER: No trailing slash!
+		'base_url' => '{{STAGE_ROOT_URL}}',  // Replace %STAGE_ROOT_URL% with your stage-url, i.e. https://stage.example.com <- REMEMBER: No trailing slash!
 		// 'trust_proxy' => true,
 		// 'trusted_proxies' => ['10.0.0.0/8','192.168.0.0/16'],
 	],
@@ -99,23 +105,17 @@ return [
 	 * ------------------------------------------------------------------
 	 * ERROR HANDLER
 	 * ------------------------------------------------------------------
-	 * Do not show dev details to clients on stage; keep logs verbose.
+	 * Never render non-fatal PHP errors to stage clients. Force E_ALL and
+	 * keep the non-fatal log mask broad for deterministic QA diagnostics.
+	 * Trace bounds, log paths, rotation and templates inherit baseline.
 	 */
 	'error_handler' => [
 		'render' => [
-			'trigger' => 0,          // no non-fatal render to clients
-			'detail'  => ['level' => 0],
-			// no force_error_reporting override on stage
+			'trigger' => 0,
+			'force_error_reporting' => E_ALL,
 		],
 		'log' => [
-			'trigger'    => E_ALL,   // keep logs informative for QA
-			'path'       => \CITOMNI_APP_PATH . '/var/logs',
-			'max_bytes'  => 2_000_000,
-			'max_files'  => 10,
-		],
-		'templates' => [
-			'html'          => \CITOMNI_APP_PATH . '/templates/error/error.php',
-			'html_failsafe' => null,
+			'trigger' => E_ALL,
 		],
 	],
 
@@ -138,7 +138,7 @@ return [
 	 * Keep admin webhooks disabled unless actively used.
 	 * Secrets do NOT live in cfg. The HMAC secret is loaded from:
 	 *   CITOMNI_APP_PATH . '/var/secrets/webhooks.secret.php'
-	 * Baseline keys live in \CitOmni\Http\Boot\Config::CFG - override here only if needed.
+	 * Baseline keys live in \CitOmni\Http\Boot\Registry::CFG_HTTP - override here only if needed.
 	 */
 	/*
 	'webhooks' => [
