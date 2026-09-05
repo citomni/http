@@ -282,15 +282,18 @@ final class SystemController extends BaseController {
 	 * Return a shallow health snapshot without external calls.
 	 *
 	 * Behavior:
-	 * - Emits php_version, environment, opcache_enabled, server_time_utc, timezone.
+	 * - Emits PHP/runtime metadata, OPcache policy, server time, and timezone.
 	 * - Avoids DB and network I/O for speed and determinism.
 	 *
 	 * Notes:
-	 * - Schema is intentionally small. Keep schema stable; tools might diff these fields.
+	 * - Exposes operational runtime settings only; no filesystem paths, secrets, or credentials are returned.
 	 * - Returns:
 	 * 		- php_version
+	 * 		- php_sapi
 	 * 		- environment (CITOMNI_ENVIRONMENT, if defined)
 	 * 		- opcache_enabled (ini + function_exists check)
+	 * 		- opcache (timestamp policy and reset/invalidation capabilities)
+	 * 		- realpath_cache_ttl
 	 * 		- server_time_utc (RFC3339)
 	 * 		- timezone (default PHP TZ)
 	 *
@@ -320,11 +323,22 @@ final class SystemController extends BaseController {
 		$opcacheEnabled = \function_exists('opcache_get_status') && $iniEnabled;
 
 		$this->app->response->jsonStatus([
-			'php_version'      => \PHP_VERSION,
-			'environment'      => $env,
-			'opcache_enabled'  => $opcacheEnabled,
-			'server_time_utc'  => \gmdate('c'),
-			'timezone'         => $tz,
+			'php_version'     => \PHP_VERSION,
+			'php_sapi'        => \PHP_SAPI,
+			'environment'     => $env,
+			'opcache_enabled' => $opcacheEnabled,
+			'opcache' => [
+				'validate_timestamps' => (bool)\ini_get('opcache.validate_timestamps'),
+				'revalidate_freq' => (int)\ini_get('opcache.revalidate_freq'),
+				'file_update_protection' => (int)\ini_get('opcache.file_update_protection'),
+				'revalidate_path' => (bool)\ini_get('opcache.revalidate_path'),
+				'use_cwd' => (bool)\ini_get('opcache.use_cwd'),
+				'reset_available' => \function_exists('opcache_reset'),
+				'invalidate_available' => \function_exists('opcache_invalidate'),
+			],
+			'realpath_cache_ttl' => (int)\ini_get('realpath_cache_ttl'),
+			'server_time_utc' => \gmdate('c'),
+			'timezone' => $tz,
 		], 200);
 	}
 
@@ -444,7 +458,7 @@ final class SystemController extends BaseController {
 	 * Behavior:
 	 * - Verifies HMAC via WebhooksAuth; unauthorized returns 404.
 	 * - OPcache: try opcache_reset(); also invalidate known cache files if any.
-	 *   (performs a global opcache_reset() best-effort).
+	 * - Reports whether invalidation/reset functions were available and whether each call succeeded.
 	 * - Files: remove var/cache/{cfg.http.php,routes.http.php,services.http.php} if they exist.
 	 *          (Legacy layouts may not have routes.http.php.)
 	 * - Accepts optional JSON body with absolute file paths to invalidate:
@@ -476,8 +490,9 @@ final class SystemController extends BaseController {
 		$raw = $this->app->webhooksAuth->requireOrAbort(self::PROTECTED_FAIL_STATUS);
 
 		$removed = [];
-		$failed  = [];
+		$failed = [];
 		$invalidated = [];
+		$invalidationFailed = [];
 
 		// Known cache file candidates (HTTP mode).
 		$candidates = [
@@ -506,8 +521,11 @@ final class SystemController extends BaseController {
 		foreach ($candidates as $path) {
 			if (\is_file($path)) {
 				if ($canInvalidate) {
-					@\opcache_invalidate($path, true);
-					$invalidated[] = $path;
+					if (@\opcache_invalidate($path, true)) {
+						$invalidated[] = $path;
+					} else {
+						$invalidationFailed[] = $path;
+					}
 				}
 				if (@\unlink($path)) {
 					$removed[] = $path;
@@ -517,16 +535,20 @@ final class SystemController extends BaseController {
 			}
 		}
 
-		// Global OPcache reset (best-effort)
-		if (\function_exists('opcache_reset')) {
-			@\opcache_reset();
-		}
+		$canReset = \function_exists('opcache_reset');
+		$resetSucceeded = $canReset ? @\opcache_reset() : null;
 
 		$this->app->response->jsonStatus([
-			'ok'           => $failed === [],
-			'removed'      => $removed,
-			'invalidated'  => $invalidated,
-			'failed'       => $failed,
+			'ok'          => $failed === [],
+			'removed'     => $removed,
+			'invalidated' => $invalidated,
+			'failed'      => $failed,
+			'opcache'     => [
+				'invalidate_available' => $canInvalidate,
+				'invalidation_failed' => $invalidationFailed,
+				'reset_available' => $canReset,
+				'reset_succeeded' => $resetSucceeded,
+			],
 		], 200);
 	}
 
