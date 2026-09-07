@@ -182,22 +182,37 @@ final class Kernel {
 		// Router is a service provided by the HTTP package and mapped as 'router'
 		$app->router->run();
 
+
 		if (isset($_GET['_perf'])) {
-			
-			// Performance monitor in footer (harmless in HTML)
-			// CITOMNI_START_NS now holds hrtime(true) in nanoseconds.
-			// $startNs    = \defined('CITOMNI_START_NS') ? (int)\CITOMNI_START_NS : \hrtime(true);
-			// $elapsedNs  = \hrtime(true) - $startNs;
-			// $elapsedSec = $elapsedNs / 1_000_000_000;
-			// $elapsedStr = \number_format($elapsedSec, 3, '.', ''); // e.g. "0.123"
-			$elapsedStr = \sprintf('%.3f', ((($nowNs=\hrtime(true))) - (\defined('CITOMNI_START_NS') ? (int)\CITOMNI_START_NS : $nowNs)) / 1_000_000_000);
+
+			// Emit lightweight runtime performance diagnostics when explicitly requested.
+			//
+			// CITOMNI_START_NS is captured at the beginning of the public entrypoint
+			// using hrtime(true), so the elapsed time covers the complete HTTP boot
+			// and dispatch lifecycle up to this point.
+			//
+			// The summary is intentionally safe for production: it exposes aggregate
+			// timing, memory, and included-file counts, but no filesystem paths.
+			$nowNs = \hrtime(true);
+			$startNs = \defined('CITOMNI_START_NS') ? (int)\CITOMNI_START_NS : $nowNs;
+			$elapsedStr = \sprintf('%.3f', ($nowNs - $startNs) / 1_000_000_000);
 
 			echo \PHP_EOL;
-			echo '<!-- Execution time: ' . $elapsedStr . ' s. Current memory: ' . \memory_get_usage() . ' bytes. Peak memory: ' . \memory_get_peak_usage() . ' bytes. Included files: ' . \count(\get_included_files()) . ' -->';
+			echo '<!-- Execution time: ' . $elapsedStr
+				. ' s. Current memory: ' . \memory_get_usage()
+				. ' bytes. Peak memory: ' . \memory_get_peak_usage()
+				. ' bytes. Included files: ' . \count(\get_included_files())
+				. ' -->';
 			echo \PHP_EOL;
-			echo '<!--';
-			var_dump(\get_included_files());
-			echo '-->';
+
+			// Dev and stage may additionally expose the concrete included-file list
+			// for deployment and autoload diagnostics. Keep absolute filesystem paths
+			// out of production responses.
+			if (\CITOMNI_ENVIRONMENT !== 'prod') {
+				echo '<!--';
+				var_dump(\get_included_files());
+				echo '-->';
+			}
 		}
 
 	}
