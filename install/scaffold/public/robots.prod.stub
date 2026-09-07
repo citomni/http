@@ -1,0 +1,26 @@
+# =============================================================================
+# CitOmni - robots.txt (PRODUCTION)
+#
+# PURPOSE
+#   Provide a safe, application-neutral production default that permits crawling.
+#   Application-specific crawl restrictions and sitemap declarations belong to the app.
+#
+# THREAT MODEL
+#   - Avoid framework-level rules that accidentally hide valid application content.
+#   - Avoid assuming routes, query parameters, or sitemap locations that an app may
+#     not implement.
+#
+# BEHAVIOR
+#   - The empty "Disallow" rule imposes no crawl restrictions.
+#   - Applications may add explicit Allow/Disallow rules when their URL structure
+#     requires them.
+#
+# NOTES
+#   - Add a Sitemap directive only when the application actually exposes a sitemap.
+#   - Sitemap URLs must be absolute.
+#   - robots.txt controls crawling, not authorization or confidentiality.
+# =============================================================================
+
+
+User-agent: *
+Disallow:

@@ -1,0 +1,97 @@
+<?php
+declare(strict_types=1);
+/*
+ * This file is part of the CitOmni framework.
+ * Low overhead, high performance, ready for anything.
+ *
+ * For more information, visit https://github.com/citomni
+ *
+ * Copyright (c) 2012-present Lars Grove Mortensen
+ * SPDX-License-Identifier: MIT
+ *
+ * For full copyright, trademark, and license information,
+ * please see the LICENSE file distributed with this source code.
+ */
+
+
+/*
+ *---------------------------------------------------------------
+ * REQUEST START TIME
+ *---------------------------------------------------------------
+ * Capture the request start as early as possible for runtime timing
+ * and performance diagnostics.
+ */
+define('CITOMNI_START_NS', hrtime(true));
+
+
+/*
+ *---------------------------------------------------------------
+ * APPLICATION ENVIRONMENT
+ *---------------------------------------------------------------
+ * This is the production entrypoint materialized by citomni/installer.
+ *
+ * The environment is defined before Composer and framework boot because it is
+ * used while CitOmni resolves environment-specific configuration and dispatch
+ * maps, and by framework behavior that distinguishes dev from stage/prod.
+ */
+define('CITOMNI_ENVIRONMENT', 'prod');
+
+
+/*
+ *---------------------------------------------------------------
+ * APPLICATION PATHS & PUBLIC URL
+ *---------------------------------------------------------------
+ * Define the stable application locations needed during framework boot.
+ *
+ * CITOMNI_PUBLIC_PATH
+ *   Absolute path to /public (no trailing slash).
+ *
+ * CITOMNI_APP_PATH
+ *   Absolute path to the application root (one level above /public).
+ *
+ * CITOMNI_PUBLIC_ROOT_URL
+ *   Canonical production base URL, materialized by citomni/installer from
+ *   PROD_ROOT_URL. The HTTP kernel preserves this value when it is already
+ *   defined and therefore does not derive it from request data or config.
+ */
+define('CITOMNI_PUBLIC_PATH', __DIR__);
+define('CITOMNI_APP_PATH', \dirname(__DIR__));
+define('CITOMNI_PUBLIC_ROOT_URL', '{{PROD_ROOT_URL}}');
+
+
+/*
+ *---------------------------------------------------------------
+ * COMPOSER AUTOLOAD
+ *---------------------------------------------------------------
+ * Load the application Composer autoloader. CitOmni and all other Composer
+ * dependencies are installed below the application root and become available
+ * from this point forward.
+ */
+require __DIR__ . '/../vendor/autoload.php';
+
+
+/*
+ *---------------------------------------------------------------
+ * HTTP KERNEL
+ *---------------------------------------------------------------
+ * Now it's time to hand control to CitOmni's HTTP lifecycle.
+ *
+ * The kernel:
+ * - Starts managed output buffering.
+ * - Resolves the application and configuration paths from /public.
+ * - Boots the App in HTTP mode, loading config, routes, and service definitions.
+ * - Installs the HTTP error handler.
+ * - Applies runtime locale, timezone, and charset configuration.
+ * - Validates required HTTP runtime capabilities.
+ * - Configures trusted proxies when declared.
+ * - Enforces maintenance state before routing.
+ * - Dispatches the request through the router.
+ *
+ * Configuration, services, routing, error handling, and application behavior
+ * belong in their respective CitOmni layers. Keep this entrypoint deterministic
+ * and free of application logic or runtime overrides.
+ *
+ * LET'S GOOOOO!
+ * Hand off control and let CitOmni do the heavy lifting.
+ */
+\CitOmni\Http\Kernel::run(__DIR__);

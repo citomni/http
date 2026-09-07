@@ -1,6 +1,6 @@
 # =============================================================================
 # CitOmni - Root .htaccess (app-root == webroot; route all traffic to /public)
-# PROD + STAGE version
+# PROD version
 #
 # PURPOSE
 #   Make shared hosting safe when vhost config is not available and app-root IS
@@ -61,19 +61,18 @@ Options -Indexes -MultiViews
 <IfModule mod_rewrite.c>
 	RewriteEngine On
 
-	# (2a) Canonicalization - HTTPS (301)
+	# (2a) Canonicalization - configured host (301)
+	#      WHY: Redirect aliases to the canonical host derived from PROD_ROOT_URL.
+	#           The redirect target is fixed installer data, never the request Host header.
+	RewriteCond %{HTTP_HOST} "!={{PROD_ROOT_HOST}}" [NC]
+	RewriteRule ^ {{PROD_ROOT_URL}}%{REQUEST_URI} [R=301,L]
+
+	# (2b) Canonicalization - HTTPS (301)
 	#      WHY: Enforce TLS at the edge; honors X-Forwarded-Proto for proxy/CDN setups.
-	#           This ensures all traffic is redirected to https:// and prevents mixed-protocol access.
+	#           Redirect directly to the configured canonical production URL.
 	RewriteCond %{HTTPS} !=on
 	RewriteCond %{HTTP:X-Forwarded-Proto} !https
-	RewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [R=301,L]
-
-	# (2b) Canonicalization - WWW (301)
-	#      WHY: Force a single hostname (with "www.") for SEO and cache consistency.
-	#           Skips ACME challenges in /.well-known/ so certificate issuance still works.
-	RewriteCond %{REQUEST_URI} !^/\.well-known/ [NC]
-	RewriteCond %{HTTP_HOST} !^www\. [NC]
-	RewriteRule ^ https://www.%{HTTP_HOST}%{REQUEST_URI} [R=301,L]
+	RewriteRule ^ {{PROD_ROOT_URL}}%{REQUEST_URI} [R=301,L]
 
 	# (2c) Security guards - block sensitive internal directories
 	#      WHY: Even if someone tries to hit /src/... we do not "redirect" into /public,

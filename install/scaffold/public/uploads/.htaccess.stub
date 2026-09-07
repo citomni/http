@@ -1,5 +1,5 @@
 # =============================================================================
-# CitOmni — /public/uploads/ hardening
+# CitOmni - /public/uploads/ hardening
 #
 # PURPOSE
 #   /uploads/ is a PUBLIC, web-reachable directory intended only for safe,
@@ -103,7 +103,7 @@ Options -Indexes -ExecCGI
 
 # -----------------------------------------------------------------------------
 # 7) Defensive headers
-#    - X-Content-Type-Options: nosniff → prevent browsers from MIME-sniffing.
+#    - X-Content-Type-Options: nosniff -> prevent browsers from MIME-sniffing.
 #    Use "always" so it applies to 403/404 too.
 # -----------------------------------------------------------------------------
 <IfModule mod_headers.c>

@@ -1,0 +1,33 @@
+# =============================================================================
+# CitOmni - robots.txt (DEVELOPMENT)
+#
+# PURPOSE
+#   Prevent compliant crawlers from accessing development content.
+#   Complement the HTTP noindex policy applied by the development server config.
+#
+# THREAT MODEL
+#   - Reduce the risk of development URLs being crawled or surfaced by search engines.
+#   - Prevent crawlers from traversing unfinished, temporary, or test content.
+#
+# BEHAVIOR
+#   - "Disallow: /" blocks crawling of all paths for compliant crawlers.
+#   - robots.txt controls crawling only; it is not access control and does not by
+#     itself guarantee that a discovered URL will never appear in a search index.
+#
+# NOINDEX
+#   - Do not add "Noindex:" here. It is not a supported robots.txt directive.
+#   - A crawler blocked by "Disallow: /" may know that a URL exists without fetching
+#     the response, so robots.txt alone is not a guarantee against index presence.
+#   - Development HTTP responses use X-Robots-Tag when fetched. If an externally
+#     reachable dev environment must never be indexed, use access control rather
+#     than relying on robots.txt alone.
+#
+# NOTES
+#   - Keep noindex enforcement in HTTP headers for development responses.
+#   - Protect externally reachable development environments with appropriate
+#     network or HTTP access controls when required.
+# =============================================================================
+
+
+User-agent: *
+Disallow: /

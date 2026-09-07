@@ -1,0 +1,28 @@
+# =============================================================================
+# CitOmni - INTERNAL DIRECTORY ACCESS DENIAL
+#
+# PURPOSE
+#   Prevent direct HTTP access to internal application directories when the
+#   application root is exposed as the web root.
+#
+# THREAT MODEL
+#   - Prevent disclosure of application source code, configuration, logs,
+#     cached data, dependencies, tooling, and other non-public files.
+#   - Provide defense-in-depth if app-root routing or web-server configuration
+#     is changed, bypassed, or misconfigured.
+#   - Ensure internal directories remain non-public even when their contents
+#     would otherwise be directly addressable by URL.
+#
+# BEHAVIOR
+#   - Denies every HTTP request to this directory and its contents.
+#   - Provides defense-in-depth in addition to app-root routing rules.
+#
+# REQUIREMENTS
+#   - Apache 2.4+ with mod_authz_core.
+#
+# NOTES
+#   - Place this file in each top-level internal application directory.
+#   - Do not place it in /public.
+# =============================================================================
+
+Require all denied

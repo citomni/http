@@ -41,9 +41,9 @@ Options -Indexes
 
 # -----------------------------------------------------------------------------
 # 2) FRONT CONTROLLER & DEV CANONICALIZATION (mod_rewrite)
-#    WHY: Support subdir installs, preserve auth headers, deny internal paths,
-#         and route all non-files to index.php. HTTPS/WWW redirects remain
-#         commented for flexible local setups (enable when needed).
+#    WHY: Support subdir installs, preserve auth headers, and route all non-files
+#         to index.php. HTTPS/WWW redirects remain commented for flexible local
+#         setups and may be enabled when explicitly needed.
 # -----------------------------------------------------------------------------
 <IfModule mod_rewrite.c>
 	RewriteEngine On
@@ -59,7 +59,7 @@ Options -Indexes
 	# RewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [R=302,L]
 
 	# 2.3) WWW canonicalization (TEMP 302, optional)
-	#      WHEN: Uncomment if you need to test www. behavior in dev.
+	#      WHEN: Uncomment if you specifically need to test www behavior in dev.
 	# RewriteCond %{HTTP_HOST} !^www\. [NC]
 	# RewriteRule ^ https://www.%{HTTP_HOST}%{REQUEST_URI} [R=302,L]
 
@@ -92,7 +92,6 @@ Options -Indexes
 # 3) FALLBACK WHEN mod_rewrite IS UNAVAILABLE
 #    WHY: Keep the site functional on constrained hosts (temporary redirect).
 # -----------------------------------------------------------------------------
-# Fallback if mod_rewrite is not available: temporary redirect root -> index.php
 <IfModule !mod_rewrite.c>
 	<IfModule mod_alias.c>
 		RedirectMatch 307 ^/$ /index.php
@@ -111,10 +110,10 @@ Options -Indexes
 	Header always set Referrer-Policy "strict-origin-when-cross-origin"
 	Header always set Permissions-Policy "geolocation=(), microphone=(), camera=()"
 
-	# Dev: discourage indexing (some teams point dev at public subdomains)
+	# Dev: Discourage indexing
 	Header always set X-Robots-Tag "noindex, nofollow, noarchive"
 
-	# Dev: kill caching aggressively so changes are visible immediately
+	# Dev: Disable caching aggressively so changes are visible immediately
 	Header always set Cache-Control "no-store, no-cache, must-revalidate, max-age=0"
 	Header always set Pragma "no-cache"
 	Header always set Expires "0"
@@ -133,6 +132,7 @@ Options -Indexes
 		Deny from all
 	</IfModule>
 </FilesMatch>
+
 <FilesMatch "(?i)^(composer\.(json|lock)|package\.json|yarn\.lock|pnpm-lock\.yaml|\.gitignore|\.gitattributes|\.htaccess|\.htpasswd)$">
 	<IfModule mod_authz_core.c>
 		Require all denied
@@ -141,6 +141,7 @@ Options -Indexes
 		Deny from all
 	</IfModule>
 </FilesMatch>
+
 <FilesMatch "^\.[^/]*$">
 	<IfModule mod_authz_core.c>
 		Require all denied
@@ -234,9 +235,8 @@ Options -Indexes
 
 # -----------------------------------------------------------------------------
 # 10) ENVIRONMENT IDENTIFICATION HEADERS
-#     WHY: Quick verification for ops/dev tooling; mirror value in CDN/WAF if any.
+#     WHY: Quick verification for ops/dev tooling.
 # -----------------------------------------------------------------------------
 <IfModule mod_headers.c>
 	Header always set X-CitOmni-Env "dev"
-	# Header always set X-CitOmni-Config "dev-2025-09-04-a1b2c3"
 </IfModule>

@@ -1,25 +1,24 @@
 # =============================================================================
-# CitOmni - PUBLIC ROOT (STAGE)
+# CitOmni - PUBLIC ROOT (PROD)
 #
 # PURPOSE
-#   Staging front controller for CitOmni apps served from /public.
-#   - Mirror production routing (clean URLs, front controller) with TEMP redirects (302).
-#   - Serve existing files directly; route everything else to index.php.
-#   - Apply near-prod security headers, discourage indexing, and use shorter caching.
+#   Production-grade front controller for CitOmni apps served from /public.
+#   - Canonicalize requests to the configured production URL.
+#   - Serve existing files directly; route all other requests to index.php.
+#   - Apply hardened security headers plus sane caching & compression defaults.
 #
 # THREAT MODEL
-#   - Prevent exposure of sensitive files under /public (e.g., .env, composer.*).
+#   - Prevent direct access to sensitive files under /public (e.g., .env, composer.*).
 #   - Reduce server fingerprinting (suppress X-Powered-By and banner details).
 #   - Avoid duplicate content (/index.php vs clean URL) and mixed-protocol access.
 #   - Preserve Authorization headers across proxies/FPM.
-#   - Disable directory listing and MultiViews content-negotiation surprises.
-#   - Keep site functional on hosts without mod_rewrite (fallback).
+#   - Disable directory listing and MultiViews content negotiation surprises.
 #
 # DEPENDENCIES
-#   - mod_rewrite recommended (302 for HTTPS and /index.php -> clean URL).
+#   - mod_rewrite recommended (fallback keeps root -> index.php functional).
 #   - mod_headers/mod_expires/mod_brotli/mod_deflate used when available.
 #   - Honors X-Forwarded-Proto for TLS behind proxies/CDNs.
-#   - HSTS intentionally disabled on stage; X-Robots-Tag blocks indexing.
+#   - HSTS is off by default; enable only when 100% HTTPS everywhere.
 # =============================================================================
 
 
@@ -44,53 +43,62 @@ Options -Indexes
 
 # -----------------------------------------------------------------------------
 # 2) FRONT CONTROLLER & CANONICALIZATION (mod_rewrite)
-#    WHY: Enforce HTTPS (TEMP 302), support subdir installs, preserve auth
-#         headers, and route all non-files to index.php.
+#    WHY: Enforce the configured production URL, support subdir installs,
+#         preserve auth headers, and route all non-files to index.php.
 # -----------------------------------------------------------------------------
 <IfModule mod_rewrite.c>
 	RewriteEngine On
 
-	# 2.1) Deny unsafe HTTP methods (TRACE/TRACK)
+	# (2.1) Deny unsafe HTTP methods (TRACE/TRACK)
+	#       WHY: TRACE/TRACK can be abused for Cross-Site Tracing (XST) attacks and
+	#            should never be allowed in production environments.
 	RewriteCond %{REQUEST_METHOD} ^(TRACE|TRACK)$ [NC]
 	RewriteRule ^ - [F,L]
 
-	# 2.2) Canonicalization - HTTPS (302 on stage)
-	#      WHY: Avoid sticky caching during tests; honors X-Forwarded-Proto.
-	RewriteCond %{ENV:FROM_APP_ROOT} !1
+	# (2.2) Canonicalization - configured host (301)
+	#       WHY: Redirect aliases to the canonical host derived from PROD_ROOT_URL.
+	#            The redirect target is fixed installer data, never the request Host header.
+	RewriteCond %{HTTP_HOST} "!={{PROD_ROOT_HOST}}" [NC]
+	RewriteRule ^ {{PROD_ROOT_URL}}%{REQUEST_URI} [R=301,L]
+
+	# (2.3) Canonicalization - HTTPS (301)
+	#       WHY: Enforce TLS at the edge; honors X-Forwarded-Proto for proxy/CDN setups.
+	#            Redirect directly to the configured canonical production URL.
 	RewriteCond %{HTTPS} !=on
 	RewriteCond %{HTTP:X-Forwarded-Proto} !https
-	RewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [R=302,L]
+	RewriteRule ^ {{PROD_ROOT_URL}}%{REQUEST_URI} [R=301,L]
 
-	# 2.3) Canonicalization - WWW (optional; 302)
-	#      WHEN: Enable if you explicitly test www. on stage.
-	# RewriteCond %{ENV:FROM_APP_ROOT} !1
-	# RewriteCond %{HTTP_HOST} !^www\. [NC]
-	# RewriteRule ^ https://www.%{HTTP_HOST}%{REQUEST_URI} [R=302,L]
-
-	# 2.4) Auto-detect base for subdir installs - NOT needed when docroot is /public (leave off)
-	#      WHY: Allows clean URLs when the app is deployed under a subfolder.
+	# (2.4) Optional: BASE autodetect for subdir installs
+	#       WHY: Only needed if the app is deployed under a subfolder and you want clean URLs.
+	#            Leave commented out when docroot is already /public.
 	# RewriteCond %{REQUEST_URI}::$1 ^(/.+)/(.*)::\2$
 	# RewriteRule ^(.*) - [E=BASE:%1]
 
-	# 2.5) Preserve Authorization header
-	#      WHY: Some PHP-FPM/CGI setups drop it; expose it to the app via env.
+	# (2.5) Preserve Authorization header (FPM/CGI)
+	#       WHY: Some PHP-FPM/CGI setups drop the HTTP Authorization header.
+	#            This rule re-exposes it to the application via environment variable.
 	RewriteCond %{HTTP:Authorization} .
 	RewriteRule ^ - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
 
-	# 2.6) Redirect /index.php to clean URL (302 on stage)
-	#      WHY: Avoid duplicate content; prefer canonical "pretty" URLs.
+	# (2.6) Redirect /index.php -> clean URL (301)
+	#       WHY: Avoid duplicate content and enforce canonical pretty URLs.
+	#            IMPORTANT: Never include BASE in the redirect URL (only in internal rewrites).
 	RewriteCond %{ENV:REDIRECT_STATUS} ^$
-	RewriteRule ^index\.php(?:/(.*)|$) /$1 [R=302,L]
+	RewriteRule ^index\.php(?:/(.*)|$) /$1 [R=301,L]
 
-	# 2.7) Serve existing files/directories directly (fast path for assets)
+	# (2.7) Serve existing files/dirs directly
+	#       WHY: Fast-path for static assets. Requests to existing files or directories
+	#            bypass the front controller for performance.
 	RewriteCond %{REQUEST_FILENAME} -f [OR]
 	RewriteCond %{REQUEST_FILENAME} -d
 	RewriteRule ^ - [L]
 
-	# 2.8) Front controller (internal rewrite)
+	# (2.8) Front controller (internal rewrite)
+	#       WHY: All other requests are routed into index.php (the PHP front controller).
+	#            This allows clean URLs to resolve through the app's router.
 	RewriteRule ^ index.php [L]
-</IfModule>
 
+</IfModule>
 
 # -----------------------------------------------------------------------------
 # 3) FALLBACK WHEN mod_rewrite IS UNAVAILABLE
@@ -104,11 +112,11 @@ Options -Indexes
 
 
 # -----------------------------------------------------------------------------
-# 4) SECURITY HEADERS (STAGE DEFAULTS)
-#    WHY: Reduce server fingerprinting; mirror prod protections, discourage indexing.
-#    NOTE: HSTS is intentionally disabled on stage. Set `expose_php = Off` in
-#          php.ini/.user.ini to suppress X-Powered-By from PHP itself.
+# 4) SECURITY HEADERS (SAFE DEFAULTS)
+#    WHY: Reduce server fingerprinting and enable baseline browser protections.
+#    NOTE: Set `expose_php = Off` in php.ini/.user.ini to suppress X-Powered-By.
 # -----------------------------------------------------------------------------
+# ServerTokens Prod
 ServerSignature Off
 
 <IfModule mod_headers.c>
@@ -123,17 +131,16 @@ ServerSignature Off
 	Header always set Referrer-Policy "strict-origin-when-cross-origin"
 	Header always set Permissions-Policy "geolocation=(), microphone=(), camera=()"
 
-	# Stage: discourage indexing
-	Header always set X-Robots-Tag "noindex, nofollow, noarchive"
-
 	# Optional, usually safe:
 	Header always set Cross-Origin-Resource-Policy "same-origin"
 	# Header always set Cross-Origin-Opener-Policy "same-origin"   # WHEN: enable if you don't rely on cross-origin window integrations
 
-	# CSP: mirror prod policy for realistic testing (customize before enabling)
+	# Content-Security-Policy
+	# WHEN: Customize before enabling; start strict and open up as needed.
 	# Header always set Content-Security-Policy "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; frame-ancestors 'self'; base-uri 'self'; form-action 'self'"
 
-	# HSTS: keep disabled on stage
+	# HSTS (Strict-Transport-Security)
+	# WHEN: Enable only when 100% HTTPS everywhere (including subdomains).
 	# Header always set Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
 </IfModule>
 
@@ -169,16 +176,16 @@ ServerSignature Off
 
 
 # -----------------------------------------------------------------------------
-# 6) EXPIRES / CACHING (SHORTER ON STAGE)
-#    WHY: Keep assets fairly fresh during QA while still caching common types.
+# 6) EXPIRES / CACHING
+#    WHY: Favor long-lived caches for fingerprinted assets; keep HTML/API fresh.
 #    NOTE: Tune values to your asset pipeline and CDN strategy.
 # -----------------------------------------------------------------------------
 <IfModule mod_expires.c>
 	ExpiresActive on
-	ExpiresDefault                                   "access plus 1 day"
+	ExpiresDefault                                   "access plus 1 month"
 
 	# CSS
-	ExpiresByType text/css                           "access plus 1 day"
+	ExpiresByType text/css                           "access plus 1 year"
 
 	# Data interchange
 	ExpiresByType application/rss+xml                "access plus 1 hour"
@@ -188,36 +195,36 @@ ServerSignature Off
 	ExpiresByType text/xml                           "access plus 0 seconds"
 
 	# Favicon & icons
-	ExpiresByType image/vnd.microsoft.icon           "access plus 1 day"
-	ExpiresByType image/x-icon                       "access plus 1 day"
+	ExpiresByType image/vnd.microsoft.icon           "access plus 1 week"
+	ExpiresByType image/x-icon                       "access plus 1 week"
 
 	# HTML
 	ExpiresByType text/html                          "access plus 0 seconds"
 
 	# JavaScript
-	ExpiresByType application/javascript             "access plus 1 day"
-	ExpiresByType application/x-javascript           "access plus 1 day"
-	ExpiresByType text/javascript                    "access plus 1 day"
+	ExpiresByType application/javascript             "access plus 1 year"
+	ExpiresByType application/x-javascript           "access plus 1 year"
+	ExpiresByType text/javascript                    "access plus 1 year"
 
 	# Images
-	ExpiresByType image/gif                          "access plus 1 day"
-	ExpiresByType image/jpeg                         "access plus 1 day"
-	ExpiresByType image/png                          "access plus 1 day"
-	ExpiresByType image/svg+xml                      "access plus 1 day"
-	ExpiresByType image/webp                         "access plus 1 day"
+	ExpiresByType image/gif                          "access plus 1 month"
+	ExpiresByType image/jpeg                         "access plus 1 month"
+	ExpiresByType image/png                          "access plus 1 month"
+	ExpiresByType image/svg+xml                      "access plus 1 month"
+	ExpiresByType image/webp                         "access plus 1 month"
 
 	# Fonts
-	ExpiresByType application/vnd.ms-fontobject      "access plus 1 day"
-	ExpiresByType font/eot                           "access plus 1 day"
-	ExpiresByType font/opentype                      "access plus 1 day"
-	ExpiresByType application/x-font-ttf             "access plus 1 day"
-	ExpiresByType application/font-woff              "access plus 1 day"
-	ExpiresByType application/x-font-woff            "access plus 1 day"
-	ExpiresByType font/woff                          "access plus 1 day"
-	ExpiresByType application/font-woff2             "access plus 1 day"
+	ExpiresByType application/vnd.ms-fontobject      "access plus 1 month"
+	ExpiresByType font/eot                           "access plus 1 month"
+	ExpiresByType font/opentype                      "access plus 1 month"
+	ExpiresByType application/x-font-ttf             "access plus 1 year"
+	ExpiresByType application/font-woff              "access plus 1 month"
+	ExpiresByType application/x-font-woff            "access plus 1 month"
+	ExpiresByType font/woff                          "access plus 1 month"
+	ExpiresByType application/font-woff2             "access plus 1 month"
 
 	# Other
-	ExpiresByType text/x-cross-domain-policy         "access plus 1 day"
+	ExpiresByType text/x-cross-domain-policy         "access plus 1 week"
 </IfModule>
 
 
@@ -245,25 +252,25 @@ ServerSignature Off
 	AddOutputFilterByType DEFLATE text/html
 	AddOutputFilterByType DEFLATE text/css
 	AddOutputFilterByType DEFLATE text/javascript
-	AddOutputFilterByType DEFLATE text/xml 
+	AddOutputFilterByType DEFLATE text/xml
 	AddOutputFilterByType DEFLATE application/javascript
 	AddOutputFilterByType DEFLATE application/json
 	AddOutputFilterByType DEFLATE application/ld+json
 	AddOutputFilterByType DEFLATE application/manifest+json
 	AddOutputFilterByType DEFLATE application/xml
 	AddOutputFilterByType DEFLATE application/xhtml+xml
-	AddOutputFilterByType DEFLATE application/rss+xml 
+	AddOutputFilterByType DEFLATE application/rss+xml
 	# AddOutputFilterByType DEFLATE application/vnd.ms-fontobject
 	# AddOutputFilterByType DEFLATE application/x-font
 	# AddOutputFilterByType DEFLATE application/x-font-opentype
 	# AddOutputFilterByType DEFLATE application/x-font-otf
 	# AddOutputFilterByType DEFLATE application/x-font-truetype
 	# AddOutputFilterByType DEFLATE application/x-font-ttf
-	# AddOutputFilterByType DEFLATE application/x-javascript 
+	# AddOutputFilterByType DEFLATE application/x-javascript
 	# AddOutputFilterByType DEFLATE font/opentype
 	# AddOutputFilterByType DEFLATE font/otf
 	# AddOutputFilterByType DEFLATE font/ttf
-	AddOutputFilterByType DEFLATE image/svg+xml 
+	AddOutputFilterByType DEFLATE image/svg+xml
 	# AddOutputFilterByType DEFLATE image/x-icon
 </IfModule>
 
@@ -291,22 +298,9 @@ ServerSignature Off
 
 
 # -----------------------------------------------------------------------------
-# 9) OPTIONAL PASSWORD PROTECTION (BASIC AUTH)
-#    WHEN: Useful for non-public staging sites; combine with IP allowlists at the edge.
-# -----------------------------------------------------------------------------
-# <IfModule mod_auth_basic.c>
-# 	AuthType Basic
-# 	AuthName "Staging - restricted access"
-# 	AuthUserFile /path/to/.htpasswd
-# 	Require valid-user
-# </IfModule>
-
-
-# -----------------------------------------------------------------------------
-# 10) ENVIRONMENT IDENTIFICATION HEADERS
-#     WHY: Quick verification for ops/QA; mirror value in CDN/WAF.
+# 9) ENVIRONMENT IDENTIFICATION HEADERS
+#    WHY: Quick verification for ops/health checks; mirror value in CDN/WAF.
 # -----------------------------------------------------------------------------
 <IfModule mod_headers.c>
-	Header always set X-CitOmni-Env "stage"
-	# Header always set X-CitOmni-Config "stage-2025-09-04-a1b2c3"
+	Header always set X-CitOmni-Env "prod"
 </IfModule>

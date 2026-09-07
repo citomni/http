@@ -1,0 +1,30 @@
+# =============================================================================
+# CitOmni - robots.txt (STAGING)
+#
+# PURPOSE
+#   Allow compliant crawlers to fetch staging responses so they can observe the
+#   HTTP noindex policy, while keeping staging accessible to reviewers and clients.
+#
+# THREAT MODEL
+#   - Prevent staging URLs and duplicate/incomplete content from being indexed.
+#   - Avoid blocking crawlers before they can observe the X-Robots-Tag noindex header.
+#
+# BEHAVIOR
+#   - The empty "Disallow" rule imposes no crawl restriction.
+#   - Staging responses send X-Robots-Tag: noindex, nofollow, noarchive.
+#
+# NOINDEX
+#   - Do not add "Noindex:" here. It is not a supported robots.txt directive.
+#   - Do not use "Disallow: /" for staging: a blocked crawler cannot fetch the
+#     response that carries the authoritative X-Robots-Tag noindex directive.
+#   - robots.txt controls crawling; the HTTP X-Robots-Tag controls indexing.
+#
+# NOTES
+#   - Staging is intentionally reachable for review and testing.
+#   - mod_headers must be enabled so the staging .htaccess files can emit the
+#     X-Robots-Tag noindex header.
+# =============================================================================
+
+
+User-agent: *
+Disallow:
