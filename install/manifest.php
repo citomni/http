@@ -1,9 +1,28 @@
 <?php
+/*
+ * This file is part of the CitOmni framework.
+ * Low overhead, high performance, ready for anything.
+ *
+ * For more information, visit https://github.com/citomni
+ *
+ * Copyright (c) 2012-present Lars Grove Mortensen
+ * SPDX-License-Identifier: MIT
+ *
+ * For full copyright, trademark, and license information,
+ * please see the LICENSE file distributed with this source code.
+ */
 
 return [
 	'package' => 'citomni/http',
-	'version' => 1,
+	'version' => 2,
 	'files' => [
+		[
+			'target' => 'bin/.htaccess',
+			'source' => 'install/scaffold/htaccess.internal-folders.stub',
+			'type' => 'server-config',
+			'policy' => 'managed',
+		],
+
 		[
 			'target' => 'config/citomni_http_cfg.php',
 			'source' => 'install/scaffold/config/citomni_http_cfg.php.stub',
@@ -58,18 +77,59 @@ return [
 			'type' => 'routes',
 			'policy' => 'create-only',
 		],
-
 		[
-			'target' => 'public/.htaccess',
-			'source' => 'install/scaffold/public/.htaccess.stub',
+			'target' => 'config/.htaccess',
+			'source' => 'install/scaffold/htaccess.internal-folders.stub',
 			'type' => 'server-config',
 			'policy' => 'managed',
 		],
+
+		[
+			'target' => 'language/.htaccess',
+			'source' => 'install/scaffold/htaccess.internal-folders.stub',
+			'type' => 'server-config',
+			'policy' => 'managed',
+		],
+
+		[
+			'target' => '.htaccess',
+			'type' => 'server-config',
+			'policy' => 'managed',
+			'environments' => [
+				'dev' => ['source' => 'install/scaffold/htaccess.app-root.dev.stub'],
+				'stage' => ['source' => 'install/scaffold/htaccess.app-root.stage.stub'],
+				'prod' => ['source' => 'install/scaffold/htaccess.app-root.prod.stub'],
+			],
+		],
+		[
+			'target' => 'public/.htaccess',
+			'type' => 'server-config',
+			'policy' => 'managed',
+			'environments' => [
+				'dev' => ['source' => 'install/scaffold/public/htaccess.public.dev.stub'],
+				'stage' => ['source' => 'install/scaffold/public/htaccess.public.stage.stub'],
+				'prod' => ['source' => 'install/scaffold/public/htaccess.public.prod.stub'],
+			],
+		],
 		[
 			'target' => 'public/index.php',
-			'source' => 'install/scaffold/public/index.php.stub',
 			'type' => 'entrypoint',
 			'policy' => 'managed',
+			'environments' => [
+				'dev' => ['source' => 'install/scaffold/public/index.php.dev.stub'],
+				'stage' => ['source' => 'install/scaffold/public/index.php.stage.stub'],
+				'prod' => ['source' => 'install/scaffold/public/index.php.prod.stub'],
+			],
+		],
+		[
+			'target' => 'public/robots.txt',
+			'type' => 'public-policy',
+			'policy' => 'managed',
+			'environments' => [
+				'dev' => ['source' => 'install/scaffold/public/robots.dev.stub'],
+				'stage' => ['source' => 'install/scaffold/public/robots.stage.stub'],
+				'prod' => ['source' => 'install/scaffold/public/robots.prod.stub'],
+			],
 		],
 		[
 			'target' => 'public/site.webmanifest.tpl',
@@ -97,6 +157,12 @@ return [
 		],
 
 		[
+			'target' => 'src/.htaccess',
+			'source' => 'install/scaffold/htaccess.internal-folders.stub',
+			'type' => 'server-config',
+			'policy' => 'managed',
+		],
+		[
 			'target' => 'src/Http/.gitkeep',
 			'source' => 'install/scaffold/src/Http/.gitkeep',
 			'type' => 'directory-placeholder',
@@ -117,7 +183,7 @@ return [
 
 		[
 			'target' => 'templates/.htaccess',
-			'source' => 'install/scaffold/templates/.htaccess.stub',
+			'source' => 'install/scaffold/htaccess.internal-folders.stub',
 			'type' => 'server-config',
 			'policy' => 'managed',
 		],
@@ -146,6 +212,19 @@ return [
 			'policy' => 'create-only',
 		],
 
+		[
+			'target' => 'tests/.htaccess',
+			'source' => 'install/scaffold/htaccess.internal-folders.stub',
+			'type' => 'server-config',
+			'policy' => 'managed',
+		],
+
+		[
+			'target' => 'var/.htaccess',
+			'source' => 'install/scaffold/htaccess.internal-folders.stub',
+			'type' => 'server-config',
+			'policy' => 'managed',
+		],
 		[
 			'target' => 'var/flags/maintenance.php',
 			'source' => 'install/scaffold/var/flags/maintenance.php.stub',
