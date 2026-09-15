@@ -1,4 +1,5 @@
 <?php
+declare(strict_types=1);
 /*
  * This file is part of the CitOmni framework.
  * Low overhead, high performance, ready for anything.
@@ -40,7 +41,7 @@ $detailsBlock = '';
 if (isset($d['details'])) {
 	$raw = is_string($d['details'])
 		? $d['details']
-		: json_encode($d['details'], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_PARTIAL_OUTPUT_ON_ERROR);
+		: (string)json_encode($d['details'], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_PARTIAL_OUTPUT_ON_ERROR);
 	$detailsBlock = '<div class="panel panel--terminal" role="region" aria-label="Details"><pre>'
 		. $e($raw)
 		. '</pre></div>';
@@ -100,7 +101,7 @@ if (isset($d['details'])) {
 				<span class="badge">ERROR</span>
 				<div>
 					<h1 class="title" id="page-title"><?= $e($title) ?> <span class="sr-only">(<?= $status ?> <?= $e($statusText) ?>)</span></h1>
-					<p class="subtitle"><?= $e($status) ?> <?= $e($statusText) ?></p>
+					<p class="subtitle"><?= $e((string)$status) ?> <?= $e($statusText) ?></p>
 				</div>
 			</header>
 

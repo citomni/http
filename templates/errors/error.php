@@ -1,4 +1,5 @@
 <?php
+declare(strict_types=1);
 /*
  * This file is part of the CitOmni framework.
  * Low overhead, high performance, ready for anything.
@@ -404,7 +405,7 @@ $quaternary_label_txt	= (string) $txt['page_txt']['quaternary_label'] ?? 'Report
 	<div class="container">
 		<main class="card" role="main" aria-labelledby="page-title">
 			<header class="header">
-				<span class="badge <?= $e($badge_variant) ?>"><?= $e($status) ?></span>
+				<span class="badge <?= $e($badge_variant) ?>"><?= $e((string)$status) ?></span>
 				<div>
 					<h1 class="title" id="page-title"><?= $e($title) ?></h1>
 					<p class="subtitle"><?= $e($subtitle) ?></p>
@@ -445,7 +446,7 @@ $quaternary_label_txt	= (string) $txt['page_txt']['quaternary_label'] ?? 'Report
 				<?php if (\defined('CITOMNI_ENVIRONMENT') && CITOMNI_ENVIRONMENT === 'dev' && is_array($details)): ?>
 					<div class="panel panel--code" role="region" aria-label="Details">
 						<pre><?=
-							$e(json_encode(
+							$e((string)json_encode(
 								$details,
 								JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT | JSON_PARTIAL_OUTPUT_ON_ERROR
 							))
