@@ -1735,11 +1735,11 @@ final class TemplateEngine extends BaseService {
 			}
 			$seen[$name] = true;
 
-			// Replace `{% yield name %}` in the parent with the child's block content.
+			// Replace yields with literal block source, preserving backslashes and $n sequences.
 			$quoted = \preg_quote($name, '/');
-			$replaced = \preg_replace(
+			$replaced = \preg_replace_callback(
 				'/{%\s*yield\s*' . $quoted . '\s*%}/',
-				$content,
+				static fn(array $match): string => $content,
 				$layoutCode,
 				-1,
 				$count
