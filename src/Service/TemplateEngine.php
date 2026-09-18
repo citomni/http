@@ -18,169 +18,187 @@ namespace CitOmni\Http\Service;
 use CitOmni\Kernel\Service\BaseService;
 
 /**
- * TemplateEngine: Deterministic multi-layer template rendering for HTTP UI.
+ * Render and compile deterministic, explicitly layered templates for CitOmni HTTP applications.
  *
- * Responsibilities:
- * - Render a template identified as "path@layer" where "layer" is a named template
- *   root (e.g. "app", "citomni/admin", "aserno/byportal").
- * - Support layout inheritance via `{% extends "layout@layer" %}` and named
- *   `{% block %}` / `{% yield %}` regions, even across layers.
- * - Support partial reuse via `{% include "partial@layer" %}`, even across layers.
- * - Merge globals, dynamic (per-request) vars, and controller data for each render.
- *   Precedence: controller data > dynamic vars > globals.
- * - Expose helpers to templates (`$url`, `$asset`, `$txt`, `$icon`, `$hasIcon`, `$dt`, `$auth`, `$role`, etc.)
- *   as closures bound to the current App.
- * - Support inline PHP tags `{? ... ?}` and `{?= ... ?}`. Inline PHP is enabled
- *   by default and can be disabled via config/constructor options.
- * - Compile templates to disk cache under /var/cache for performance. Cache keys
- *   incorporate both "path" and "layer".
- * - Match path-scoped view variables against the app-root-relative request path
- *   reported by Request::pathFromAppRoot().
- *
- * Configuration keys read (cfg->view):
- *
- * - template_layers (array<string,string>)
- *     Map of logical layer => absolute template dir.
- *     Example:
- *       'app'             => '/var/www/app/templates'
- *       'citomni/admin'   => '/var/www/app/vendor/citomni/admin/templates'
- *
- * - cache_enabled (bool)
- *     Reuse compiled templates between requests if mtimes haven't changed.
- *
- * - trim_whitespace (bool)
- *     Collapse redundant whitespace outside of sensitive tags (<pre>, <code>, etc.).
- *
- * - remove_html_comments (bool)
- *     Strip ordinary HTML comments ("<!-- ... -->") from final output.
- *
- * - allow_php_tags (bool)
- *     Allow `{? ... ?}` / `{?= ... ?}` inline-php blocks in templates.
- *
- * - asset_version (string)
- *     Global cache-busting token appended by $asset().
- *
- * - marketing_scripts (string)
- *     Raw HTML (analytics, tracking) injected into globals as $marketing_scripts.
- *
- * - vars (array<string,array>)
- *     Declarative, path-scoped view variables.
- *     Each key is the final variable name that will appear in templates
- *     (e.g. "header", "admin_nav", ...). Each entry decides:
- *       - whether it's 'static' or 'dynamic' (`type`),
- *       - where the data comes from (`source`),
- *       - and which request paths it should apply to (`include` / `exclude`).
- *
- *     We compile this into $this->compiledVars with ready-to-use regexes so that,
- *     for a given app-root-relative request path, we can cheaply inject:
- *       - static data blobs (menus, etc.)
- *       - dynamic provider output (header models, etc.).
+ * The engine keeps the established CitOmni template contract while compiling trusted template
+ * source into reusable PHP generations. Template references always use the explicit
+ * "relative/path.html@layer" form, where the layer maps to a configured template root.
  *
  * Behavior:
- * - render() prints final HTML; renderToString() returns it as string.
- * - file references are ALWAYS "relative/path.html@layer". There is no implicit layer.
- *   If the layer slug is invalid or unknown, we fail fast.
- * - Whitespace/HTML comment stripping and inline-PHP parsing happen at compile time.
- * - Cache invalidation is timestamp-based: source and its dependencies (extends/includes).
- *   If newer than compiled cache, we recompile atomically and swap.
+ * - Supports layout inheritance via `{% extends "layout@layer" %}` and named
+ *   `{% block %}` / `{% yield %}` regions across registered layers.
+ * - Supports compile-time partial expansion via `{% include "partial@layer" %}`.
+ * - Supports escaped `{{ ... }}` output, raw `{{{ ... }}}` output, control directives,
+ *   `{% set %}`, native PHP and the optional `{? ... ?}` / `{?= ... ?}` inline-PHP syntax.
+ * - Merges template variables with deterministic precedence:
+ *   1) Controller data.
+ *   2) Path-scoped `cfg->view->vars` values.
+ *   3) Request-local globals and helper closures.
+ * - Exposes the established helper contract including `$url`, `$asset`, `$txt`, `$icon`,
+ *   `$hasIcon`, `$dt`, `$auth`, `$role`, `$csrfField` and related helpers.
+ * - Dynamic scoped providers are evaluated for every applicable render; provider results are
+ *   deliberately not memoized by this service.
+ * - Compiles templates into immutable, content-addressed PHP generations under `var/cache`.
+ * - Publishes a non-executable JSON manifest last, after the compiled generation is complete.
+ * - On a warm cache hit, validates actual dependency paths and metadata without rereading or
+ *   reparsing template source.
+ * - Cache identity includes compiler version, PHP version, layer mapping and compile flags so
+ *   incompatible compiled output is never reused across compiler/runtime configurations.
  *
  * Notes:
- * - This service is instantiated once per request/process.
- * - init() normalizes config into cheap, immutable scalars/arrays on the object.
- * - We do not catch exceptions globally; failures bubble to the global error handler.
+ * - Relevant `cfg->view` configuration is preserved:
+ *   1) `template_layers` maps logical layer slugs to template-root directories.
+ *   2) `cache_enabled` allows validated compiled generations to be reused across renders.
+ *   3) `trim_whitespace` collapses redundant whitespace only in safe, unprotected markup text.
+ *   4) `remove_html_comments` removes ordinary HTML comments during compile-time optimization.
+ *   5) `allow_php_tags` controls CitOmni's `{? ... ?}` / `{?= ... ?}` inline-PHP syntax.
+ *   6) `asset_version` supplies the default cache-busting token used by `$asset()`.
+ *   7) `marketing_scripts` is exposed as trusted raw markup through template globals.
+ *   8) `vars` defines static or dynamic path-scoped values with include/exclude rules.
+ * - Typical `template_layers` configuration:
+ *     [
+ *         'app' => '/var/www/app/templates',
+ *         'citomni/admin' => '/var/www/app/vendor/citomni/admin/templates',
+ *     ]
+ * - Typical path-scoped `vars` configuration:
+ *     [
+ *         'admin_nav' => [
+ *             'type' => 'static',
+ *             'source' => [...],
+ *             'include' => ['/admin/*'],
+ *             'exclude' => [],
+ *         ],
+ *         'header' => [
+ *             'type' => 'dynamic',
+ *             'source' => ['service' => 'sitewide', 'method' => 'header'],
+ *             'include' => ['*'],
+ *             'exclude' => ['/admin/*'],
+ *         ],
+ *     ]
+ * - `allow_php_tags` controls CitOmni's custom inline-PHP tags; it is not a PHP sandbox and
+ *   native PHP in trusted templates remains supported.
+ * - Templates and the cache directory are trusted application-controlled inputs. This class is
+ *   not intended to execute untrusted template source.
+ * - Dependency freshness uses canonical path, mtime, ctime, size, inode and device. An edit that
+ *   preserves every compared metadata value requires explicit template-cache invalidation.
+ * - Old content-addressed generations are not deleted on request paths. Prune obsolete template
+ *   cache artifacts during coordinated maintenance rather than from active renders.
+ * - The service retains request-bound globals and is designed for one App/request context.
+ * - If `_viewvars` is present on a dev or stage request, render() emits an escaped diagnostic
+ *   HTML comment containing the final template-variable payload before rendering.
  *
  * Typical usage:
- *   // Controller: direct output
  *   $this->app->tplEngine->render('member/home.html@app', [
- *   	'title' => 'Mit område',
+ *   	'title' => 'Member area',
  *   ]);
  *
- *   // Controller: capture as string (for email body, etc.)
- *   $html = $this->app->tplEngine->renderToString('mail/reset.html@citomni/authenticate', [
- *   	'user'  => $userRow,
- *   	'token' => $token,
- *   ]);
+ *   $html = $this->app->tplEngine->renderToString(
+ *   	'mail/reset.html@citomni/authenticate',
+ *   	['identity' => $identity]
+ *   );
  *
- * Debugging:
- * - If the incoming request query contains "_viewvars" AND the environment is dev/stage,
- *   we emit an HTML comment dump of the final var payload before rendering.
- *
- * @throws \InvalidArgumentException On malformed template reference ("foo@bar").
- * @throws \RuntimeException On illegal path traversal or missing template file.
+ * @throws \InvalidArgumentException On an invalid template reference or layer definition.
+ * @throws \RuntimeException On invalid template structure, inaccessible source or cache failure.
  */
 final class TemplateEngine extends BaseService {
 
-	/** @var array<string,string> Immutable map layer => absolute template dir */
+	// ----------------------------------------------------------------
+	// Compiler contract and state
+	// ----------------------------------------------------------------
+
+	/** Compiler/cache format version. Increment when emitted PHP or dependency/compiler semantics change. */
+	private const string COMPILER_VERSION = '2';
+
+	/** Maximum recursive include depth before failing fast. */
+	private const int MAX_INCLUDE_DEPTH = 16;
+
+	/** Maximum number of parent-layout hops in one inheritance chain. */
+	private const int MAX_INHERITANCE_DEPTH = 64;
+
+	/** Canonical parser expression for one explicit extends directive. */
+	private const string EXTENDS_PATTERN = '/{%\s*extends\s+["\'](.+?)["\']\s*%}/';
+
+	/** Canonical parser expression for explicit include directives. */
+	private const string INCLUDE_PATTERN = '/{%\s*include\s+["\'](.+?)["\']\s*%}/i';
+
+	/** Existing non-nested block grammar used during inheritance resolution. */
+	private const string BLOCK_PATTERN = '/{%\s*block\s+([\w-]+)\s*%}(.*?){%\s*endblock\s*%}/s';
+
+	/** Canonical parser expression for named layout yields. */
+	private const string YIELD_PATTERN = '/{%\s*yield\s*([\w-]+)\s*%}/';
+
+
+	/** @var array<string,string> Layer slug to configured template directory. */
 	private array $layersMap = [];
 
-	/** @var string Absolute cache dir path (CITOMNI_APP_PATH . "/var/cache") */
+	/** Absolute persistent cache root (`CITOMNI_APP_PATH . '/var/cache'`). */
 	private string $cacheDir = '';
 
-	/** @var bool */
+	/** Hash of compiler/runtime/layer settings that participate in cache identity. */
+	private string $cacheSignature = '';
+
+	/** Whether warm compiled generations may be reused across renders. */
 	private bool $cacheEnabled = false;
 
-	/** @var bool */
+	/** Whether safe literal-text whitespace collapsing is enabled at compile time. */
 	private bool $trimWhitespace = false;
 
-	/** @var bool */
+	/** Whether ordinary HTML comments are removed by compile-time markup optimization. */
 	private bool $removeHtmlComments = false;
 
-	/** @var bool */
+	/** Whether CitOmni `{? ... ?}` and `{?= ... ?}` inline-PHP tags are compiled. */
 	private bool $allowPhpTags = true;
 
-	/** @var string */
+	/** Global cache-busting version used by the `$asset()` helper. */
 	private string $assetVersion = '';
 
-	/** @var string Raw HTML snippet (analytics, marketing tags) injected globally */
+	/** Raw trusted marketing/analytics markup exposed as `marketing_scripts`. */
 	private string $marketingScripts = '';
 
-
-
-
 	/**
-	 * Precompiled, path-scoped template vars from cfg->view->vars.
+	 * Precompiled path-scoped template-variable definitions from `cfg->view->vars`.
 	 *
 	 * Shape:
 	 *   [
 	 *     'header' => [
-	 *       'var'   => 'header',
-	 *       'type'  => 'dynamic',
-	 *       'call'  => ['class' => \Foo\Model\SitewideModel::class, 'method' => 'header'],
-	 *       'ire'   => ['/^\/$/', '/^\/nyheder\/.*\/'],	// compiled from cfg->view->vars['header']['include']
-	 *       'ere'   => ['/^\/admin\//'],        			// compiled from cfg->view->vars['header']['exclude']
+	 *       'type' => 'dynamic',
+	 *       'call' => ['class' => \Foo\Model\SitewideModel::class, 'method' => 'header'],
+	 *       'ire' => ['/^\\/$/', '/^\\/nyheder\\/.*$/'],
+	 *       'ere' => ['/^\\/admin\\//'],
 	 *     ],
 	 *     'admin_nav' => [
-	 *       'var'   => 'admin_nav',
-	 *       'type'  => 'static',
-	 *       'data'  => [...],
-	 *       'ire'   => ['/^\/admin\//'], 	// compiled from cfg->view->vars['admin_nav']['include']
-	 *       'ere'   => [],					// compiled from cfg->view->vars['admin_nav']['exclude']
+	 *       'type' => 'static',
+	 *       'data' => [...],
+	 *       'ire' => ['/^\\/admin\\//'],
+	 *       'ere' => [],
 	 *     ],
-	 *     ...
 	 *   ]
 	 *
 	 * Notes:
-	 * - 'ire' / 'ere' are internal compiled regex arrays.
-	 *   In config you always use 'include' / 'exclude'.
+	 * - Array keys are the final template variable names exposed to templates.
+	 * - Configuration uses `include` / `exclude`; `ire` / `ere` are internal compiled regex arrays.
+	 * - Static definitions store their configured `source` as `data`.
+	 * - Dynamic definitions store their configured provider `source` as `call`.
+	 * - Dynamic provider results are not stored here; they are resolved for every applicable render.
 	 *
-	 * Notes:
-	 * - Keys are the final template variable names ("header", "footer", "admin_nav", ...).
-	 * - Last provider wins on key collision (deterministic CitOmni merge semantics).
-	 *
-	 * @var array<string, array{
-	 *    var:string,
-	 *    type:'static'|'dynamic',
-	 *    data?:mixed,
-	 *    call?:mixed,
-	 *    ire:array<int,string>,
-	 *    ere:array<int,string>,
+	 * @var array<string,array{
+	 *     type:'static'|'dynamic',
+	 *     data?:mixed,
+	 *     call?:mixed,
+	 *     ire:string[],
+	 *     ere:string[]
 	 * }>
 	 */
 	private array $compiledVars = [];
 
-	/** @var array<string,mixed>|null Cached global vars+helpers for this request */
+	/** @var array<string,mixed>|null Request-local global variables and helpers. */
 	private ?array $globals = null;
 
+	/** @var array<string,array> Successfully loaded manifests; revalidated for each render. */
+	private array $manifests = [];
+
+	/** @var array<string,string> Cache identity prefixes for references used by this App. */
+	private array $cachePrefixes = [];
 
 
 
@@ -189,196 +207,168 @@ final class TemplateEngine extends BaseService {
 
 
 	// ----------------------------------------------------------------
-	// Construction
+	// Initialization
 	// ----------------------------------------------------------------
 
 	/**
-	 * One-time initialization for this request/process.
+	 * Initialize template configuration, scoped variables and the persistent cache identity.
 	 *
 	 * Behavior:
-	 * - Reads relevant `cfg->view` nodes and snapshots them into cheap local scalars/arrays.
-	 *   We do this up front so later hot paths do not keep walking the cfg wrapper.
-	 * - Normalizes associative cfg maps (`template_layers`, `vars`) into plain arrays.
-	 *   App::buildConfig() in the kernel already produced one merged config array
-	 *   (vendor -> providers -> app -> env; last wins). Each subtree (like cfg->view)
-	 *   is exposed through CitOmni\Kernel\Cfg, and we flatten those nodes here so we
-	 *   can access them with simple array lookups at runtime.
-	 * - Pre-compiles cfg->view->vars (static + dynamic scoped vars) into $this->compiledVars
-	 *   with ready-to-use regex filters (include/exclude).
-	 * - Captures feature flags (whitespace trimming, comment stripping, etc.).
-	 * - Resolves deterministic cache dir.
+	 * - Snapshots `cfg->view` and service-map options once so hot render paths avoid repeatedly
+	 *   walking the configuration wrapper.
+	 * - Normalizes and validates `template_layers`; `app` is accepted as the built-in layer name
+	 *   and other layers must use a `vendor/package` slug.
+	 * - Applies existing option precedence for cache, markup and asset settings. Service options
+	 *   override corresponding view configuration values where supported.
+	 * - Normalizes `cfg->view->vars` into static/dynamic definitions and precompiles each
+	 *   include/exclude matcher with compilePathMatcher().
+	 * - Builds a deterministic cache signature from compiler version, PHP version, short-open-tag
+	 *   state, compile flags and the sorted layer map.
+	 * - Resolves the established cache root to `CITOMNI_APP_PATH . '/var/cache'` without creating
+	 *   the directory until compilation actually needs it.
 	 *
 	 * Notes:
-	 * - We do not realpath() template layer dirs here. Boundary checks happen in loadSource()
-	 *   at file-read time. That keeps init() cheap and lets providers mount templates via
-	 *   symlinks without us "helpfully" rewriting paths.
+	 * - Layer roots are not realpath-resolved during initialization. Boundary resolution happens
+	 *   lazily when source files are accessed, preserving symlink-capable layer configuration.
+	 * - `cfg->view->vars` accepts `type` = `static` or `dynamic`, a `source`, and optional
+	 *   `include` / `exclude` matcher lists.
+	 * - Invalid definitions fail fast rather than being silently ignored or guessed.
 	 *
 	 * @return void
+	 * @throws \InvalidArgumentException  On an invalid layer slug or layer path definition.
+	 * @throws \RuntimeException  On an invalid scoped-variable definition.
 	 */
 	protected function init(): void {
 
+		// -- 1. Snapshot configuration and service options ----------------
+		// Read the view subtree once so later render/compile paths do not keep walking Cfg.
+		// Service-map options are also request-local construction input; they take precedence
+		// over matching cfg->view values. Once normalized below, the original options bag is
+		// no longer needed and is cleared to avoid carrying redundant mutable state.
 
-		// -- 1. Snapshot cfg and service options ---------------------------
-		// Snapshot cfg root for the view layer.
-		// If cfg->view is missing, fall back to an empty stdClass-like object for convenience.
 		$viewCfg = $this->app->cfg->view ?? (object)[];
-
-		// Snapshot and clear service options.
-		// Rationale:
-		// - The service can be constructed with "options" from the service map.
-		// - We read them once here (they override cfg values).
-		// - Then we drop $this->options to avoid carrying mutable state.
 		$opt = $this->options;
 		$this->options = [];
 
-		// -- 2. Normalize template layer map -------------------------------
-		// Template layers map (layer => absolute dir)
-		//
-		// - view.template_layers is expected to be something like:
-		//     [
-		//       'app'              => '/var/www/myapp/templates',
-		//       'citomni/admin'    => '/var/www/myapp/vendor/citomni/admin/templates',
-		//       'aserno/byportal'  => '/var/www/myapp/vendor/aserno/byportal-core/templates',
-		//     ]
-		//
-		// - normalizeCfgMap() just flattens either a plain PHP array or a Cfg node
-		//   (i.e. something with ->toArray()) into a regular associative array.
-		//   We want a raw ['layer' => '/abs/path'] map here so runtime lookups are cheap.
-		//
-		// - We validate each layer slug now (fail fast). "app" is allowed as a special case.
-		//   Everything else must look like "vendor/package".
-		//
-		// - We do NOT realpath() here; loadSource() enforces that templates can't escape
-		//   their configured root using ../ tricks. Doing it lazily keeps init() cheap.
-		$rawLayers = $this->normalizeCfgMap($viewCfg->template_layers ?? []);
-		foreach ($rawLayers as $layerKey => $pathVal) {
-			$layer = (string)$layerKey;
 
-			// Validate layer slug: "app" or "vendor/package" (letters, digits, dot, dash, underscore).
+		// -- 2. Normalize and validate template layers --------------------
+		// Template layers map a logical name to one absolute template root.
+		//
+		// Typical configuration:
+		//   [
+		//     'app' => '/var/www/myapp/templates',
+		//     'citomni/admin' => '/var/www/myapp/vendor/citomni/admin/templates',
+		//     'aserno/byportal' => '/var/www/myapp/vendor/aserno/byportal-core/templates',
+		//   ]
+		//
+		// normalizeCfgMap() flattens either a plain array or a Cfg-style node into
+		// a regular associative array so runtime lookups stay simple and cheap.
+		//
+		// Layer slugs are validated here so bad configuration fails during service
+		// construction. "app" is the built-in special case; package layers use
+		// "vendor/package".
+		//
+		// We deliberately do NOT realpath() roots here. Canonical resolution and
+		// containment checks happen when a concrete template is loaded, which keeps
+		// init() cheap and preserves valid symlink-based template roots.
+
+		foreach ($this->normalizeCfgMap($viewCfg->template_layers ?? []) as $layerKey => $path) {
+			$layer = (string)$layerKey;
 			if ($layer !== 'app' && !\preg_match('~^[a-z0-9._-]+/[a-z0-9._-]+$~i', $layer)) {
 				throw new \InvalidArgumentException("TemplateEngine: Invalid layer slug '{$layer}'.");
 			}
-
-			// The configured dir must be a non-empty string.
-			if (!\is_string($pathVal) || $pathVal === '') {
-				throw new \InvalidArgumentException(
-					"TemplateEngine: template_layers['{$layer}'] must be a non-empty string (absolute directory)."
-				);
+			if (!\is_string($path) || $path === '') {
+				throw new \InvalidArgumentException("TemplateEngine: template_layers['{$layer}'] must be a non-empty string (absolute directory).");
 			}
-
-			// We just trim trailing slashes here. We do NOT resolve symlinks at this stage.
-			$abs = \rtrim($pathVal, "/\\");
-			$this->layersMap[$layer] = $abs;
+			$this->layersMap[$layer] = \rtrim($path, '/\\') . '/';
 		}
 
-		// -- 3. Snapshot rendering flags -----------------------------------
-		// Rendering / compilation flags & toggles
-		//
-		// - Some flags can be overridden via service-map options when wiring the service.
-		//   Options win over cfg->view (predictable "last wins" semantics).
-		//
-		// - We coerce to bool so later checks are cheap.
-		//   This avoids repeatedly touching cfg->view in hot render paths.
-		$this->cacheEnabled		= (bool)($opt['cache_enabled'] ?? $viewCfg->cache_enabled ?? false);
-		$this->trimWhitespace	= (bool)($opt['trim_whitespace'] ?? $viewCfg->trim_whitespace ?? false);
+
+		// -- 3. Snapshot compile settings ----------------------------------
+		// These flags participate directly in compilation behavior. Service options
+		// override cfg->view, and values are coerced once here so hot paths only read
+		// typed object properties.
+
+		$this->cacheEnabled = (bool)($opt['cache_enabled'] ?? $viewCfg->cache_enabled ?? false);
+		$this->trimWhitespace = (bool)($opt['trim_whitespace'] ?? $viewCfg->trim_whitespace ?? false);
 		$this->removeHtmlComments = (bool)($opt['remove_html_comments'] ?? $viewCfg->remove_html_comments ?? false);
-		$this->allowPhpTags		= (bool)($opt['allow_php_tags'] ?? $viewCfg->allow_php_tags ?? true);
+		$this->allowPhpTags = (bool)($opt['allow_php_tags'] ?? $viewCfg->allow_php_tags ?? true);
 
-		// -- 4. Snapshot passthrough view config ---------------------------
-		// Passthrough view config (asset versioning, marketing snippets, globals)
-		//
-		// - assetVersion is used by the $asset() helper for cache-busting (?v=...).
-		// - marketingScripts is dumped into all templates (e.g. analytics tags).
-		// - Icons are deliberately not loaded here. The $icon() helper delegates to
-		//   the lazy Icon service so requests without icons pay no icon payload cost.
-		$this->assetVersion		= (string)($opt['asset_version'] ?? $viewCfg->asset_version ?? '');
-		$this->marketingScripts	= (string)($viewCfg->marketing_scripts ?? '');
 
-		// -- 5. Precompile scoped view vars --------------------------------
-		// Pre-compile scoped view vars (static + dynamic)
+		// -- 4. Snapshot passthrough view configuration --------------------
+		// assetVersion is consumed lazily by $asset() for ?v= cache busting.
+		// marketingScripts is exposed as a template global for trusted analytics/
+		// marketing markup.
 		//
-		// cfg->view->vars is expected to be an associative map:
-		//   varName => [
-		//     'type'    => 'static' | 'dynamic',
-		//     'include' => [...],
-		//     'exclude' => [...],
-		//     'source'  => ... (literal data OR callable descriptor)
+		// Icons are intentionally NOT loaded here. $icon() delegates to the lazy
+		// Icon service, so requests that never render an icon pay no icon payload cost.
+
+		$this->assetVersion = (string)($opt['asset_version'] ?? $viewCfg->asset_version ?? '');
+		$this->marketingScripts = (string)($viewCfg->marketing_scripts ?? '');
+
+
+		// -- 5. Precompile path-scoped variable definitions ---------------
+		// cfg->view->vars is an associative map keyed by the final template variable:
+		//
+		//   'header' => [
+		//     'type' => 'dynamic',
+		//     'source' => ['service' => 'sitewide', 'method' => 'header'],
+		//     'include' => ['*'],
+		//     'exclude' => ['/admin/*'],
 		//   ]
 		//
-		// We normalize that map up front and compile it into $this->compiledVars
-		// so that at request time we only do cheap preg_match() and (maybe) a single
-		// provider call per var.
-		$this->compiledVars = [];
+		// Static definitions keep source as literal data. Dynamic definitions keep
+		// source as a provider descriptor accepted by invokeProvider():
+		// - "FQCN::method"
+		// - ['class' => FQCN, 'method' => 'm']
+		// - ['service' => 'id', 'method' => 'm']
+		//
+		// include/exclude rules are compiled once now into anchored regexes so each
+		// render only performs preg_match() plus the provider call when applicable.
 
-		// Flatten cfg->view->vars (Cfg node or plain array) into a plain associative array.
-		$varsCfg = $this->normalizeCfgMap($viewCfg->vars ?? []);
-
-		foreach ($varsCfg as $varName => $row) {
+		foreach ($this->normalizeCfgMap($viewCfg->vars ?? []) as $varName => $row) {
 			if (!\is_array($row) || $row === []) {
 				continue;
 			}
-
-			// We trust the array key as the var name
 			$varName = (string)$varName;
-			$type	= (string)($row['type'] ?? '');
-			$source	= $row['source'] ?? null;
-
+			$type = (string)($row['type'] ?? '');
+			$source = $row['source'] ?? null;
 			if ($varName === '' || $type === '' || $source === null) {
-				throw new \RuntimeException(
-					"TemplateEngine: view.vars['{$varName}'] requires non-empty 'type' and 'source'."
-				);
+				throw new \RuntimeException("TemplateEngine: view.vars['{$varName}'] requires non-empty 'type' and 'source'.");
 			}
-
-			// Normalize include/exclude lists (can be explicit PCRE "~^...~" or globs "/foo/*")
-			$inc = \array_values((array)($row['include'] ?? []));
-			$exc = \array_values((array)($row['exclude'] ?? []));
-
-			// Precompile patterns now so runtime only does preg_match on anchored regex.
-			$ire = \array_map([$this, 'compilePathMatcher'], $inc);
-			$ere = \array_map([$this, 'compilePathMatcher'], $exc);
-
-			if ($type === 'static') {
-				// Here 'source' is literal data (array/string/whatever),
-				// and we will inject it directly at request time.
-				$this->compiledVars[$varName] = [
-					'var'	=> $varName,
-					'type'	=> 'static',
-					'data'	=> $source,
-					'ire'	=> $ire,
-					'ere'	=> $ere,
-				];
-				continue;
+			if ($type !== 'static' && $type !== 'dynamic') {
+				throw new \RuntimeException("TemplateEngine: Unsupported view.vars type '{$type}' for var '{$varName}'.");
 			}
-
-			if ($type === 'dynamic') {
-				// Here 'source' must describe a callable:
-				// - "FQCN::method"
-				// - ['class' => FQCN, 'method' => 'm']
-				// - ['service' => 'id', 'method' => 'm']
-				//
-				// We'll just store it as 'call' and reuse invokeProvider() at runtime.
-				$this->compiledVars[$varName] = [
-					'var'	=> $varName,
-					'type'	=> 'dynamic',
-					'call'	=> $source, // <- shapes: "FQCN::m", ['class'=>..], ['service'=>..]
-					'ire'	=> $ire,
-					'ere'	=> $ere,
-				];
-				continue;
-			}
-
-			throw new \RuntimeException(
-				"TemplateEngine: Unsupported view.vars type '{$type}' for var '{$varName}'."
-			);
+			$this->compiledVars[$varName] = [
+				'type' => $type,
+				$type === 'static' ? 'data' : 'call' => $source,
+				'ire' => \array_map($this->compilePathMatcher(...), \array_values((array)($row['include'] ?? []))),
+				'ere' => \array_map($this->compilePathMatcher(...), \array_values((array)($row['exclude'] ?? []))),
+			];
 		}
 
-		// -- 6. Resolve cache dir ------------------------------------------
-		// - All compiled templates are written to CITOMNI_APP_PATH . '/var/cache'.
-		// - We don't allow overriding this via config because predictable layout
-		//   is part of CitOmni's "no guessing" philosophy (and deploy tooling
-		//   assumes this location).
-		$this->cacheDir = \CITOMNI_APP_PATH . '/var/cache';
 
+		// -- 6. Build deterministic persistent-cache identity -------------
+		// All template-cache artifacts live under the fixed app var/cache directory.
+		// Keeping this location deterministic avoids another configuration branch and
+		// matches CitOmni deployment/maintenance expectations.
+		//
+		// The cache signature describes every compiler/runtime setting that can change
+		// emitted PHP for the same logical template reference. Layer ordering itself is
+		// irrelevant, so sort the map before hashing it.
+
+		$this->cacheDir = \CITOMNI_APP_PATH . '/var/cache';
+		$identityLayers = $this->layersMap;
+		\ksort($identityLayers, \SORT_STRING);
+		$this->cacheSignature = \hash('sha256', \serialize([
+			self::COMPILER_VERSION,
+			\PHP_VERSION_ID,
+			(bool)\ini_get('short_open_tag'),
+			$this->trimWhitespace,
+			$this->removeHtmlComments,
+			$this->allowPhpTags,
+			$identityLayers,
+		]));
 	}
 
 
@@ -387,32 +377,39 @@ final class TemplateEngine extends BaseService {
 
 
 
-
 	// ----------------------------------------------------------------
-	// Rendering
+	// Rendering and variable assembly
 	// ----------------------------------------------------------------
 
 	/**
-	 * Render a template "file@layer" directly to output.
+	 * Render an explicit template reference directly to the current output stream.
 	 *
 	 * Behavior:
-	 * - Builds final vars for this request/view call.
-	 * - Optionally emits a debug dump of the final variable payload (if the
-	 *   request query contains `_viewvars` and the environment is `dev` or `stage`).
-	 * - Compiles the requested template (resolving `{% extends %}` and `{% include %}` across
-	 *   layers) to a cached PHP file and then requires it.
+	 * - Builds the final variable scope for this render.
+	 * - Emits the optional `_viewvars` diagnostic before template output when enabled in dev/stage.
+	 * - Resolves or compiles the requested template to an executable cached PHP generation.
+	 * - Extracts final template variables with `EXTR_SKIP` and requires the compiled generation in
+	 *   the established service scope, preserving the existing `$this` and local-scope contract.
 	 *
-	 * @param string $ref "relative/path.html@layer".
-	 * @param array<string,mixed> $data Controller-provided data (highest precedence).
+	 * Notes:
+	 * - Template references must use the explicit `relative/path.html@layer` form.
+	 * - Controller data has the highest variable precedence.
+	 * - Rendering side effects come from the compiled template and any helper/provider calls it uses.
+	 *
+	 * Typical usage:
+	 *   $this->app->tplEngine->render('member/home.html@app', ['title' => 'Home']);
+	 *
+	 * @param  string  $ref  Explicit template reference such as `member/home.html@app`.
+	 * @param  array<string,mixed>  $data  Controller-provided variables.
 	 * @return void
+	 * @throws \InvalidArgumentException  On an invalid template reference.
+	 * @throws \RuntimeException  On template compilation, source or cache failure.
 	 */
 	public function render(string $ref, array $data = []): void {
 		$vars = $this->buildFinalVars($data);
-
 		if ($this->app->request->get('_viewvars') !== null) {
 			$this->printViewVars($vars);
 		}
-
 		$file = $this->compile($ref);
 		\extract($vars, \EXTR_SKIP);
 		require $file;
@@ -420,22 +417,28 @@ final class TemplateEngine extends BaseService {
 
 
 	/**
-	 * Render a template "file@layer" into a string.
+	 * Render an explicit template reference into a string.
+	 *
+	 * Behavior:
+	 * - Uses the same variable precedence, compilation path and template execution scope as render().
+	 * - Captures only template output and does not inject the `_viewvars` diagnostic dump.
+	 * - Always closes the output buffer in `finally`, including when template execution throws.
+	 *
+	 * Notes:
+	 * - Exceptions from compilation, helpers, providers or template execution are not swallowed.
 	 *
 	 * Typical usage:
-	 *   $html = $this->app->tplEngine->renderToString('mail/reset.html@citomni/authenticate', [...]);
+	 *   $html = $this->app->tplEngine->renderToString('mail/reset.html@citomni/authenticate', $data);
 	 *
-	 * @param string $ref
-	 * @param array<string,mixed> $data
-	 * @return string Rendered HTML.
+	 * @param  string  $ref  Explicit template reference.
+	 * @param  array<string,mixed>  $data  Controller-provided variables.
+	 * @return string  Rendered template output.
+	 * @throws \InvalidArgumentException  On an invalid template reference.
+	 * @throws \RuntimeException  On template compilation, source or cache failure.
 	 */
 	public function renderToString(string $ref, array $data = []): string {
 		$vars = $this->buildFinalVars($data);
-
-		// Debug output for _viewvars is not injected here automatically,
-		// because callers usually want clean HTML output (emails etc.).
 		$file = $this->compile($ref);
-
 		\ob_start();
 		try {
 			\extract($vars, \EXTR_SKIP);
@@ -447,58 +450,70 @@ final class TemplateEngine extends BaseService {
 	}
 
 
-
-
-
-
-
-
-	// ----------------------------------------------------------------
-	// Globals and scoped vars
-	// ----------------------------------------------------------------
-
 	/**
-	 * Merge globals, dynamic vars, and controller data.
+	 * Build the final template-variable map for the current render.
 	 *
-	 * Precedence (left wins on key collision):
-	 * - $data  (controller-supplied vars) >
-	 * - $scoped   (dynamic per-request vars from cfg.view.vars) >
-	 * - $glb   (globals)
+	 * Behavior:
+	 * - Memoizes request-local globals and helper closures on first use.
+	 * - Evaluates matching path-scoped variables for every render when configured.
+	 * - Applies deterministic left-wins precedence:
+	 *   1) Controller data.
+	 *   2) Scoped static/dynamic values.
+	 *   3) Globals and helper closures.
 	 *
-	 * @param array<string,mixed> $data
-	 * @return array<string,mixed>
+	 * Notes:
+	 * - PHP array union is intentional here; later sources do not overwrite earlier keys.
+	 * - Dynamic provider results are not stored in `$this->globals` and are recomputed per render.
+	 *
+	 * @param  array<string,mixed>  $data  Controller-provided variables.
+	 * @return array<string,mixed>  Final variables for extraction into template scope.
 	 */
 	private function buildFinalVars(array $data): array {
 		$globals = $this->globals ??= $this->buildGlobals();
-
-		$pathFromAppRoot = $this->app->request->pathFromAppRoot();
-		$scoped = $this->buildScopedVarsForPath($pathFromAppRoot);
-
+		if ($this->compiledVars === []) {
+			return $data + $globals;
+		}
+		$scoped = $this->buildScopedVarsForPath($this->app->request->pathFromAppRoot());
 		return $data + $scoped + $globals;
 	}
 
 
+
+
+
+
+
+	// ----------------------------------------------------------------
+	// Template globals and helpers
+	// ----------------------------------------------------------------
+
 	/**
-	 * Build globals (memoized once per request).
+	 * Build the established request-local globals and helper closures exposed to templates.
 	 *
-	 * Exposes (keys in the template scope):
-	 * - Scalars: app_name, base_url, public_root_url, language, charset,
-	 *   marketing_scripts, vars.
-	 * - Security flags: csrf_protection, honeypot_protection,
-	 *   form_action_switching, captcha_protection.
-	 * - Environment info: env => { name: string, dev: bool }.
-	 * - Lazy helpers (closures): $txt, $dt, $dtNow, $dtMonth, $dtWeekday, $url,
-	 *   $asset, $icon, $hasIcon, $hasService, $hasPackage, $csrfField, $currentPath, $auth, $role.
+	 * Behavior:
+	 * - Exposes identity/locale scalars including `app_name`, `base_url`, `public_root_url`,
+	 *   `language` and `charset`.
+	 * - Exposes `marketing_scripts`, security feature flags and environment metadata.
+	 * - Exposes lazy App-aware helpers for text, date/time, URLs, assets, services/packages, CSRF,
+	 *   current path, SVG icons, authentication and roles.
+	 * - Helper closures resolve services lazily through the current App and preserve existing
+	 *   fail-fast behavior when a required service is unavailable.
 	 *
 	 * Notes:
-	 * - csrf_protection reflects cfg->security->csrf->enabled.
-	 * - Closures are bound to this service instance and call into $this->app on-demand.
-	 * - $asset() applies cache-busting (cfg->view.asset_version) and keeps existing
-	 *   query strings intact.
+	 * - The result is memoized by buildFinalVars() for this TemplateEngine/App instance.
+	 * - `base_url` comes from `cfg->http->base_url` with `CITOMNI_PUBLIC_ROOT_URL` as fallback;
+	 *   `public_root_url` prefers the constant when defined.
+	 * - `$asset()` applies the configured asset version without discarding an existing query string.
+	 * - `$csrfField()` returns an empty string when the CSRF service is not registered.
+	 * - Helper implementations intentionally remain closures bound to this service so they can
+	 *   access the current App without adding extra service abstractions.
 	 *
-	 * @return array<string,mixed>
+	 * @return array<string,mixed>  Request-local globals and helper closures.
 	 */
 	private function buildGlobals(): array {
+
+		// -- 1. Resolve base URLs ------------------------------------------
+
 		$cfg = $this->app->cfg;
 
 		$baseUrl = (string)($cfg->http->base_url
@@ -508,8 +523,10 @@ final class TemplateEngine extends BaseService {
 			? (string)\CITOMNI_PUBLIC_ROOT_URL
 			: $baseUrl;
 
+
 		return [
-			// --- Identity & locale scalars (cheap values used directly in templates)
+
+			// -- 2. Identity and locale scalars -------------------------------
 
 			'app_name'	=> (string)$cfg->identity->app_name,
 			'base_url'	=> $baseUrl,
@@ -517,24 +534,30 @@ final class TemplateEngine extends BaseService {
 			'language'	=> (string)$cfg->locale->language,
 			'charset'	=> (string)$cfg->locale->charset,
 
-			// --- View passthroughs (global marketing snippets etc.)
+
+			// -- 3. View passthroughs -----------------------------------------
 
 			'marketing_scripts' => $this->marketingScripts,
 
-			// --- Security feature flags (informational for UI text, badges, warnings etc.)
+
+			// -- 4. Security feature flags ------------------------------------
 
 			'csrf_protection'		=> (bool)($cfg->security->csrf->enabled ?? true),
 			'honeypot_protection'	=> (bool)$cfg->security->honeypot_protection,
 			'form_action_switching'	=> (bool)$cfg->security->form_action_switching,
 			'captcha_protection'	=> (bool)$cfg->security->captcha_protection,
 
-			// --- Environment info (e.g. show debug panels only in dev)
+
+			// -- 5. Environment metadata --------------------------------------
 
 			'env' => [
 				'name'	=> \defined('CITOMNI_ENVIRONMENT') ? (string)\CITOMNI_ENVIRONMENT : 'prod',
 				'dev'	=> \defined('CITOMNI_ENVIRONMENT') ? (\CITOMNI_ENVIRONMENT === 'dev') : false,
 			],
 
+
+
+			// -- 6. Lazy template helpers -------------------------------------
 
 			/**
 			 * $txt: Localized text lookup with optional fallback/default.
@@ -544,7 +567,7 @@ final class TemplateEngine extends BaseService {
 			 *   {{ $txt('greeting', 'homepage', null, 'Hello guest') }}
 			 *
 			 * With replacements:
-			 *   {{ $txt('welcome_name', 'homepage', 'citomni/authenticate', 'Hi', {'NAME': $user['first_name']}) }}
+			 *   {{ $txt('welcome_name', 'homepage', 'citomni/authenticate', 'Hi', ['NAME' => $user['first_name']]) }}
 			 *
 			 * Notes:
 			 * - $file is typically the logical language file (without ".php").
@@ -570,7 +593,7 @@ final class TemplateEngine extends BaseService {
 			 * Typical usage:
 			 *   {{ $dt('2025-10-25 16:30', 'yyyy-MM-dd HH:mm') }}
 			 *   {{ $dt(1735123456, 'EEEE d. MMMM yyyy') }}          {# Unix ts -> localized #}
-			 *   {{ $dt($user.created_at, 'yyyy-MM-dd HH:mm') }}     {# DB datetime string #}
+			 *   {{ $dt($user['created_at'], 'yyyy-MM-dd HH:mm') }}     {# DB datetime string #}
 			 *
 			 * With overrides:
 			 *   {{ $dt(null, 'yyyy-MM-dd', 'Europe/Copenhagen', 'da_DK') }}
@@ -668,7 +691,7 @@ final class TemplateEngine extends BaseService {
 			 *   <form action="{{ $url('/login') }}" method="post">
 			 *
 			 * With query params:
-			 *   <a href="{{ $url('/search', {'q': 'cochem', 'page': 2}) }}">...</a>
+			 *   <a href="{{ $url('/search', ['q' => 'cochem', 'page' => 2]) }}">...</a>
 			 *
 			 * Notes:
 			 * - $path may be "/foo" or "foo"; it will be normalized.
@@ -731,7 +754,7 @@ final class TemplateEngine extends BaseService {
 
 
 			/**
-			 * $hasPackage: Check if a provider/package is installed.
+			 * $hasPackage: Check if a package namespace is registered in the App.
 			 *
 			 * Typical usage:
 			 *   {% if $hasPackage('citomni/authenticate') %}
@@ -1013,113 +1036,74 @@ final class TemplateEngine extends BaseService {
 	}
 
 
+
+
+
+
+
+	// ----------------------------------------------------------------
+	// Scoped variables and provider dispatch
+	// ----------------------------------------------------------------
+
 	/**
-	 * buildScopedVarsForPath: Resolve all configured view vars (static+dynamic)
-	 * that apply to the current request path.
+	 * Resolve all configured scoped variables that apply to an app-root-relative request path.
 	 *
-	 * @param string $relPath Normalized app-relative path (e.g. "/admin/users.html").
-	 * @return array<string,mixed> Map of varName => value for this request.
+	 * Behavior:
+	 * - Evaluates precompiled include/exclude matchers for each `cfg->view->vars` definition.
+	 * - Copies static values directly.
+	 * - Invokes dynamic provider definitions only when their path rules match.
+	 *
+	 * Notes:
+	 * - Dynamic provider results are intentionally recomputed for every applicable render.
+	 * - The path is expected to be normalized by Request::pathFromAppRoot().
+	 *
+	 * @param  string  $relPath  App-root-relative path such as `/admin/users.html`.
+	 * @return array<string,mixed>  Matching scoped values keyed by template variable name.
 	 */
 	private function buildScopedVarsForPath(string $relPath): array {
-		if ($this->compiledVars === []) {
-			return [];
-		}
-
 		$out = [];
-
-		foreach ($this->compiledVars as $varName => $v) {
-			// Does this var apply on this path?
-			if (!$this->pathMatches($relPath, $v['ire'], $v['ere'])) {
+		foreach ($this->compiledVars as $name => $definition) {
+			if (!$this->pathMatches($relPath, $definition['ire'], $definition['ere'])) {
 				continue;
 			}
-
-			if ($v['type'] === 'static') {
-				// Just copy the data directly
-				$out[$varName] = $v['data'];
-				continue;
-			}
-
-			// dynamic
-			$out[$varName] = $this->invokeProvider($v['call'] ?? null, $varName);
+			$out[$name] = $definition['type'] === 'static'
+				? $definition['data']
+				: $this->invokeProvider($definition['call'], $name);
 		}
-
 		return $out;
 	}
 
 
 	/**
-	 * Invoke a configured provider call deterministically.
-	 *
-	 * This is how we resolve "dynamic" vars from cfg->view->vars.
-	 * In cfg->view->vars each row can declare:
-	 *
-	 *   [
-	 *     'var'    => 'header',        // becomes $header in template scope
-	 *     'type'   => 'dynamic',       // <- this path goes through invokeProvider()
-	 *     'source' => ['service' => 'sitewide', 'method' => 'header'],
-	 *     ... include/exclude ...
-	 *   ]
-	 *
-	 * During init(), we normalize that row into $this->compiledVars[]:
-	 *
-	 *   [
-	 *     'var'  => 'header',
-	 *     'type' => 'dynamic',
-	 *     'call' => ['service' => 'sitewide', 'method' => 'header'],
-	 *     'ire'  => [...compiled include regexes...],
-	 *     'ere'  => [...compiled exclude regexes...],
-	 *   ]
-	 *
-	 * Then at request time, buildScopedVarsForPath() says:
-	 *   $out['header'] = $this->invokeProvider($v['call'], 'header');
-	 *
-	 * Supported forms for $call:
-	 *
-	 * - "FQCN::method"
-	 *     Static call.
-	 *     We call ClassName::method($app).
-	 *     The method must exist and is expected to accept the App as its only parameter
-	 *     (or at least be callable with it).
-	 *
-	 * - ['class' => FQCN, 'method' => 'm']
-	 *     Instance call.
-	 *     We instantiate new FQCN($this->app) and then call ->m() on that instance.
-	 *     The method must exist on that class.
-	 *
-	 * - ['service' => 'id', 'method' => 'm']
-	 *     Service call.
-	 *     We grab $this->app->{id} (must be a registered Service on the App),
-	 *     then call ->m() on that object.
-	 *     The method must exist on that service.
+	 * Invoke a configured dynamic scoped-variable provider deterministically.
 	 *
 	 * Behavior:
-	 * - Validates that the referenced class/service and method actually exist.
-	 * - Calls the method and returns its result (usually array/scalar data for templates).
-	 * - Throws \RuntimeException if the definition is malformed, the class/service
-	 *   doesn't exist, or the method is missing.
-	 * - The provider is assumed to be read-only / side effect free. It is only called
-	 *   if cfg->view->vars says it should run for the current request path
-	 *   (include/exclude patterns already matched before we get here).
+	 * - Supports three existing provider forms:
+	 *   1) `FQCN::method` invokes the static method with the current App.
+	 *   2) `['class' => FQCN, 'method' => 'm']` creates `new FQCN($app)` and calls `m()`.
+	 *   3) `['service' => 'id', 'method' => 'm']` resolves the registered service and calls `m()`.
+	 * - Validates referenced methods/services before invocation and fails fast on malformed shapes.
+	 * - Returns the provider result unchanged for insertion into template scope.
 	 *
 	 * Notes:
-	 * - This is called once per applicable dynamic var per request (not once per render()),
-	 *   so provider work should still be reasonably cheap.
-	 * - We deliberately do not guess or "best effort" unknown shapes; unsupported
-	 *   definitions fail fast so the developer sees the misconfiguration.
+	 * - Provider work happens only after path include/exclude rules have matched.
+	 * - Instance providers are created per invocation; registered service providers reuse the App's
+	 *   memoized service instance.
+	 * - This method does not catch provider exceptions; failures bubble to the global error handler.
 	 *
-	 * @param mixed  $call    Callable definition for a dynamic var.
-	 *                        Originally comes from cfg->view->vars[*]['source']
-	 *                        for entries where type === 'dynamic', and was copied
-	 *                        to 'call' in $this->compiledVars during init().
+	 * Typical usage:
+	 *   $value = $this->invokeProvider(
+	 *   	['service' => 'sitewide', 'method' => 'header'],
+	 *   	'header'
+	 *   );
 	 *
-	 * @param string $varName Name of the dynamic variable we are trying to populate
-	 *                        (used only for clearer error messages).
-	 *
-	 * @return mixed          Whatever the provider method returns.
-	 *
-	 * @throws \RuntimeException On unknown call shape or missing class/method/service.
+	 * @param  mixed  $call  Provider definition from `cfg->view->vars[*]['source']`.
+	 * @param  string  $varName  Variable name used in diagnostics.
+	 * @return mixed  Provider result.
+	 * @throws \RuntimeException  On an unsupported definition or missing class/method/service.
 	 */
 	private function invokeProvider(mixed $call, string $varName): mixed {
+
 		// Case 1: "FQCN::method" => call static method directly
 		if (\is_string($call) && \strpos($call, '::') !== false) {
 			[$cls, $m] = \explode('::', $call, 2);
@@ -1132,6 +1116,7 @@ final class TemplateEngine extends BaseService {
 			// Contract: static method must accept App $app (we pass $this->app)
 			return $cls::$m($this->app);
 		}
+
 
 		// Case 2: ['class' => FQCN, 'method' => 'm']
 		// Instantiate a fresh object of that FQCN with $app, then call ->m()
@@ -1150,6 +1135,7 @@ final class TemplateEngine extends BaseService {
 			// Call the instance method and bubble return value out
 			return $inst->{$m}();
 		}
+
 
 		// Case 3: ['service' => 'id', 'method' => 'm']
 		// Reuse an already-constructed Service from $this->app and call ->m()
@@ -1173,48 +1159,40 @@ final class TemplateEngine extends BaseService {
 			return $svc->{$m}();
 		}
 
+
 		// Anything else is unsupported (we don't guess)
 		throw new \RuntimeException("Unsupported provider call definition for var '{$varName}'.");
+
 	}
 
 
 	/**
-	 * Turn a human-friendly path matcher into an anchored PCRE.
-	 *
-	 * Input forms:
-	 * - "~...~"
-	 *     Treat as a raw regex. We trust it and return it unchanged.
-	 *
-	 * - "*"
-	 *     Match everything (equivalent to a prefix ".*").
-	 *
-	 * - "/"
-	 *     Match only the frontpage "/".
-	 *
-	 * - "/foo" or "/foo/*"
-	 *     Match that path prefix. "*" is treated as a wildcard suffix.
-	 *     We escape everything else so that user input can't break the regex.
+	 * Compile a configured path matcher into an anchored PCRE expression.
 	 *
 	 * Behavior:
-	 * - Returns a valid regex string that is anchored to the start of the path (`/^.../`),
-	 *   except the special "/" case which becomes `/^\/$/`.
-	 * - Normalizes non-slash patterns so "news" becomes "/news" before building the regex.
-	 * - If the pattern is the empty string, we return a "match nothing" regex (`/^\b\B$/`).
-	 * - If the pattern looks like "~...~" (starts with "~" and ends with "~"), we assume
-	 *   the caller provided a full regex and just return it.
+	 * - Supports these configured input forms:
+	 *   1) `''` returns an impossible matcher.
+	 *   2) `~...~` is treated as an explicit developer-supplied regular expression and returned unchanged.
+	 *   3) `*` matches every app-root-relative path.
+	 *   4) `/` matches only the front page `/`.
+	 *   5) `/foo` matches that path prefix.
+	 *   6) `/foo/*` matches the `/foo/` prefix and descendants.
+	 *   7) `news` is normalized to `/news` before compilation.
+	 * - Escapes ordinary path characters and expands only `*` as a wildcard before anchoring the
+	 *   generated glob expression at the start of the app-relative path.
 	 *
 	 * Notes:
-	 * - The result is meant to be passed directly to preg_match() against an
-	 *   app-relative path like "/member/profile".
-	 * - We intentionally escape all literal chars and only treat "*" as a glob.
-	 *   This prevents accidental regex injection from config, unless the dev
-	 *   explicitly opts in with "~...~".
+	 * - Regex semantics are available only through the explicit `~...~` form; glob-style config is
+	 *   escaped to avoid accidental regex interpretation.
+	 * - The result is passed directly to preg_match() against paths such as `/member/profile`.
 	 *
-	 * @param string $pat Human-friendly matcher from cfg->view->vars[*].include/exclude.
-	 *
-	 * @return string Anchored PCRE pattern.
+	 * @param  string  $pat  Configured include/exclude matcher.
+	 * @return string  PCRE pattern suitable for preg_match().
 	 */
 	private function compilePathMatcher(string $pat): string {
+
+		// -- 1. Handle empty and explicit-regex forms ---------------------
+
 		$pat = (string)$pat;
 
 		if ($pat === '') {
@@ -1226,6 +1204,8 @@ final class TemplateEngine extends BaseService {
 			return $pat;
 		}
 
+
+		// -- 2. Normalize path/glob forms ----------------------------------
 		// If pattern doesn't start with "/", treat it like a path fragment.
 		// We'll normalize so "news" becomes "/news"
 		if ($pat !== '*' && $pat[0] !== '/') {
@@ -1237,6 +1217,8 @@ final class TemplateEngine extends BaseService {
 			return '/^\/$/';
 		}
 
+
+		// -- 3. Compile the anchored glob expression -----------------------
 		// Escape literal chars for regex, but keep "*" as wildcard.
 		// Example: "/news/*" -> '/^\/news\/.*/'
 		$quoted = \preg_quote($pat, '/');				// turn "/" etc. into "\/", "*" into "\*"
@@ -1247,33 +1229,27 @@ final class TemplateEngine extends BaseService {
 
 
 	/**
-	 * Check if a request path should activate a given vars_provider.
+	 * Decide whether a scoped-variable definition applies to a request path.
 	 *
 	 * Behavior:
-	 * - "Include" rules:
-	 *   * If there are no include regexes, we treat that as "include everything".
-	 *   * Otherwise, the path must match at least one of the include regexes.
-	 *
-	 * - "Exclude" rules:
-	 *   * If any exclude regex matches the path, the provider is disqualified.
-	 *
-	 * - Returns true only if:
-	 *   (included by the include rules) AND (not matched by any exclude rules).
+	 * - An empty include list means include everything.
+	 * - A non-empty include list requires at least one matching include expression.
+	 * - Any matching exclude expression rejects the path, even after an include match.
+	 * - Returns true only when the path is included and not excluded.
 	 *
 	 * Notes:
-	 * - This is evaluated against the normalized app-relative path, e.g. "/member/profile".
-	 * - include/exclude arrays are produced ahead of time by compilePathMatcher(),
-	 *   so at runtime we only run preg_match() on already-anchored, safe regexes.
-	 * - This check decides whether we invoke that provider for this request and
-	 *   inject its return value into the template scope.
+	 * - Matchers are precompiled by compilePathMatcher(), keeping this request-time path lean.
+	 * - The path is expected to start with `/` and be app-root-relative.
 	 *
-	 * @param string   $path   App-relative request path (always starts with "/").
-	 * @param string[] $incRes Array of compiled "include" regex patterns.
-	 * @param string[] $excRes Array of compiled "exclude" regex patterns.
-	 *
-	 * @return bool True if provider should run for $path.
+	 * @param  string  $path  App-root-relative request path.
+	 * @param  string[]  $incRes  Compiled include expressions.
+	 * @param  string[]  $excRes  Compiled exclude expressions.
+	 * @return bool  Whether the scoped variable applies.
 	 */
 	private function pathMatches(string $path, array $incRes, array $excRes): bool {
+
+		// -- 1. Evaluate include rules ------------------------------------
+
 		// Start pessimistic: if we *have* include rules, you are NOT included
 		// until you match one. If include list is empty, you ARE included by default.
 		$included = ($incRes === []);
@@ -1293,13 +1269,17 @@ final class TemplateEngine extends BaseService {
 			return false;
 		}
 
-		// Now enforce excludes: if ANY exclude regex matches, reject.
+
+		// -- 2. Enforce exclude rules --------------------------------------
+		// If ANY exclude regex matches, reject.
 		foreach ($excRes as $re) {
 			if (\preg_match($re, $path) === 1) {
 				return false;
 			}
 		}
 
+
+		// -- 3. Accept the included path -----------------------------------
 		// Included and not excluded => ok
 		return true;
 	}
@@ -1310,289 +1290,612 @@ final class TemplateEngine extends BaseService {
 
 
 
-
-
 	// ----------------------------------------------------------------
-	// Compilation pipeline
+	// Compilation and persistent cache
 	// ----------------------------------------------------------------
 
 	/**
-	 * Compile "file@layer" to a cached PHP file and return its absolute path.
+	 * Resolve a template reference to an immutable compiled PHP generation.
 	 *
 	 * Behavior:
-	 * - splitRef(): Validate and separate "relative/path.html" and "layer".
-	 * - loadSource(): Read the raw template source from the correct layer.
-	 * - processExtendsAndBlocks(): Resolve `{% extends "x@y" %}` and merge child `{% block %}` into parent `{% yield %}`.
-	 * - processIncludes(): Inline `{% include "x@y" %}` recursively (depth-limited).
-	 * - removeTemplateComments(): Strip `{# ... #}` comments (supports nesting).
-	 * - compileSyntax(): Turn `{{ }}`, `{{{ }}}`, `{% if %}`, `{% foreach %}`, and `{? ... ?}` into executable PHP.
-	 * - Optionally removeHtmlCommentsSafe() and safeTrimWhitespace() based on config.
-	 * - Write atomically into `var/cache` under a deterministic filename that includes both path and layer.
-	 * - If `cache_enabled` is true, reuse the compiled file if all sources/deps are older than the cached PHP.
+	 * - Splits and validates the explicit template reference, then derives its versioned cache prefix.
+	 * - On a warm cache hit, loads the JSON manifest and validates the compiled generation plus all
+	 *   recorded dependencies by canonical path and metadata without reading template source bytes.
+	 * - Cache readers do not lock. A cache miss acquires the stable per-template writer lock and
+	 *   performs a second cache check to avoid duplicate concurrent compilation.
+	 * - Compiles a stable source snapshot in this order:
+	 *   1) Load the root source and record its dependency snapshot.
+	 *   2) Resolve inheritance and block/yield merging.
+	 *   3) Expand includes recursively.
+	 *   4) Compile CitOmni template syntax to PHP.
+	 *   5) Apply optional safe markup optimization.
+	 * - Revalidates every observed dependency before publication. If files changed during the pass,
+	 *   compilation is retried up to three times rather than publishing a mixed deployment snapshot.
+	 * - Hashes the complete compiled PHP to produce an immutable generation filename.
+	 * - Publishes the compiled generation before atomically replacing the JSON manifest pointer.
 	 *
-	 * @param string $ref Template reference like "public/login.html@citomni/authenticate".
-	 * @return string Absolute path to a compiled PHP file ready for `require`.
+	 * Notes:
+	 * - With `cache_enabled=false`, source is always recompiled, but generation publication still uses
+	 *   the same writer lock and atomic cache-file mechanics.
+	 * - The JSON manifest deliberately remains non-executable and outside OPcache; compiled PHP
+	 *   generations are immutable and therefore safe for aggressive OPcache reuse.
+	 * - Content-addressed generations are reused when newly compiled bytes are unchanged.
+	 * - Old generations are not removed from the request path.
+	 *
+	 * @param  string  $ref  Explicit `relative/path.html@layer` template reference.
+	 * @return string  Absolute path to the compiled PHP generation.
+	 * @throws \InvalidArgumentException  On an invalid template reference.
+	 * @throws \RuntimeException  On source, template structure, locking or cache I/O failure.
+	 * @throws \JsonException  If the manifest cannot be encoded.
 	 */
 	private function compile(string $ref): string {
-		[$relPath, $layer] = $this->splitRef($ref);
 
-		$cacheFile = $this->cacheFileName($relPath, $layer);
+		// -- 1. Resolve logical reference and cache identity --------------
+		// splitRef() validates the explicit path@layer contract. The resulting base
+		// prefix is stable for this compiler/runtime configuration and is memoized
+		// because renderToString() and render() may resolve the same template more
+		// than once within one App/request context.
 
-		if ($this->cacheEnabled && \is_file($cacheFile)) {
-			// Load source for freshness scan
-			[$srcCode, $srcPath] = $this->loadSource($relPath, $layer);
+		[$rel, $layer] = $this->splitRef($ref);
+		$base = $this->cachePrefixes[$rel . '@' . $layer] ??= $this->cacheFileName($rel, $layer);
 
-			// Match LiteView semantics:
-			// Strip template comments BEFORE scanning for extends/includes,
-			// because commented-out includes should NOT keep the cache hot.
-			$scanCode = $this->removeTemplateComments($srcCode);
 
-			$visited = [];
-			$deps = $this->collectDependencies($scanCode, $layer, $visited);
+		// -- 2. Fast-path a valid warm cache generation -------------------
+		// A warm hit must stay cheap: read/validate the manifest and stat the recorded
+		// dependencies, but do NOT read or parse template source again. The manifest may
+		// be memoized in this service instance, but dependency metadata is revalidated
+		// on every render before the compiled generation is reused.
 
-			$maxMtime = \filemtime($srcPath);
+		if ($this->cacheEnabled) {
+			$manifest = $this->manifests[$base] ?? $this->readManifest($base);
+			if ($manifest !== null && $this->manifestIsFresh($base, $manifest)) {
+				$this->manifests[$base] = $manifest;
+				return $base . '_' . $manifest['generation'] . '.php';
+			}
+			unset($this->manifests[$base]);
+		}
 
-			foreach ($deps as [$depRel, $depLayer]) {
-				[, $depAbs] = $this->loadSource($depRel, $depLayer);
-				$mt = \filemtime($depAbs);
-				if ($mt > $maxMtime) {
-					$maxMtime = $mt;
+
+		// -- 3. Serialize cache misses for this template identity ---------
+		// Readers never lock. Only a miss takes this stable per-template writer lock,
+		// preventing concurrent requests from compiling/publishing the same identity
+		// simultaneously. The lock filename is stable even though compiled generations
+		// are content-addressed and immutable.
+
+		$this->ensureCacheDirectory();
+		$lock = \fopen($base . '.lock', 'c+b');
+		if ($lock === false) {
+			throw new \RuntimeException('TemplateEngine: Unable to open template cache lock.');
+		}
+		try {
+			if (!\flock($lock, \LOCK_EX)) {
+				throw new \RuntimeException('TemplateEngine: Unable to acquire template cache lock.');
+			}
+
+			// -- 4. Recheck after acquiring the writer lock ------------------
+			// Another request may have completed compilation while this request waited for
+			// LOCK_EX. Rechecking here avoids duplicate work and immediately reuses the
+			// generation that the previous writer just published.
+
+			if ($this->cacheEnabled) {
+				$manifest = $this->readManifest($base);
+				if ($manifest !== null && $this->manifestIsFresh($base, $manifest)) {
+					$this->manifests[$base] = $manifest;
+					return $base . '_' . $manifest['generation'] . '.php';
 				}
 			}
 
-			if ($maxMtime <= \filemtime($cacheFile)) {
-				return $cacheFile;
+
+			// -- 5. Compile and verify one stable dependency snapshot --------
+			// One context tracks every logical source actually used by this compilation:
+			// - sources prevents rereading the same logical dependency within the attempt.
+			// - dependencies becomes the manifest freshness snapshot.
+			// - includeStack detects active include cycles.
+			// - roots memoizes canonical layer roots for containment checks.
+			//
+			// After compilation, re-stat all dependencies before publication. If a deploy
+			// changed files during the pass, discard that mixed snapshot and retry instead
+			// of publishing output assembled from two different source states.
+			for ($attempt = 0; $attempt < 3; $attempt++) {
+				$context = ['sources' => [], 'dependencies' => [], 'includeStack' => [], 'roots' => []];
+				[$code, $sourcePath] = $this->loadSource($rel, $layer, $context);
+				$code = $this->processExtendsAndBlocks($code, $layer, $context, [$sourcePath => true]);
+				$code = $this->processIncludes($code, 0, $context);
+				$code = $this->compileSyntax($code);
+				if ($this->removeHtmlComments || $this->trimWhitespace) {
+					$code = $this->optimizeMarkup($code);
+				}
+				$compiled = "<?php class_exists('" . __CLASS__ . "', false) or exit; ?>\n" . \rtrim($code);
+				$dependencies = \array_values($context['dependencies']);
+				if (!$this->dependenciesAreFresh($dependencies)) {
+					continue;
+				}
+
+
+				// -- 6. Publish immutable generation, then mutable manifest ------
+				// Hash the final PHP bytes, not the source reference. Identical compiled output
+				// therefore reuses the same immutable generation file. The JSON manifest is
+				// the mutable pointer and is deliberately written LAST, so readers can never
+				// observe a manifest that points at a generation which has not been published.
+
+				$generation = \hash('sha256', $compiled);
+				$file = $base . '_' . $generation . '.php';
+				\clearstatcache(false, $file);
+				if (!\is_file($file)) {
+					$this->writeCacheFile($file, $compiled);
+				}
+				$manifest = [
+					'format' => self::COMPILER_VERSION,
+					'generation' => $generation,
+					'dependencies' => $dependencies,
+				];
+				$json = \json_encode($manifest, \JSON_UNESCAPED_SLASHES | \JSON_THROW_ON_ERROR);
+				$this->writeCacheFile($base . '.meta.json', $json);
+				if ($this->cacheEnabled) {
+					$this->manifests[$base] = $manifest;
+				}
+				return $file;
 			}
+			throw new \RuntimeException('TemplateEngine: Template sources changed repeatedly during compilation. Retry after deployment has completed.');
+		} finally {
+			// Closing releases the lock, including when compilation or rendering preparation fails.
+			\fclose($lock);
 		}
-
-		// We need to (re)compile:
-		[$code, $absPath] = $this->loadSource($relPath, $layer);
-
-		// Strip template comments {# ... #} early:
-		$code = $this->removeTemplateComments($code);
-
-		// Resolve extends+blocks across layers:
-		$code = $this->processExtendsAndBlocks($code, $layer);
-
-		// Resolve {% include "file@layer" %} recursively (depth-limited):
-		$code = $this->processIncludes($code, 0);
-
-		// Rewrite template syntax -> PHP:
-		$code = $this->compileSyntax($code);
-
-		// Optionally post-process:
-		if ($this->removeHtmlComments) {
-			$code = $this->removeHtmlCommentsSafe($code);
-		}
-		if ($this->trimWhitespace) {
-			$code = $this->safeTrimWhitespace($code);
-		}
-
-		// Wrap final compiled code into a minimal guard:
-		$compiledPhp = "<?php class_exists('" . __CLASS__ . "') or exit; ?>\n"
-			. \rtrim($code);
-
-		// Atomic write
-		$tmp = $this->cacheDir . '/' . \uniqid('tpl_', true) . '.tmp';
-		if (\file_put_contents($tmp, $compiledPhp, \LOCK_EX) === false) {
-			throw new \RuntimeException('TemplateEngine: Cache directory not writable: ' . $this->cacheDir);
-		}
-		@\chmod($tmp, 0644);
-
-		// Replace/move into place
-		if (!@\rename($tmp, $cacheFile)) {
-			@\unlink($cacheFile);
-			if (!@\rename($tmp, $cacheFile)) {
-				@\unlink($tmp);
-				throw new \RuntimeException('TemplateEngine: Failed to move compiled cache file.');
-			}
-		}
-
-		if (\function_exists('opcache_invalidate')) {
-			@\opcache_invalidate($cacheFile, true);
-		}
-		\clearstatcache(true, $cacheFile);
-
-		return $cacheFile;
 	}
 
 
 	/**
-	 * splitRef: Parse a template reference of the form "file@layer".
-	 *
-	 * A template reference always names both:
-	 * - a relative template path (e.g. "admin/panel.html")
-	 * - a layer key registered in TemplateEngine::init() (e.g. "citomni/admin")
-	 *
-	 * Example valid refs:
-	 *   "public/home.html@app"
-	 *   "admin/admin_layout.html@citomni/admin"
+	 * Load and validate a non-executable JSON cache manifest.
 	 *
 	 * Behavior:
-	 * - Splits on the LAST '@' to allow filenames that might contain '@'
-	 *   earlier (edge case, but deterministic).
-	 * - Ensures both the relative path and layer are non-empty.
-	 * - Ensures the layer exists in $this->layersMap. If the layer is not
-	 *   registered, we fail fast.
-	 * - Normalizes leading slashes away from the relative path so lookups
-	 *   are consistent on disk.
+	 * - Treats a missing, concurrently removed, unreadable or malformed manifest as a recoverable
+	 *   cache miss so compile() can rebuild it under the writer lock.
+	 * - Requires the current compiler format, a 64-character lowercase SHA-256 generation id and a
+	 *   non-empty dependency list with the expected tuple/stat shape.
+	 * - Never evaluates manifest content as PHP.
 	 *
 	 * Notes:
-	 * - This method does not check that the template file exists; use loadSource()
-	 *   for that.
+	 * - Structural validation intentionally happens before any generation path is constructed.
+	 * - Dependency freshness is validated separately by manifestIsFresh().
 	 *
-	 * @param string $ref Full template reference "path@layer".
+	 * @param  string  $base  Absolute cache identity prefix.
+	 * @return array|null  Validated manifest, or null when rebuilding is required.
+	 */
+	private function readManifest(string $base): ?array {
+
+		// -- 1. Load manifest bytes ---------------------------------------
+
+		$path = $base . '.meta.json';
+		\clearstatcache(false, $path);
+		if (!\is_file($path)) {
+			return null;
+		}
+		// Concurrent cache maintenance may remove the file after is_file(). Rebuilding is recoverable.
+		$json = @\file_get_contents($path);
+		if ($json === false) {
+			return null;
+		}
+
+
+		// -- 2. Validate the complete manifest shape ----------------------
+
+		$data = \json_decode($json, true);
+		if (!\is_array($data)
+			|| ($data['format'] ?? null) !== self::COMPILER_VERSION
+			|| !\is_string($data['generation'] ?? null)
+			|| !\preg_match('/\A[a-f0-9]{64}\z/', $data['generation'])
+			|| !\is_array($data['dependencies'] ?? null)
+			|| $data['dependencies'] === []) {
+			return null;
+		}
+		foreach ($data['dependencies'] as $dependency) {
+			if (!\is_array($dependency) || \count($dependency) !== 4
+				|| !isset($dependency[0], $dependency[1], $dependency[2], $dependency[3])
+				|| !\is_string($dependency[0]) || !\is_string($dependency[1]) || !\is_string($dependency[2])
+				|| !\is_array($dependency[3]) || !\array_is_list($dependency[3]) || \count($dependency[3]) !== 5) {
+				return null;
+			}
+			foreach ($dependency[3] as $value) {
+				if (!\is_int($value)) {
+					return null;
+				}
+			}
+		}
+		return $data;
+	}
+
+
+	/**
+	 * Check whether a validated manifest still points to a usable compiled generation.
 	 *
-	 * @return array{0:string,1:string} Tuple {relativePath, layer} where:
-	 *   - relativePath is a path under that layer's template root
-	 *     (no leading slash),
-	 *   - layer is the layer identifier as registered in init().
+	 * Behavior:
+	 * - Requires the referenced immutable compiled PHP generation to exist.
+	 * - Revalidates every recorded source dependency through dependenciesAreFresh().
 	 *
-	 * @throws \InvalidArgumentException If $ref is missing "@", or if either side
-	 *                                   of the split is empty.
-	 * @throws \RuntimeException         If the referenced layer is unknown.
+	 * @param  string  $base  Absolute cache identity prefix.
+	 * @param  array  $manifest  Structurally validated manifest.
+	 * @return bool  Whether the cached generation can be reused without compilation.
+	 */
+	private function manifestIsFresh(string $base, array $manifest): bool {
+		$file = $base . '_' . $manifest['generation'] . '.php';
+		\clearstatcache(false, $file);
+		return \is_file($file) && $this->dependenciesAreFresh($manifest['dependencies']);
+	}
+
+
+	/**
+	 * Validate canonical identity and metadata for every recorded source dependency.
+	 *
+	 * Behavior:
+	 * - Resolves each logical `relative-path@layer` reference again without reading source bytes.
+	 * - Rejects missing files, changed canonical paths, non-regular files or changed stat signatures.
+	 * - Detects ordinary edits even when mtime moves backwards because equality is checked against the
+	 *   full stored metadata signature rather than using a newer-than comparison.
+	 *
+	 * Notes:
+	 * - Path containment is rechecked on warm cache hits, not only during compilation.
+	 * - Metadata equality is intentionally not treated as cryptographic proof of byte equality.
+	 * - `$roots` memoizes canonical layer roots only for this validation pass.
+	 *
+	 * @param  array<int,array{string,string,string,array<int,int>}>  $dependencies  Recorded snapshots.
+	 * @return bool  Whether every dependency still matches its recorded identity and metadata.
+	 */
+	private function dependenciesAreFresh(array $dependencies): bool {
+		$roots = [];
+		foreach ($dependencies as [$rel, $layer, $expectedPath, $expectedStat]) {
+			$path = $this->resolveSourcePath($rel, $layer, false, $roots);
+			if ($path === null || $path !== $expectedPath) {
+				return false;
+			}
+			\clearstatcache(false, $path);
+			$stat = @\stat($path);
+			if ($stat === false || ($stat['mode'] & 0170000) !== 0100000
+				|| $this->statSignature($stat) !== $expectedStat) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+
+	/**
+	 * Reduce a native stat result to the metadata used for dependency freshness checks.
+	 *
+	 * Behavior:
+	 * - Captures modification time, change time, size, inode and device in a stable positional tuple.
+	 *
+	 * Notes:
+	 * - This signature is deliberately metadata-only so warm cache hits avoid reading template bytes.
+	 *
+	 * @param  array  $stat  Native stat()/fstat() result.
+	 * @return array{int,int,int,int,int}  mtime, ctime, size, inode and device.
+	 */
+	private function statSignature(array $stat): array {
+		return [$stat['mtime'], $stat['ctime'], $stat['size'], $stat['ino'], $stat['dev']];
+	}
+
+
+	/**
+	 * Ensure the established template cache directory exists.
+	 *
+	 * Behavior:
+	 * - Creates `CITOMNI_APP_PATH . '/var/cache'` lazily when compilation first needs persistent files.
+	 * - Treats a concurrently created directory as success.
+	 *
+	 * Notes:
+	 * - The directory location is intentionally fixed rather than configurable.
+	 *
+	 * @return void
+	 * @throws \RuntimeException  When the cache directory cannot be created.
+	 */
+	private function ensureCacheDirectory(): void {
+		if (!\is_dir($this->cacheDir) && !@\mkdir($this->cacheDir, 0775, true) && !\is_dir($this->cacheDir)) {
+			throw new \RuntimeException('TemplateEngine: Cannot create cache directory: ' . $this->cacheDir);
+		}
+	}
+
+
+	/**
+	 * Atomically publish a complete cache artifact through a same-directory temporary file.
+	 *
+	 * Behavior:
+	 * - Creates a unique temporary file with exclusive creation.
+	 * - Writes until the full byte length has been persisted and requires fflush() success.
+	 * - Closes the stream, applies the established 0644 mode best-effort and publishes with rename().
+	 * - Never unlinks an existing destination as a fallback when publication fails.
+	 * - Removes any leftover temporary file in `finally`.
+	 *
+	 * Notes:
+	 * - Writer locking is owned by compile(); this helper assumes publication for a template identity
+	 *   is already serialized when replacement could occur.
+	 * - Generation files are content-addressed and normally new paths; the manifest is the mutable
+	 *   pointer published after its target generation exists.
+	 * - Same-directory rename is relied upon for atomic replacement semantics on the deployment filesystem.
+	 *
+	 * @param  string  $path  Absolute destination path.
+	 * @param  string  $contents  Complete file contents.
+	 * @return void
+	 * @throws \RuntimeException  On temporary-file creation, short write, flush or rename failure.
+	 */
+	private function writeCacheFile(string $path, string $contents): void {
+
+		// -- 1. Create an exclusive same-directory temporary file ---------
+
+		$tmp = $path . '.' . \bin2hex(\random_bytes(8)) . '.tmp';
+		$stream = \fopen($tmp, 'xb');
+		if ($stream === false) {
+			throw new \RuntimeException('TemplateEngine: Cannot create temporary cache file: ' . $tmp);
+		}
+		try {
+
+			// -- 2. Write and flush the complete artifact --------------------
+
+			try {
+				$length = \strlen($contents);
+				$offset = 0;
+				while ($offset < $length) {
+					$written = \fwrite($stream, $offset === 0 ? $contents : \substr($contents, $offset));
+					if ($written === false || $written === 0) {
+						throw new \RuntimeException('TemplateEngine: Incomplete cache write: ' . $tmp);
+					}
+					$offset += $written;
+				}
+				if (!\fflush($stream)) {
+					throw new \RuntimeException('TemplateEngine: Cannot flush cache file: ' . $tmp);
+				}
+			} finally {
+				\fclose($stream);
+			}
+
+
+			// -- 3. Publish without deleting an existing destination ----------
+
+			@\chmod($tmp, 0644);
+			if (!@\rename($tmp, $path)) {
+				throw new \RuntimeException('TemplateEngine: Cannot publish cache file without removing the existing generation: ' . $path);
+			}
+			\clearstatcache(true, $path);
+		} finally {
+			if (\is_file($tmp)) {
+				@\unlink($tmp);
+			}
+		}
+	}
+
+
+	/**
+	 * Build the bounded, versioned cache identity prefix for a logical template reference.
+	 *
+	 * Behavior:
+	 * - Combines layer and relative path into a readable sanitized slug, truncated to 32 characters.
+	 * - Appends a 32-character prefix of a SHA-256 hash over cache signature plus logical reference.
+	 * - Prefixes the artifact with the explicit compiler version.
+	 *
+	 * Notes:
+	 * - The returned value is only a prefix; compiled generations append their content hash and `.php`,
+	 *   while the mutable manifest appends `.meta.json`.
+	 * - No filesystem access is performed here.
+	 *
+	 * @param  string  $rel  Relative source path.
+	 * @param  string  $layer  Registered layer slug.
+	 * @return string  Absolute cache prefix without generation or extension.
+	 */
+	private function cacheFileName(string $rel, string $layer): string {
+		// Normalize the readable part of the logical reference into filesystem-safe text.
+		// Example: "citomni/admin__foo/bar.html" -> "citomni_admin__foo_bar_html".
+		// Only the first 32 characters are kept; uniqueness does not depend on this slug.
+		$slug = \preg_replace('/[^A-Za-z0-9_]+/', '_', $layer . '__' . $rel);
+
+		// The identity hash separates templates that sanitize to the same slug and also
+		// incorporates compiler/runtime/layer settings through cacheSignature. This is
+		// NOT the compiled-content hash; compile() appends that generation hash later.
+		$hash = \substr(\hash('sha256', $this->cacheSignature . "\0" . $rel . '@' . $layer), 0, 32);
+
+		// Example cache identity prefix:
+		//   /var/cache/tpl_v2_citomni_admin__foo_bar_html_<identity-hash>
+		// compile() then publishes:
+		//   <prefix>_<generation-sha256>.php
+		//   <prefix>.meta.json
+		//   <prefix>.lock
+		return $this->cacheDir . '/tpl_v' . self::COMPILER_VERSION . '_' . \substr($slug, 0, 32) . '_' . $hash;
+	}
+
+
+
+
+
+
+
+	// ----------------------------------------------------------------
+	// Template references and source snapshots
+	// ----------------------------------------------------------------
+
+	/**
+	 * Parse and validate an explicit `relative/path.html@layer` template reference.
+	 *
+	 * Behavior:
+	 * - Splits on the last `@`, preserving deterministic behavior if an earlier `@` occurs in a path.
+	 * - Removes accidental leading `/` or `\\` characters from the relative path.
+	 * - Rejects empty components and NUL bytes.
+	 * - Requires the referenced layer to have been registered during initialization.
+	 *
+	 * Notes:
+	 * - This method validates reference structure only; source existence and containment are handled by
+	 *   resolveSourcePath().
+	 *
+	 * @param  string  $ref  Explicit template reference.
+	 * @return array{string,string}  Relative path and registered layer.
+	 * @throws \InvalidArgumentException  On a missing/empty component or NUL-containing path.
+	 * @throws \RuntimeException  On an unknown layer.
 	 */
 	private function splitRef(string $ref): array {
-		// Find the *last* "@", to be deterministic even if someone ever does "foo@bar@layer".
 		$pos = \strrpos($ref, '@');
 		if ($pos === false) {
 			throw new \InvalidArgumentException("TemplateEngine: Template ref '{$ref}' must contain '@layer'.");
 		}
-
-		// Left side is the template path, right side is the layer key.
-		$rel	= \substr($ref, 0, $pos);
-		$layer	= \substr($ref, $pos + 1);
-
-		// Normalize path: strip any accidental leading "/" or "\".
-		$rel = \ltrim($rel, '/\\');
-
-		// Basic validation: no empty parts.
-		if ($rel === '' || $layer === '') {
+		$rel = \ltrim(\substr($ref, 0, $pos), '/\\');
+		$layer = \substr($ref, $pos + 1);
+		if ($rel === '' || $layer === '' || \str_contains($rel, "\0")) {
 			throw new \InvalidArgumentException("TemplateEngine: Invalid template ref '{$ref}'.");
 		}
-
-		// Ensure the layer exists in the precomputed map from init().
 		if (!isset($this->layersMap[$layer])) {
 			throw new \RuntimeException("TemplateEngine: Unknown layer '{$layer}' in '{$ref}'.");
 		}
-
 		return [$rel, $layer];
 	}
 
 
 	/**
-	 * loadSource: Resolve a template ref (path + layer) to absolute disk path and read it.
+	 * Resolve a logical template reference to a canonical path inside its registered layer root.
 	 *
-	 * This is the authoritative I/O step for loading template source code. It:
-	 * - Maps the logical layer key (e.g. "citomni/admin") to its absolute template root.
-	 * - Resolves the requested relative path under that root.
-	 * - Guards against path traversal attempts ("../", symlinks escaping root, etc.).
-	 * - Returns both the template code and the absolute on-disk path.
-	 *
-	 * Security:
-	 * - We `realpath()` both the base root and the requested file, then verify
-	 *   that the requested file still lives under the base root. If not, we throw.
+	 * Behavior:
+	 * - Builds the candidate from the configured layer root and relative path.
+	 * - Resolves the layer root once per validation/compilation pass through the supplied `$roots` map.
+	 * - Clears only relevant realpath/stat cache entries before canonical resolution.
+	 * - Returns null for a missing optional lookup or throws for a missing required source.
+	 * - Enforces canonical path containment below the resolved layer root to reject traversal and
+	 *   symlink escapes.
 	 *
 	 * Notes:
-	 * - This method does NOT cache; caching happens later in compile().
-	 * - This method throws on missing templates instead of returning null. We
-	 *   prefer fail-fast so the global error handler can report a real error.
+	 * - The source bytes are not read here.
+	 * - Canonical paths are later recorded in dependency snapshots and rechecked on warm cache hits.
 	 *
-	 * Typical usage:
-	 *   [$code, $absPath] = $this->loadSource('admin/panel.html', 'citomni/admin');
-	 *
-	 * @param string $rel   Relative template path under the layer root.
-	 * @param string $layer Layer identifier (must exist in $this->layersMap).
-	 *
-	 * @return array{0:string,1:string} {code, absPath}
-	 *                                  code    = file contents as string
-	 *                                  absPath = absolute path to template file
-	 *
-	 * @throws \RuntimeException If the layer is unknown, the file does not exist,
-	 *                           or the resolved path escapes the layer root.
+	 * @param  string  $rel  Relative template path below the layer root.
+	 * @param  string  $layer  Registered layer slug.
+	 * @param  bool  $required  Whether a missing source should throw instead of returning null.
+	 * @param  array<string,string>  $roots  Per-pass canonical layer-root memoization.
+	 * @return string|null  Canonical source path, or null for a missing optional lookup.
+	 * @throws \RuntimeException  On an unknown layer, path escape or missing required source.
 	 */
-	private function loadSource(string $rel, string $layer): array {
-		// Look up the absolute root directory for this layer.
+	private function resolveSourcePath(string $rel, string $layer, bool $required, array &$roots): ?string {
+
+		// -- 1. Resolve the configured layer root -------------------------
+		// layersMap contains the cheap logical layer -> configured root lookup created
+		// during init(). Unknown layers should normally have been rejected by splitRef(),
+		// but keep this guard because this method is the filesystem boundary.
+
 		$root = $this->layersMap[$layer] ?? null;
 		if ($root === null) {
 			throw new \RuntimeException("TemplateEngine: Layer '{$layer}' not registered.");
 		}
 
-		// Build absolute candidate path "<layerRoot>/<rel>".
-		$base	= \rtrim($root, "/\\") . '/';
-		$target	= \realpath($base . $rel);
 
-		// Bail out if file is missing or unreadable.
-		if ($target === false) {
+		// -- 2. Canonicalize root and requested source --------------------
+		// realpath() is intentionally deferred until a concrete source is needed. The
+		// canonical root is memoized only for this validation/compilation pass; the
+		// candidate is always resolved afresh so deploy-time path changes are observable.
+
+		$candidate = $root . $rel;
+		// Explicit paths are cleared, not the entire process-wide realpath cache.
+		$base = $roots[$layer] ?? null;
+		if ($base === null) {
+			\clearstatcache(true, $root);
+			$base = \realpath($root);
+			if ($base !== false) {
+				$roots[$layer] = $base;
+			}
+		}
+		\clearstatcache(true, $candidate);
+		$target = \realpath($candidate);
+		if ($base === false || $target === false) {
+			if (!$required) {
+				return null;
+			}
 			throw new \RuntimeException("TemplateEngine: Template '{$rel}@{$layer}' not found.");
 		}
 
-		// Security: Ensure that the resolved file did not escape the intended base.
-		$baseWithSep = \rtrim(\realpath($base) ?: $base, "/\\") . \DIRECTORY_SEPARATOR;
-		if (\strpos($target, $baseWithSep) !== 0) {
+
+		// -- 3. Enforce canonical containment -----------------------------
+		// Use the canonical root plus a directory separator as the prefix. The separator
+		// matters: a root such as /templates must not also accept a sibling like
+		// /templates_backup merely because the raw string prefix happens to match.
+
+		$prefix = \rtrim($base, '/\\') . \DIRECTORY_SEPARATOR;
+		if (!\str_starts_with($target, $prefix)) {
 			throw new \RuntimeException("TemplateEngine: Illegal path escape '{$rel}@{$layer}'.");
 		}
-
-		// Load file contents (we intentionally do not silence errors here).
-		$code = (string)\file_get_contents($target);
-
-		return [$code, $target];
+		return $target;
 	}
 
 
 	/**
-	 * cacheFileName: Build a deterministic cache filename for a compiled template.
-	 *
-	 * Each compiled template ("relativePath@layer") becomes a standalone cached
-	 * PHP file in the engine's cache directory. We derive a filename that:
-	 *
-	 * - Encodes both the layer and the relative path (sanitized to safe chars),
-	 *   so different layers with the same relative template path never collide.
-	 *   Example:
-	 *     "header.html@app"              -> app__header_html_xxxxxxxx.php
-	 *     "header.html@citomni/admin"    -> citomni_admin__header_html_xxxxxxxx.php
-	 *
-	 * - Appends a short hash (first 8 chars of sha1) for uniqueness and to keep
-	 *   file names stable even if two templates sanitize to the same slug.
+	 * Read and snapshot a template source once per compilation pass.
 	 *
 	 * Behavior:
-	 * - Uses "/" and "\" normalization to make path segments filesystem-safe.
-	 * - Writes into $this->cacheDir, which is resolved in init().
+	 * - Reuses an already loaded logical dependency from the compilation-local source map.
+	 * - Resolves the canonical source path and requires a regular file.
+	 * - Opens the source once, captures fstat() before and after reading and rejects incomplete or
+	 *   concurrently changing reads.
+	 * - Records the logical reference, canonical path and stat signature as an actual dependency.
+	 * - Removes nested CitOmni `{# ... #}` comments before caching the source in the compilation context.
 	 *
 	 * Notes:
-	 * - The hash is based on "<rel>@<layer>", not file contents. We don't need
-	 *   content hashing here because we already handle freshness using mtimes
-	 *   in compile().
+	 * - A logical dependency is read at most once during one stable compilation attempt.
+	 * - Comment-stripped source is shared by inheritance/include processing for that attempt.
 	 *
-	 * Typical usage:
-	 *   $cacheFile = $this->cacheFileName('admin/panel.html', 'citomni/admin');
-	 *
-	 * @param string $rel   Relative template path under that layer.
-	 * @param string $layer Layer identifier (e.g. "app", "citomni/admin").
-	 *
-	 * @return string Absolute path to the cache file on disk.
+	 * @param  string  $rel  Relative template path.
+	 * @param  string  $layer  Registered layer slug.
+	 * @param  array  $context  Compilation-local sources, dependencies, include stack and root cache.
+	 * @return array{string,string}  Comment-stripped source and canonical path.
+	 * @throws \RuntimeException  On an inaccessible, non-regular, incomplete or changing source.
 	 */
-	private function cacheFileName(string $rel, string $layer): string {
-		// Normalize/sanitize the relative path into something filesystem-safe.
-		// "foo/bar.html" -> "foo_bar_html"
-		$slugRel = \preg_replace(
-			'/[^A-Za-z0-9_]+/',
-			'_',
-			\strtr($rel, ['\\' => '/', '/' => '_'])
-		);
+	private function loadSource(string $rel, string $layer, array &$context): array {
 
-		// Normalize/sanitize the layer identifier similarly.
-		// "citomni/admin" -> "citomni_admin"
-		$slugLayer = \preg_replace('/[^A-Za-z0-9_]+/', '_', $layer);
+		// -- 1. Reuse an already loaded logical dependency ---------------
+		// A template can be reached more than once through inheritance/includes. Within
+		// one compilation attempt we deliberately use one shared byte snapshot per
+		// logical path@layer reference so the generated result is deterministic.
 
-		// Short hash to avoid collisions if two different refs sanitize to same slugs.
-		$hash = \substr(\sha1($rel . '@' . $layer), 0, 8);
+		$key = $rel . '@' . $layer;
+		if (isset($context['sources'][$key])) {
+			return $context['sources'][$key];
+		}
 
-		// Example final filename:
-		//   /var/cache/citomni_admin__foo_bar_html_1a2b3c4d.php
-		return $this->cacheDir . '/' . $slugLayer . '__' . $slugRel . '_' . $hash . '.php';
+
+		// -- 2. Resolve and open one canonical regular file ---------------
+		// resolveSourcePath() performs the layer-boundary check before we open anything,
+		// so ../ traversal and symlink escapes cannot turn an explicit template reference
+		// into an arbitrary filesystem read.
+
+		$path = $this->resolveSourcePath($rel, $layer, true, $context['roots']);
+		if (!\is_file($path)) {
+			throw new \RuntimeException("TemplateEngine: Source '{$rel}@{$layer}' is not a regular file.");
+		}
+		$stream = \fopen($path, 'rb');
+		if ($stream === false) {
+			throw new \RuntimeException("TemplateEngine: Cannot read '{$rel}@{$layer}'.");
+		}
+
+
+		// -- 3. Read one stable byte snapshot -----------------------------
+		// fstat() before and after reading the SAME open handle catches ordinary file
+		// replacement/truncation during the read. We also verify that the number of bytes
+		// read matches the final size before accepting this source snapshot.
+
+		try {
+			$before = \fstat($stream);
+			if ($before === false || ($before['mode'] & 0170000) !== 0100000) {
+				throw new \RuntimeException("TemplateEngine: Source '{$rel}@{$layer}' is not a regular file.");
+			}
+			$code = \stream_get_contents($stream);
+			$after = \fstat($stream);
+			if ($code === false || $after === false || \strlen($code) !== $after['size']
+				|| $this->statSignature($before) !== $this->statSignature($after)) {
+				throw new \RuntimeException("TemplateEngine: Source '{$rel}@{$layer}' changed or could not be read completely. Retry the render.");
+			}
+		} finally {
+			\fclose($stream);
+		}
+
+
+		// -- 4. Record dependency metadata and comment-stripped source ----
+		// Store only dependencies that were actually loaded. Comments are stripped HERE,
+		// before inheritance/include scanning, so a directive inside `{# ... #}` neither
+		// executes nor becomes a phantom cache dependency.
+
+		$context['dependencies'][$key] = [$rel, $layer, $path, $this->statSignature($after)];
+		return $context['sources'][$key] = [$this->removeTemplateComments($code), $path];
 	}
-
 
 
 
@@ -1602,252 +1905,252 @@ final class TemplateEngine extends BaseService {
 
 
 	// ----------------------------------------------------------------
-	// Layouts and includes
+	// Inheritance and includes
 	// ----------------------------------------------------------------
 
 	/**
-	 * processExtendsAndBlocks: Resolve layout inheritance (`{% extends %}`) and block overrides.
-	 *
-	 * This method applies child->parent template inheritance and returns a "flattened"
-	 * template string with all `{% block %}` / `{% yield %}` pairs resolved.
-	 * After this step, the result is a single concrete template where:
-	 *
-	 * - The parent layout's structure is preserved.
-	 * - Any `{% yield blockName %}` in the parent has been replaced by the
-	 *   corresponding `{% block blockName %}...{% endblock %}` content from
-	 *   the child.
-	 * - Remaining structural tags (`{% extends ... %}`, `{% block ... %}`,
-	 *   `{% endblock %}`, `{% yield ... %}`) are eliminated so that later
-	 *   phases (`compileSyntax()`) don't need to know about them.
+	 * Resolve layered template inheritance while preserving the established child-to-parent contract.
 	 *
 	 * Behavior:
-	 * - Looks for a single `{% extends "file@layer" %}` in the given $code.
-	 *   If not found, returns $code unchanged.
-	 *
-	 * - If found:
-	 *   1) Split the reference to get `$parentRel` and `$parentLayer`.
-	 *   2) Strip the `{% extends ... %}` line from the child.
-	 *   3) Extract all `{% block blockName %}...{% endblock %}` regions
-	 *      from the child and remember them by `blockName`.
-	 *   4) Load the parent template source via `loadSource()`, strip template
-	 *      comments from the parent, and then replace each `{% yield blockName %}`
-	 *      in the parent with the child's content for that block.
-	 *   5) If the parent has a `{% yield %}` for which the child never provided
-	 *      a matching `{% block %}`, we throw. Missing content is considered a
-	 *      template error (fail fast, not silent fallback).
-	 *
-	 * - Duplicate blocks in the child are illegal:
-	 *   `{% block header %}` defined twice in the same child template reports
-	 *   a RuntimeException instead of "last wins". We do this to keep behavior
-	 *   deterministic and obvious.
-	 *
-	 * - Recursion:
-	 *   After merging child overrides into the parent, we call
-	 *   `processExtendsAndBlocks()` again on the merged parent output.
-	 *   This supports multi-level inheritance, e.g.:
-	 *     app@foo extends citomni/admin@layout
-	 *     citomni/admin@layout extends citomni/http@base_layout
-	 *
-	 * Failure modes (fail fast):
-	 * - If a child declares a `{% block %}` that the parent never `{% yield %}`s,
-	 *   we throw (developer error in templates).
-	 * - If the parent still contains `{% yield ... %}` after merging, we throw
-	 *   because that means the child did not supply a required block.
-	 * - If a duplicate block name appears in the child, we throw.
+	 * - Follows the first valid `{% extends "path@layer" %}` directive at each inheritance level.
+	 * - Loads parent layouts through the shared compilation context so dependencies are snapshotted once.
+	 * - Detects circular inheritance by canonical source path and enforces the explicit depth limit.
+	 * - Extracts the existing non-nested `{% block name %}...{% endblock %}` grammar and rejects
+	 *   duplicate block names.
+	 * - Inserts block source literally, so backslashes and `$n` sequences are never interpreted as
+	 *   preg_replace() replacement syntax.
+	 * - Uses one yield callback pass for ordinary layouts. If block content itself contains a yield,
+	 *   the legacy ordered cascade is preserved through literal callback replacements.
+	 * - Rejects orphan child blocks and any parent yields left unresolved after the merge.
+	 * - Continues iteratively through multi-level inheritance across registered layers.
 	 *
 	 * Notes:
-	 * - `$code` passed in here is expected to already be stripped of template
-	 *   comments (`{# ... #}`) by the caller (compile() does this before calling).
-	 *   We still call `removeTemplateComments()` on the parent layout we load.
+	 * - Input source has already had template comments removed by loadSource().
+	 * - Include expansion and template-syntax compilation happen later in compile().
+	 * - The method intentionally preserves the historic block grammar rather than introducing nested
+	 *   block parsing or a new expression language.
+	 * - A child block without a matching parent yield is a template error.
+	 * - A parent yield left without a matching child block is a template error.
+	 * - Duplicate block names in the same child template are a template error.
 	 *
-	 * - This method does not perform include expansion; `{% include %}` is
-	 *   handled later by `processIncludes()`.
+	 * Typical inheritance:
+	 *   `admin/home.html@app`
+	 *     -> extends `admin/admin_layout.html@citomni/admin`
+	 *     -> extends `base.html@citomni/http`
 	 *
-	 * - This method does not perform any of the `{{ }}` / `{? ?}` compilation;
-	 *   that is handled by `compileSyntax()`.
-	 *
-	 * Typical usage:
-	 *   // Inside compile():
-	 *   $code = $this->removeTemplateComments($code);
-	 *   $code = $this->processExtendsAndBlocks($code, $layer);
-	 *   $code = $this->processIncludes($code, 0);
-	 *   $code = $this->compileSyntax($code);
-	 *
-	 * @param string $code         Child template source after comment stripping,
-	 *                             before include expansion. May contain one
-	 *                             `{% extends "..." %}` and zero or more `{% block %}`.
-	 * @param string $currentLayer Layer identifier of the child (e.g. "app" or "citomni/admin").
-	 *
-	 * @return string Flattened template source with inheritance resolved. The
-	 *                returned code no longer contains `{% extends %}`,
-	 *                `{% block %}`, `{% endblock %}`, or `{% yield %}`.
-	 *
-	 * @throws \RuntimeException On:
-	 *   - Duplicate `{% block %}` names in the child.
-	 *   - Child block not yielded by the parent.
-	 *   - Parent still containing `{% yield %}` after merge (missing block).
-	 *   - Failure to replace yields due to regex errors.
-	 *   - Inaccessible parent template.
+	 * @param  string  $code  Comment-stripped child source before include expansion.
+	 * @param  string  $currentLayer  Layer of the current child source.
+	 * @param  array  $context  Compilation-local source/dependency state.
+	 * @param  array<string,bool>  $seen  Canonical paths already present in the inheritance chain.
+	 * @return string  Flattened source with inheritance resolved.
+	 * @throws \RuntimeException  On cycles, excessive depth, duplicate/orphan/missing blocks or PCRE failure.
 	 */
-	private function processExtendsAndBlocks(string $code, string $currentLayer): string {
-		if (\strpos($code, '{% extends') === false) {
-			// No parent -> nothing to resolve.
-			return $code;
-		}
-		if (!\preg_match('/{%\s*extends\s+["\'](.+?)["\']\s*%}/', $code, $m)) {
-			// Tag looked like it might be there, but not in a valid form.
-			return $code;
-		}
+	private function processExtendsAndBlocks(string $code, string $currentLayer, array &$context, array $seen): string {
 
-		[$parentRel, $parentLayer] = $this->splitRef($m[1]);
+		// -- 1. Walk the inheritance chain iteratively --------------------
 
-		// Remove the extends tag from the child to avoid it leaking further down.
-		$childNoExtends = \preg_replace(
-			'/{%\s*extends\s+["\'](.+?)["\']\s*%}/',
-			'',
-			$code,
-			1
-		);
-
-		// Load the parent layout source and strip comments from it.
-		[$layoutCode, $layoutAbs] = $this->loadSource($parentRel, $parentLayer);
-		$layoutCode = $this->removeTemplateComments($layoutCode);
-
-		// Extract all `{% block name %}...{% endblock %}` from the child.
-		\preg_match_all(
-			'/{%\s*block\s+([\w-]+)\s*%}(.*?){%\s*endblock\s*%}/s',
-			$childNoExtends,
-			$matches,
-			\PREG_SET_ORDER
-		);
-
-		$seen = [];
-		foreach ($matches as $match) {
-			$name		= $match[1];
-			// $content = \trim($match[2]);
-			$content	= $match[2];
-
-			// Disallow duplicate block definitions in the same child template.
-			if (isset($seen[$name])) {
-				throw new \RuntimeException(
-					"TemplateEngine: Duplicate block '{$name}' in child template (layer '{$currentLayer}')."
-				);
+		for ($depth = 0; ; $depth++) {
+			if (!\str_contains($code, '{%')) {
+				return $code;
 			}
-			$seen[$name] = true;
-
-			// Replace yields with literal block source, preserving backslashes and $n sequences.
-			$quoted = \preg_quote($name, '/');
-			$replaced = \preg_replace_callback(
-				'/{%\s*yield\s*' . $quoted . '\s*%}/',
-				static fn(array $match): string => $content,
-				$layoutCode,
-				-1,
-				$count
-			);
-
-			if ($replaced === false || $replaced === null) {
-				throw new \RuntimeException("TemplateEngine: Regex replace failed for block '{$name}'.");
+			$match = \preg_match(self::EXTENDS_PATTERN, $code, $parent);
+			if ($match === false) {
+				throw new \RuntimeException('TemplateEngine: PCRE error while reading layout inheritance.');
+			}
+			if ($match === 0) {
+				return $code;
+			}
+			if ($depth >= self::MAX_INHERITANCE_DEPTH) {
+				throw new \RuntimeException('TemplateEngine: Inheritance depth exceeded.');
 			}
 
-			$layoutCode = $replaced;
 
-			// If the parent never yielded this block, the child's block is "orphaned".
-			if ($count === 0) {
-				throw new \RuntimeException(
-					"TemplateEngine: Block '{$name}' from child layer '{$currentLayer}' was not yielded in parent template: " . $layoutAbs
-				);
+			// -- 2. Load the parent and reject cycles ------------------------
+			// Resolve the parent through the shared compilation context. That both records
+			// the layout as a real dependency and ensures a multi-level inheritance chain
+			// never rereads the same logical source within this attempt. Canonical paths are
+			// tracked in $seen so A -> B -> A fails immediately instead of recursing forever.
+
+			[$parentRel, $parentLayer] = $this->splitRef($parent[1]);
+			[$layout, $layoutPath] = $this->loadSource($parentRel, $parentLayer, $context);
+			if (isset($seen[$layoutPath])) {
+				throw new \RuntimeException("TemplateEngine: Circular inheritance at '{$parentRel}@{$parentLayer}'.");
 			}
-		}
+			$seen[$layoutPath] = true;
 
-		// After merging: If the parent still has any `{% yield something %}`, then the child failed to provide a block for that something.
-		if (\preg_match_all('/{%\s*yield\s*([\w-]+)\s*%}/', $layoutCode, $leftover) && !empty($leftover[1])) {
-			$missing = \array_values(\array_unique($leftover[1]));
-			$list = "'" . \implode("', '", $missing) . "'";
-			throw new \RuntimeException(
-				"TemplateEngine: Missing child blocks {$list} from layer '{$currentLayer}' in parent template: " . $layoutAbs
-			);
-		}
 
-		// Recursively resolve further extends in the parent.
-		// This supports multi-level inheritance chains.
-		return $this->processExtendsAndBlocks($layoutCode, $parentLayer);
+			// -- 3. Extract and validate child blocks ------------------------
+			// Remove exactly one extends directive from the child so it cannot leak into
+			// the merged parent or survive into compileSyntax(). Then extract every named
+			// `{% block name %}...{% endblock %}` body into a lookup keyed by block name.
+			// Duplicate names are developer errors; there is deliberately no "last wins".
+			$child = \preg_replace(self::EXTENDS_PATTERN, '', $code, 1);
+			if ($child === null || \preg_match_all(self::BLOCK_PATTERN, $child, $matches, \PREG_SET_ORDER) === false) {
+				throw new \RuntimeException('TemplateEngine: PCRE error while extracting child blocks.');
+			}
+			$blocks = [];
+			$orderedMerge = false;
+			foreach ($matches as $block) {
+				$name = $block[1];
+				if (isset($blocks[$name])) {
+					throw new \RuntimeException("TemplateEngine: Duplicate block '{$name}' in child template (layer '{$currentLayer}').");
+				}
+				$blocks[$name] = $block[2];
+				// A block may itself contain another block's yield. That legacy edge case needs
+				// ordered one-block-at-a-time replacement so an earlier inserted block can expose
+				// a yield consumed by a later block. Ordinary layouts use the faster one-pass path.
+				if (!$orderedMerge && \str_contains($block[2], '{%')) {
+					$result = \preg_match(self::YIELD_PATTERN, $block[2]);
+					if ($result === false) {
+						throw new \RuntimeException('TemplateEngine: PCRE error while inspecting block yields.');
+					}
+					$orderedMerge = $result === 1;
+				}
+			}
+
+
+			// -- 4. Merge block source into matching yields literally --------
+			// IMPORTANT: Block bodies are arbitrary template source. They must be returned
+			// from callbacks as literal strings and must never be passed as preg_replace()
+			// replacement text, where backslashes and $1/$2-style sequences have semantics.
+
+			if ($orderedMerge) {
+				foreach ($blocks as $name => $content) {
+					$layout = \preg_replace_callback(
+						'/{%\s*yield\s*' . \preg_quote((string)$name, '/') . '\s*%}/',
+						static fn(array $match): string => $content,
+						$layout,
+						-1,
+						$count
+					);
+					if ($layout === null) {
+						throw new \RuntimeException("TemplateEngine: Regex replace failed for block '{$name}'.");
+					}
+					if ($count === 0) {
+						throw new \RuntimeException("TemplateEngine: Block '{$name}' from child layer '{$currentLayer}' was not yielded in parent template: " . $layoutPath);
+					}
+				}
+			} else {
+				// Normal case: Walk all parent yields once. Matching child blocks are inserted
+				// literally and recorded in $used so orphan child blocks can be reported below.
+				$used = [];
+				$layout = \preg_replace_callback(self::YIELD_PATTERN, static function (array $match) use ($blocks, &$used): string {
+					$name = $match[1];
+					if (!isset($blocks[$name])) {
+						return $match[0];
+					}
+					$used[$name] = true;
+					return $blocks[$name];
+				}, $layout);
+				if ($layout === null) {
+					throw new \RuntimeException('TemplateEngine: PCRE error while merging child blocks.');
+				}
+				foreach ($blocks as $name => $content) {
+					if (!isset($used[$name])) {
+						throw new \RuntimeException("TemplateEngine: Block '{$name}' from child layer '{$currentLayer}' was not yielded in parent template: " . $layoutPath);
+					}
+				}
+			}
+
+
+			// -- 5. Reject unresolved parent yields --------------------------
+			// At this point every child block must have matched a parent yield, and every
+			// remaining parent yield means required content was never supplied by the child.
+			// Fail fast instead of silently rendering an incomplete layout.
+
+			$leftoverCount = \preg_match_all(self::YIELD_PATTERN, $layout, $leftover);
+			if ($leftoverCount === false) {
+				throw new \RuntimeException('TemplateEngine: PCRE error while validating remaining yields.');
+			}
+			if ($leftoverCount > 0) {
+				$list = "'" . \implode("', '", \array_unique($leftover[1])) . "'";
+				throw new \RuntimeException("TemplateEngine: Missing child blocks {$list} from layer '{$currentLayer}' in parent template: " . $layoutPath);
+			}
+
+
+			// -- 6. Continue with the merged parent as the next child --------
+			// The merged parent may itself extend another layout. Reuse it as the next
+			// child and continue iteratively, e.g. app -> citomni/admin -> citomni/http.
+
+			$code = $layout;
+			$currentLayer = $parentLayer;
+		}
 	}
 
 
 	/**
-	 * processIncludes: Inline `{% include "file@layer" %}` directives recursively.
+	 * Expand explicit `{% include "path@layer" %}` directives recursively at compile time.
 	 *
 	 * Behavior:
-	 * - Scans the given template code for `{% include "relative/path.html@layer" %}`.
-	 * - For each include:
-	 *   1) Splits the reference into (relative path, layer) via splitRef().
-	 *   2) Loads the referenced template source from that layer (loadSource()).
-	 *   3) Removes `{# ... #}` comments from the included template.
-	 *   4) Recursively processes includes inside the included template (depth+1).
-	 *   5) Replaces the `{% include ... %}` tag with the fully expanded included code.
-	 *
-	 * - Enforces a maximum nesting depth of 16 to avoid pathological recursion
-	 *   (circular includes, accidental infinite loops, etc.).
+	 * - Returns immediately when the source contains no template directive marker or no include directive.
+	 * - Enforces the existing maximum include depth.
+	 * - Resolves each include through splitRef() and loadSource(), sharing source snapshots with the rest
+	 *   of the current compilation attempt.
+	 * - Detects circular includes by canonical source path while the dependency is active on the stack.
+	 * - Inserts included source through a callback, preserving it literally before recursively expanding
+	 *   nested includes.
 	 *
 	 * Notes:
-	 * - Includes are resolved at compile time, not at runtime, so the final
-	 *   compiled template is a single PHP file with everything inlined.
-	 * - This method does not apply `compileSyntax()` yet; it operates on the
-	 *   pre-compiled template language (still containing {{ }}, {% if %}, etc.).
-	 * - Security: loadSource() ensures the resolved absolute path stays within
-	 *   the registered template layer directory. Traversal attempts fail fast.
+	 * - Included source is already comment-stripped by loadSource().
+	 * - Because comments are removed before include scanning, a commented-out directive such as
+	 *   `{# {% include "debug/panel@app" %} #}` is never loaded and never becomes a cache dependency.
+	 * - Template syntax is compiled only after all includes have been expanded.
+	 * - resolveSourcePath() enforces layer-root containment for every included source.
 	 *
-	 * @param string $code   Raw template code (already had `{# ... #}` comments
-	 *                       removed by the caller if desired, but not required).
-	 * @param int    $depth  Current recursion depth. Must start at 0. Each nested
-	 *                       include increments depth by 1. Hard-capped at 16.
-	 *
-	 * @return string Fully expanded code with all `{% include ... %}` directives
-	 *                inlined for this branch (and their own nested includes
-	 *                already resolved).
-	 *
-	 * @throws \RuntimeException If include nesting exceeds MAX depth (16).
-	 * @throws \RuntimeException If an included template cannot be found or escapes
-	 *                           its layer root.
+	 * @param  string  $code  Comment-stripped source before syntax compilation.
+	 * @param  int  $depth  Current include depth, starting at zero.
+	 * @param  array  $context  Compilation-local source snapshots and include stack.
+	 * @return string  Source with all reachable include directives expanded.
+	 * @throws \RuntimeException  On cycles, excessive depth, source failure or PCRE failure.
 	 */
-	private function processIncludes(string $code, int $depth): string {
-		if (\strpos($code, '{% include') === false) {
+	private function processIncludes(string $code, int $depth, array &$context): string {
+
+		// -- 1. Detect include work and enforce depth ---------------------
+		// loadSource() already removed template comments. Consequently a commented-out
+		// include such as `{# {% include "debug/panel@app" %} #}` is invisible here:
+		// it is never resolved, never loaded and never recorded as a cache dependency.
+
+		if (!\str_contains($code, '{%')) {
 			return $code;
 		}
-		if ($depth >= 16) {
+		$hasInclude = \preg_match(self::INCLUDE_PATTERN, $code);
+		if ($hasInclude === false) {
+			throw new \RuntimeException('TemplateEngine: PCRE error while detecting includes.');
+		}
+		if ($hasInclude === 0) {
+			return $code;
+		}
+		if ($depth >= self::MAX_INCLUDE_DEPTH) {
 			throw new \RuntimeException('TemplateEngine: Include depth exceeded.');
 		}
 
-		// Strip comments in the caller BEFORE scanning for includes, so commented-out includes are ignored
-		//
-		// Note: We intentionally run removeTemplateComments() again inside this method,
-		//       even though compile() already stripped comments earlier, because we ALSO
-		//       want to ignore commented-out includes INSIDE included partials. That way
-		//       `{# {% include "debug/panel@app" %} #}` never keeps a cache dependency alive.
-		$clean = $this->removeTemplateComments($code);
 
-		$expanded = \preg_replace_callback(
-			'/{%\s*include\s+["\'](.+?)["\']\s*%}/i',
-			function (array $m) use ($depth) {
-				[$rel, $layer] = $this->splitRef($m[1]);
+		// -- 2. Expand includes recursively with an active-path stack -----
+		// Includes are expanded before syntax compilation, so the final compiled PHP sees
+		// one flattened source tree. Callback insertion keeps included template bytes
+		// literal rather than treating backslashes/$n sequences as replacement syntax.
 
-				[$incCode, ] = $this->loadSource($rel, $layer);
-
-				// Strip comments in the included file
-				$incCode = $this->removeTemplateComments($incCode);
-
-				// Recurse into nested includes inside that included code
-				$incCode = $this->processIncludes($incCode, $depth + 1);
-
-				return $incCode;
-			},
-			$clean
-		);
-
+		$expanded = \preg_replace_callback(self::INCLUDE_PATTERN, function (array $match) use ($depth, &$context): string {
+			// Split the explicit path@layer ref, then load it through the shared context so
+			// source bytes and dependency metadata are reused if already seen this attempt.
+			[$rel, $layer] = $this->splitRef($match[1]);
+			[$included, $path] = $this->loadSource($rel, $layer, $context);
+			// includeStack contains only the currently active recursion path. Reusing the same
+			// partial later in a different branch is valid; A -> B -> A is not.
+			if (isset($context['includeStack'][$path])) {
+				throw new \RuntimeException("TemplateEngine: Circular include at '{$rel}@{$layer}'.");
+			}
+			$context['includeStack'][$path] = true;
+			try {
+				// Resolve nested includes before inserting this partial into its caller.
+				return $this->processIncludes($included, $depth + 1, $context);
+			} finally {
+				unset($context['includeStack'][$path]);
+			}
+		}, $code);
 		if ($expanded === null) {
 			throw new \RuntimeException('TemplateEngine: PCRE error during processIncludes().');
 		}
-
 		return $expanded;
 	}
 
@@ -1858,144 +2161,336 @@ final class TemplateEngine extends BaseService {
 
 
 
-
 	// ----------------------------------------------------------------
-	// Syntax and comment processing
+	// Template syntax and safe markup optimization
 	// ----------------------------------------------------------------
 
 	/**
-	 * compileSyntax: Transform templating syntax ({{ }}, {{{ }}}, {% %}, {? ?}) into plain PHP.
-	 *
-	 * Converts the high-level template language into executable PHP. This runs
-	 * after layout/partials have been resolved and just before the compiled code
-	 * is written to cache. The returned string is valid PHP, later loaded with `require`.
+	 * Compile the established CitOmni template grammar into executable PHP and literal markup.
 	 *
 	 * Behavior:
-	 * - Echo:
-	 *   1) `{{ expr }}`  -> `echo htmlspecialchars(expr ?? "", ENT_QUOTES | ENT_SUBSTITUTE, $charset ?? "UTF-8");`
-	 *      (escaped by default; `$charset` comes from globals built by TemplateEngine).
-	 *   2) `{{{ expr }}}` -> `echo expr;` (raw, no escaping). Use only for trusted HTML (e.g., CSRF field).
-	 *
-	 * - Control flow (strict subset):
-	 *   1) `{% if (expr) %} ... {% endif %}`
-	 *   2) `{% elseif (expr) %}`, `{% else %}`
-	 *   3) `{% foreach (expr) %} ... {% endforeach %}`   // parentheses required
-	 *   4) `{% continue %}`, `{% continue N %}`, `{% break %}`, `{% break N %}`  // optional level + optional semicolon
-	 *   These map 1:1 to native PHP `if/elseif/else/foreach/continue/break` constructs.
-	 *
-	 * - Variable assignment:
-	 *   - `{% set $name = expr %}` assigns to a local PHP variable. `$` prefix is required.
-	 *     (Forms without `$` are not supported.)
-	 *
-	 * - Layout markers:
-	 *   - `{% block %}`, `{% endblock %}`, `{% yield %}`, `{% extends "file@layer" %}`
-	 *     are resolved earlier by `processExtendsAndBlocks()`; any leftovers are stripped here.
-	 *   - `{% include "file@layer" %}` is expanded earlier by `processIncludes()`.
-	 *
-	 * - Inline PHP (optional):
-	 *   - `{? php ... ?}`    -> `<?php ... ?>`
-	 *   - `{?= expr ?}`      -> `<?php echo expr; ?>`
-	 *   Emitted only if `$this->allowPhpTags === true`; otherwise removed.
-	 *
-	 * Security & escaping:
-	 * - `{{ ... }}` is always HTML-escaped using the runtime charset if available, else "UTF-8".
-	 * - `{{{ ... }}}` is never escaped; template authors are responsible for safety.
-	 * - Inline PHP is powerful and should only appear in trusted templates.
+	 * - Output:
+	 *   1) `{{ expr }}` emits HTML-escaped output using the runtime charset.
+	 *   2) `{{{ expr }}}` emits raw output for trusted markup.
+	 * - Assignment:
+	 *   1) `{% set $name = expr %}` assigns to a native local PHP variable.
+	 *   2) The `$` prefix on the variable name is required.
+	 * - Control flow:
+	 *   1) `{% if expr %} ... {% endif %}`
+	 *   2) `{% elseif expr %}`
+	 *   3) `{% else %}`
+	 *   4) `{% foreach ($items as $item) %} ... {% endforeach %}`; parentheses are required.
+	 *   5) `{% continue %}` and `{% continue N %}` with an optional trailing semicolon.
+	 *   6) `{% break %}` and `{% break N %}` with an optional trailing semicolon.
+	 * - Inline PHP:
+	 *   1) `{?= expr ?}` emits a raw PHP echo when `allow_php_tags` is enabled.
+	 *   2) `{? ... ?}` emits a raw PHP block when `allow_php_tags` is enabled.
+	 *   3) Both custom inline-PHP forms are removed when `allow_php_tags` is disabled.
+	 * - Structural syntax resolved before or around this phase:
+	 *   1) `{% extends "file@layer" %}`
+	 *   2) `{% block name %}...{% endblock %}`
+	 *   3) `{% yield name %}`
+	 *   4) `{% include "file@layer" %}`
+	 *   5) `{# ... #}` template comments, including nested comments.
+	 * - Strips defensive leftovers for block/endblock/yield/extends markers after inheritance resolution.
+	 * - Applies replacements in the historic order so existing template expression semantics remain intact.
 	 *
 	 * Notes:
-	 * - No filesystem I/O is performed here.
-	 * - Assumes `processExtendsAndBlocks()` and `processIncludes()` have already run.
-	 * - On PCRE failure during replacement, the caller throws a RuntimeException (fail-fast).
+	 * - Template expressions are native PHP expressions, not Twig syntax or a separate expression parser.
+	 * - Native PHP already present in trusted templates is not removed or sandboxed.
+	 * - `{{ ... }}` is escaped; `{{{ ... }}}` is not. Use raw output only for trusted markup.
+	 * - Includes and inheritance always use explicit `relative/path.html@layer` references.
+	 * - Numeric `$1` / `$2` references in this method are compiler-owned replacement templates; arbitrary
+	 *   child/include source is never passed as a preg_replace() replacement string.
+	 * - No filesystem I/O occurs here.
 	 *
 	 * Typical usage:
-	 *   $php = $this->compileSyntax($mergedTemplateSource);
-	 *   // $php now contains valid PHP and will be persisted to cache, then required.
+	 *   $php = $this->compileSyntax($flattenedTemplateSource);
 	 *
-	 * @param string $code Raw template code after inheritance/includes; may still contain
-	 *                     `{{ ... }}`, `{{{ ... }}}`, `{? ... ?}`, `{% if %}`, `{% foreach %}`, etc.
-	 * @return string PHP source suitable for writing to a cache file; the outer guard/header
-	 *                is added by compile().
+	 * @param  string  $code  Flattened template source after inheritance and include expansion.
+	 * @return string  Executable PHP mixed with literal markup.
+	 * @throws \RuntimeException  On PCRE failure.
 	 */
 	private function compileSyntax(string $code): string {
-		$patterns = [
-			// Raw PHP echo
-			'/{\?=\s*(.+?)\s*\?}/s' => $this->allowPhpTags ? '<?php echo $1; ?>' : '',
-			// Raw PHP block
-			'/{\?(.+?)\?}/s' => $this->allowPhpTags ? '<?php $1 ?>' : '',
 
-			// Triple curlies => raw echo
-			'/\{\{\{\s*(.+?)\s*\}\}\}/s'
-				=> '<?php echo $1; ?>',
+		// -- 1. Skip source with no template marker -----------------------
 
-			// Double curlies => escaped echo (use runtime charset if available)
-			'/\{\{\s*(.+?)\s*\}\}/s'
-				=> '<?php echo htmlspecialchars($1 ?? "", \ENT_QUOTES | \ENT_SUBSTITUTE, $charset ?? "UTF-8"); ?>',
+		if (!\str_contains($code, '{')) {
+			return $code;
+		}
 
-			// {% set $var = expr %}  (requires $)
-			'/{%\s*set\s+\$([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+?)\s*%}/s'
-				=> '<?php $$1 = $2; ?>',
 
-			// Control structures
-			'/{%\s*if\s*(.+?)\s*%}/' => '<?php if ($1): ?>',
-			'/{%\s*elseif\s*(.+?)\s*%}/' => '<?php elseif ($1): ?>',
-			'/{%\s*else\s*%}/' => '<?php else: ?>',
-			'/{%\s*endif\s*%}/' => '<?php endif; ?>',
+		// -- 2. Define the established grammar in replacement order -------
 
-			// foreach (parentheses required)
-			'/{%\s*foreach\s*\((.+?)\)\s*%}/' => '<?php foreach ($1): ?>',
-			'/{%\s*endforeach\s*%}/' => '<?php endforeach; ?>',
+		static $patterns = [
+			// Custom inline PHP. These are controlled by allow_php_tags.
+			'/{\?=\s*(.+?)\s*\?}/s',
+			'/{\?(.+?)\?}/s',
 
-			// Continue / Break (optional numeric level + optional semicolon)
-			'/{%\s*continue\s*((?:\s+\d+)?)\s*;?\s*%}/' => '<?php continue$1; ?>',
-			'/{%\s*break\s*((?:\s+\d+)?)\s*;?\s*%}/' => '<?php break$1; ?>',
+			// Output. Triple braces are raw; double braces are escaped.
+			'/\{\{\{\s*(.+?)\s*\}\}\}/s',
+			'/\{\{\s*(.+?)\s*\}\}/s',
 
-			// Blocks/yields/extends should be resolved earlier - strip leftovers defensively
-			'/{%\s*block\s+([\w-]+)\s*%}/' => '',
-			'/{%\s*endblock\s*%}/' => '',
-			'/{%\s*yield\s*([\w-]+)\s*%}/' => '',
-			'/{%\s*extends\s+["\'](.+?)["\']\s*%}/' => '',
+			// Local assignment. The template variable name must include the leading $.
+			'/{%\s*set\s+\$([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+?)\s*%}/s',
+
+			// Conditional control flow. Expressions remain native PHP expressions.
+			'/{%\s*if\s*(.+?)\s*%}/',
+			'/{%\s*elseif\s*(.+?)\s*%}/',
+			'/{%\s*else\s*%}/',
+			'/{%\s*endif\s*%}/',
+
+			// foreach requires the parenthesized native PHP foreach expression.
+			'/{%\s*foreach\s*\((.+?)\)\s*%}/',
+			'/{%\s*endforeach\s*%}/',
+
+			// Loop control accepts an optional numeric level and optional semicolon.
+			'/{%\s*continue\s*((?:\s+\d+)?)\s*;?\s*%}/',
+			'/{%\s*break\s*((?:\s+\d+)?)\s*;?\s*%}/',
+
+			// Structural markers should already be resolved. Strip leftovers defensively
+			// instead of allowing template directives to leak into rendered output.
+			'/{%\s*block\s+([\w-]+)\s*%}/',
+			'/{%\s*endblock\s*%}/',
+			'/{%\s*yield\s*([\w-]+)\s*%}/',
+			'/{%\s*extends\s+["\'](.+?)["\']\s*%}/',
 		];
 
-		$replaced = \preg_replace(\array_keys($patterns), \array_values($patterns), $code);
-		if ($replaced === null) {
+		// Keep this array in exactly the same order as $patterns above. The $1/$2
+		// references here are intentional compiler-owned replacements. Arbitrary child
+		// block/include source is inserted elsewhere through callbacks and never lands here.
+		$replacements = [
+			// Custom inline PHP. Disabled forms compile to an empty string.
+			$this->allowPhpTags ? '<?php echo $1; ?>' : '',
+			$this->allowPhpTags ? '<?php $1 ?>' : '',
+
+			// Raw and escaped output.
+			'<?php echo $1; ?>',
+			'<?php echo htmlspecialchars($1 ?? "", \ENT_QUOTES | \ENT_SUBSTITUTE, $charset ?? "UTF-8"); ?>',
+
+			// Assignment and control flow.
+			'<?php $$1 = $2; ?>',
+			'<?php if ($1): ?>',
+			'<?php elseif ($1): ?>',
+			'<?php else: ?>',
+			'<?php endif; ?>',
+			'<?php foreach ($1): ?>',
+			'<?php endforeach; ?>',
+			'<?php continue$1; ?>',
+			'<?php break$1; ?>',
+
+			// Defensive structural cleanup.
+			'', '', '', '',
+		];
+
+
+		// -- 3. Compile template directives to PHP ------------------------
+
+		$result = \preg_replace($patterns, $replacements, $code);
+		if ($result === null) {
 			throw new \RuntimeException('TemplateEngine: PCRE error during compileSyntax().');
 		}
-		return (string)$replaced;
+		return $result;
 	}
 
 
 	/**
-	 * printViewVars: Emit a debug dump of the final template variable payload.
-	 *
-	 * Writes an annotated, depth-limited dump of $vars into the HTML output
-	 * as an HTML comment (`<!-- ... -->`) to help developers inspect what the
-	 * template actually received. This is meant for troubleshooting controller
-	 * data, globals, dynamic providers, etc.
+	 * Remove nested CitOmni `{# ... #}` template comments while preserving legacy edge cases.
 	 *
 	 * Behavior:
-	 * - Only runs in "dev" or "stage". In "prod" it returns immediately.
-	 * - Normalizes values to avoid fatal recursion:
-	 *   1) Tracks seen objects to prevent infinite loops.
-	 *   2) Replaces closures with "[closure]".
-	 *   3) Replaces resources with "[resource:<type>]".
-	 *   4) Limits recursion depth (default: 10).
-	 * - Output is wrapped in <!-- --> so it is invisible in the DOM but still
-	 *   visible via "View Source".
+	 * - Uses a token-offset scan over comment open/close markers with a nesting-depth counter.
+	 * - Removes nested comment blocks completely.
+	 * - Leaves stray `#}` markers outside an active comment untouched.
+	 * - Treats an unclosed comment as extending to end-of-file, discarding the remaining source.
 	 *
 	 * Notes:
-	 * - This method `echo`s directly. It is intentionally side-effecty,
-	 *   and should run before the compiled template is required.
-	 * - Because it may expose internal state (services, config-derived values),
-	 *   it must never run in production environments.
+	 * - The fast path returns immediately when no `{#` opener exists.
+	 * - This behavior intentionally matches the previous engine even though the implementation is now
+	 *   based on preg_match_all() offsets rather than a byte-by-byte scanner.
 	 *
 	 * Typical usage:
-	 * - Called automatically by render() if the request contains `?_viewvars`.
+	 *   `{# outer {# inner #} #}` becomes an empty string.
 	 *
-	 * @param array<string,mixed> $vars Final merged vars
-	 *                                  (globals + dynamic providers + controller $data).
+	 * @param  string  $code  Template source containing zero or more comment markers.
+	 * @return string  Comment-stripped source.
+	 * @throws \RuntimeException  On PCRE failure.
+	 */
+	private function removeTemplateComments(string $code): string {
+
+
+		// -- 1. Locate nested comment markers -----------------------------
+
+		if (!\str_contains($code, '{#')) {
+			return $code;
+		}
+		if (\preg_match_all('/\{#|#\}/', $code, $tokens, \PREG_OFFSET_CAPTURE) === false) {
+			throw new \RuntimeException('TemplateEngine: PCRE error while stripping template comments.');
+		}
+
+
+		// -- 2. Copy only source observed outside comment depth -----------
+
+		$depth = 0;
+		$cursor = 0;
+		$out = '';
+		foreach ($tokens[0] as [$token, $offset]) {
+			if ($token === '{#') {
+				if ($depth === 0) {
+					$out .= \substr($code, $cursor, $offset - $cursor);
+				}
+				$depth++;
+			} elseif ($depth > 0) {
+				$depth--;
+				if ($depth === 0) {
+					$cursor = $offset + 2;
+				}
+			}
+		}
+		return $depth === 0 ? $out . \substr($code, $cursor) : $out;
+	}
+
+
+	/**
+	 * Apply optional HTML-comment and whitespace optimization without changing protected content.
+	 *
+	 * Behavior:
+	 * - Uses Zend's tokenizer to separate compiled PHP fragments from literal markup before optimization.
+	 * - Masks PHP strings, comments, heredocs/nowdocs and other PHP tokens with collision-free markers.
+	 * - Protects quoted HTML tags and complete `pre`, `code`, `textarea`, `script` and `style` regions.
+	 * - Removes ordinary HTML comments only when `remove_html_comments` is enabled while preserving the
+	 *   established conditional-comment rule and conservatively retaining unclosed comments.
+	 * - Collapses redundant whitespace only in unprotected literal text and only when `trim_whitespace`
+	 *   is enabled.
+	 * - Restores PHP fragments byte-for-byte after markup processing.
+	 *
+	 * Notes:
+	 * - This runs only while compiling a template, never as an output-buffer filter on warm renders.
+	 * - The optimizer is deliberately conservative; it is not a full HTML parser, CSS/JS minifier or
+	 *   canonicalizer.
+	 * - Protecting PHP fragments prevents the old behavior where whitespace optimization could mutate
+	 *   PHP string literals or line comments.
+	 *
+	 * @param  string  $code  Compiled PHP mixed with literal HTML.
+	 * @return string  Optimized PHP and HTML.
+	 * @throws \RuntimeException  On PCRE failure.
+	 */
+	private function optimizeMarkup(string $code): string {
+
+		// -- 1. Protect compiled PHP fragments ----------------------------
+
+		$php = [];
+		$markup = $code;
+		if (\str_contains($code, '<?')) {
+			$marker = "\x1ACITOMNI_PHP_";
+			while (\str_contains($code, $marker)) {
+				$marker .= '_';
+			}
+			$markup = '';
+			$fragment = '';
+			foreach (\token_get_all($code) as $token) {
+				if (\is_array($token) && $token[0] === \T_INLINE_HTML) {
+					if ($fragment !== '') {
+						$key = $marker . \count($php) . "\x1A";
+						$php[$key] = $fragment;
+						$markup .= $key;
+						$fragment = '';
+					}
+					$markup .= $token[1];
+				} else {
+					$fragment .= \is_array($token) ? $token[1] : $token;
+				}
+			}
+			if ($fragment !== '') {
+				$key = $marker . \count($php) . "\x1A";
+				$php[$key] = $fragment;
+				$markup .= $key;
+			}
+		}
+
+
+		// -- 2. Locate protected markup regions ---------------------------
+		// Match whole quoted tags and raw-text regions before optimizing the text between them.
+		$pattern = '~<(pre|code|textarea|script|style)\b(?:[^\'">]|"[^"]*"|\'[^\']*\')*>.*?(?:</\1\s*>|\z)|<!--.*?(?:-->|\z)|<(?:[^\'">]|"[^"]*"|\'[^\']*\')*>~is';
+		if (\preg_match_all($pattern, $markup, $matches, \PREG_OFFSET_CAPTURE) === false) {
+			throw new \RuntimeException('TemplateEngine: PCRE error while protecting markup.');
+		}
+
+
+		// -- 3. Optimize unprotected text and restore PHP -----------------
+
+		$out = '';
+		$cursor = 0;
+		foreach ($matches[0] as [$protected, $offset]) {
+			$out .= $this->collapseWhitespace(\substr($markup, $cursor, $offset - $cursor));
+			if (!$this->removeHtmlComments || !\str_starts_with($protected, '<!--')
+				|| !\preg_match('/\A<!--(?!<!)[^\[>].*?-->\z/s', $protected)) {
+				$out .= $protected;
+			}
+			$cursor = $offset + \strlen($protected);
+		}
+		$out .= $this->collapseWhitespace(\substr($markup, $cursor));
+		return $php === [] ? $out : \strtr($out, $php);
+	}
+
+
+	/**
+	 * Collapse redundant whitespace in an already unprotected literal-text fragment.
+	 *
+	 * Behavior:
+	 * - Returns input unchanged when `trim_whitespace` is disabled or the fragment is empty.
+	 * - Replaces runs of two or more whitespace characters with one ordinary space otherwise.
+	 *
+	 * Notes:
+	 * - optimizeMarkup() is responsible for ensuring PHP, quoted tags and sensitive raw-text elements
+	 *   never reach this helper as collapsible text.
+	 *
+	 * @param  string  $text  Unprotected literal-text fragment.
+	 * @return string  Original or whitespace-collapsed text.
+	 * @throws \RuntimeException  On PCRE failure.
+	 */
+	private function collapseWhitespace(string $text): string {
+		if (!$this->trimWhitespace || $text === '') {
+			return $text;
+		}
+		$result = \preg_replace('/\s{2,}/', ' ', $text);
+		if ($result === null) {
+			throw new \RuntimeException('TemplateEngine: PCRE error while collapsing whitespace.');
+		}
+		return $result;
+	}
+
+
+
+
+
+
+
+	// ----------------------------------------------------------------
+	// Diagnostics and configuration normalization
+	// ----------------------------------------------------------------
+
+	/**
+	 * Emit the depth-limited template-variable diagnostic as an HTML comment in dev/stage.
+	 *
+	 * Behavior:
+	 * - Returns immediately outside `dev` and `stage` environments.
+	 * - Normalizes the final variable payload recursively with a hard depth limit of 10.
+	 * - Tracks repeated/cyclic objects, annotates closures and resources, and snapshots public object
+	 *   properties without attempting arbitrary serialization.
+	 * - Escapes the generated dump before placing it inside the HTML comment so variable payloads cannot
+	 *   inject a comment terminator into the response.
+	 *
+	 * Notes:
+	 * - render() invokes this automatically when the request contains `?_viewvars`.
+	 * - This method writes directly to output before the compiled template is required.
+	 * - The diagnostic may expose internal request/application state and therefore never runs in prod.
+	 *
+	 * @param  array<string,mixed>  $vars  Final merged template-variable payload.
 	 * @return void
 	 */
 	private function printViewVars(array $vars): void {
+
+		// -- 1. Restrict diagnostics to non-production environments -------
 		// Resolve current environment (fallback "prod" if undefined).
 		$env = \defined('CITOMNI_ENVIRONMENT') ? (string)\CITOMNI_ENVIRONMENT : 'prod';
 
@@ -2004,6 +2499,8 @@ final class TemplateEngine extends BaseService {
 			return;
 		}
 
+
+		// -- 2. Normalize the payload defensively -------------------------
 		// Track seen objects to avoid infinite recursion when normalizing.
 		$seen = new \SplObjectStorage();
 
@@ -2038,10 +2535,10 @@ final class TemplateEngine extends BaseService {
 			// Objects: prevent infinite loops and dump a shallow snapshot.
 			if (\is_object($v)) {
 				// If we've already seen this object, mark it as a repeat.
-				if ($seen->contains($v)) {
+				if ($seen->offsetExists($v)) {
 					return '[' . \get_debug_type($v) . ' (seen)]';
 				}
-				$seen->attach($v);
+				$seen->offsetSet($v);
 
 				// Basic class info.
 				$out = ['__class' => \get_class($v)];
@@ -2067,211 +2564,41 @@ final class TemplateEngine extends BaseService {
 			return $v;
 		};
 
+
+		// -- 3. Emit one escaped diagnostic HTML comment ------------------
 		// Produce a safe, serializable version of $vars.
 		$normalized = $normalize($vars);
 
 		// Emit as HTML comment so it won't affect DOM/layout.
 		echo "<!--\n=== CitOmni TemplateEngine Vars (environment: {$env}) ===\n";
-		\print_r($normalized);
+		echo \htmlspecialchars(\print_r($normalized, true), \ENT_QUOTES | \ENT_SUBSTITUTE, 'UTF-8');
 		echo "\n=== End Vars ===\n-->\n";
 	}
 
 
 	/**
-	 * Remove `{# ... #}` template comments using a single-pass depth parser (supports nesting).
+	 * Normalize an associative configuration node into a plain PHP array.
 	 *
-	 * Implementation details:
-	 * - Uses a single-pass parser (O(n)) with a depth counter, not regex.
-	 * - Supports nested comments: Each `{#` increments depth, each `#}` decrements it.
-	 * - If a comment is left open (while depth > 0), everything after its start is discarded (fail-safe).
-	 * - This guarantees that nested comment blocks are fully removed,
-	 *   leaving no stray `#}` or partial fragments in the output.
+	 * Behavior:
+	 * - Returns plain arrays unchanged.
+	 * - Calls `toArray()` on Cfg-style wrapper objects when available.
+	 * - Returns an empty array for null, scalar or unsupported object values.
 	 *
-	 * Example:
-	 *   {# outer
-	 *      {# inner #}
-	 *   #}
-	 *   -> (removed completely, yields empty string)
+	 * Notes:
+	 * - This helper deliberately performs no recursive schema validation; callers validate the entries
+	 *   they consume.
 	 *
-	 * @param string $code (template code containing `{# ... #}` comments)
-	 * @return string (cleaned template code with all comments removed)
-	 */
-	private function removeTemplateComments(string $code): string {
-		// Fast path: No comment opener, nothing to do
-		if (\strpos($code, '{#') === false) {
-			return $code;
-		}
-
-		$len	= \strlen($code);	// Input length in bytes
-		$depth	= 0;				// Current nesting depth of `{# ... #}` blocks
-		$start	= 0;				// Last copy position (outside comments)
-		$out	= '';				// Output buffer
-
-		// Scan the string once, matching `{#` and `#}` pairs
-		for ($i = 0; $i < $len; $i++) {
-			// Detect comment start `{#}`
-			if ($i < $len - 1 && $code[$i] === '{' && $code[$i + 1] === '#') {
-				// Append non-comment segment before this opener (only at depth 0)
-				if ($depth === 0) {
-					$out .= \substr($code, $start, $i - $start);
-				}
-				$depth++;	// Enter (or go deeper into) a comment block
-				$i++;		// Skip the '#' in `{#`
-				continue;
-			}
-
-			// Detect comment end `#}`
-			if ($i < $len - 1 && $code[$i] === '#' && $code[$i + 1] === '}' && $depth > 0) {
-				$depth--;			// Leave (or go up one level) of comment block
-				$i++;				// Skip the '}' in `#}`
-				$start = $i + 1;	// Next non-comment text starts after this closer
-				continue;
-			}
-		}
-
-		// If we ended outside comments, append any trailing non-comment segment
-		if ($depth === 0 && $start < $len) {
-			$out .= \substr($code, $start);
-		}
-
-		return $out;
-	}
-
-
-	/**
-	 * Remove standard HTML comments while keeping conditional comments.
-	 *
-	 * @param string $code
-	 * @return string
-	 */
-	private function removeHtmlCommentsSafe(string $code): string {
-		return (string)\preg_replace('/<!--(?!<!)[^\[>].*?-->/s', '', $code);
-	}
-
-
-	/**
-	 * Collapse redundant whitespace in HTML output while preserving sensitive tags.
-	 *
-	 * Sensitive tags are <pre>, <code>, <textarea>, <script>, and <style>.
-	 * Inside those, whitespace must be preserved exactly.
-	 *
-	 * @param string $html (the compiled template HTML)
-	 * @return string (optimized HTML with collapsed whitespace outside sensitive tags)
-	 */
-	private function safeTrimWhitespace(string $html): string {
-		// Split HTML into chunks: Alternating between "safe zones" (outside) and "sensitive zones" (inside)
-		$parts = \preg_split(
-			'#(<(?:pre|code|textarea|script|style)\b[^>]*>.*?</(?:pre|code|textarea|script|style)>)#si',
-			$html,
-			-1,
-			\PREG_SPLIT_DELIM_CAPTURE
-		);
-
-		// preg_split() can return false on failure -> fall back to original HTML
-		if ($parts === false) {
-			return $html;
-		}
-
-		// Iterate through chunks
-		foreach ($parts as $i => $chunk) {
-			// Even indexes = outside sensitive tags -> safe to collapse
-			if (($i % 2) === 0) {
-				// Replace runs of 2+ whitespace chars with a single space
-				// This avoids breaking inline markup while reducing size
-				$parts[$i] = \preg_replace('/\s{2,}/', ' ', $chunk);
-			}
-			// Odd indexes = inside sensitive tags -> leave untouched
-		}
-
-		// Recombine and return cleaned HTML
-		return \implode('', $parts);
-	}
-
-
-
-
-
-
-
-
-
-	// ----------------------------------------------------------------
-	// Dependency scanning and cfg normalization
-	// ----------------------------------------------------------------
-
-	/**
-	 * Collect all (rel,layer) pairs that this template depends on via extends/includes.
-	 * Used for cache freshness checks.
-	 *
-	 * @param string $code
-	 * @param string $currentLayer Layer of the $code we are scanning.
-	 * @param array<string,bool> $visited Keyed by "rel@layer" to avoid loops.
-	 * @return array<int,array{0:string,1:string}>
-	 */
-	private function collectDependencies(string $code, string $currentLayer, array &$visited = []): array {
-		$deps = [];
-
-		// Detect parent via {% extends "file@layer" %}
-		if (\preg_match('/{%\s*extends\s+["\'](.+?)["\']\s*%}/', $code, $m)) {
-			[$parentRel, $parentLayer] = $this->splitRef($m[1]);
-			$key = $parentRel . '@' . $parentLayer;
-			if (!isset($visited[$key])) {
-				$visited[$key] = true;
-				$deps[] = [$parentRel, $parentLayer];
-				[$parentCode, ] = $this->loadSource($parentRel, $parentLayer);
-				$parentCode = $this->removeTemplateComments($parentCode);
-				$deps = \array_merge(
-					$deps,
-					$this->collectDependencies($parentCode, $parentLayer, $visited)
-				);
-			}
-		}
-
-		// Detect includes via {% include "file@layer" %}
-		if (\preg_match_all('/{%\s*include\s+["\'](.+?)["\']\s*%}/i', $code, $matches)) {
-			foreach ($matches[1] as $incRef) {
-				[$incRel, $incLayer] = $this->splitRef($incRef);
-				$key = $incRel . '@' . $incLayer;
-				if (isset($visited[$key])) {
-					continue;
-				}
-				$visited[$key] = true;
-				$deps[] = [$incRel, $incLayer];
-				[$incCode, ] = $this->loadSource($incRel, $incLayer);
-				$incCode = $this->removeTemplateComments($incCode);
-				$deps = \array_merge(
-					$deps,
-					$this->collectDependencies($incCode, $incLayer, $visited)
-				);
-			}
-		}
-
-		return $deps;
-	}
-
-
-	/**
-	 * normalizeCfgMap: Convert a cfg node (expected to behave like an associative map)
-	 * into a plain PHP array<string,mixed>.
-	 *
-	 * Accepts:
-	 * - plain array
-	 * - CitOmni\Kernel\Cfg (or any object with toArray())
-	 * - null / scalar => returns []
+	 * @param  mixed  $node  Configuration array, Cfg-style wrapper or absent/unsupported value.
+	 * @return array  Normalized map, or an empty array when no map is available.
 	 */
 	private function normalizeCfgMap(mixed $node): array {
-		// Already an array? great.
 		if (\is_array($node)) {
 			return $node;
 		}
-
-		// Cfg node (or similar) with toArray():
 		if (\is_object($node) && \method_exists($node, 'toArray')) {
-			$out = $node->toArray();  // Cfg::toArray() returns its raw $data
+			$out = $node->toArray();
 			return \is_array($out) ? $out : [];
 		}
-
-		// Anything else (null, string, etc.) -> treat as empty map
 		return [];
 	}
 
