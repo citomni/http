@@ -50,9 +50,9 @@ final class Upload extends BaseService {
 	 * - finfo is opened once per service instance to reduce overhead.
 	 */
 	protected function init(): void {
-		$this->finfo = \class_exists(\finfo::class, false)
-			? (@\finfo_open(\FILEINFO_MIME_TYPE) ?: null)
-			: null;
+		if (\class_exists(\finfo::class, false)) {
+			$this->finfo = new \finfo(\FILEINFO_MIME_TYPE);
+		}
 	}
 
 	/**
@@ -256,8 +256,8 @@ final class Upload extends BaseService {
 			}
 			$maxMP = (int)($uploadCfg['maxMegapixel'] ?? 0);
 			if ($maxMP > 0) {
-				$mp = (int)\ceil(($w * $h) / 1_000_000);
-				if ($mp > $maxMP) {
+				$pixels = (float)$w * (float)$h;
+				if ($pixels > ($maxMP * 1_000_000.0)) {
 					$msg = $this->t('err_too_large_megapixel','Image exceeds megapixel limit.');
 					if ($orig !== '') { $msg .= ' (' . $orig . ')'; }
 					return [
@@ -269,8 +269,8 @@ final class Upload extends BaseService {
 					];
 				}
 			}
-			$ramCap   = (int)($uploadCfg['maxImageRamBytes'] ?? ($this->options['maxImageRamBytes'] ?? (128 * 1024 * 1024)));
-			$estimated = (int)($w * $h * 5);
+			$ramCap = (int)($uploadCfg['maxImageRamBytes'] ?? ($this->options['maxImageRamBytes'] ?? (128 * 1024 * 1024)));
+			$estimated = (float)$w * (float)$h * 5.0;
 			if ($ramCap > 0 && $estimated > $ramCap) {
 				$msg = $this->t('err_image_memory','Image is too large to process safely.');
 				if ($orig !== '') { $msg .= ' (' . $orig . ')'; }
@@ -329,7 +329,7 @@ final class Upload extends BaseService {
 					: $this->imageResizeCropCenter($src, $targetW, $targetH);
 				if ($dst) {
 					$fullOk = $this->imageSave($dst, $targetPath, $ext, $targetQuality);
-					\imagedestroy($dst);
+					unset($dst);
 				}
 			} else {
 				// No explicit fullsize (w,h) -> reencode if format differs/encoding set; else move file.
@@ -339,7 +339,7 @@ final class Upload extends BaseService {
 				} else {
 					// We still want single decode for thumbs, but moving the uploaded tmp is OK now.
 					// Make sure targetPath uniqueness was handled above.
-					\imagedestroy($src);
+					unset($src);
 					$src = false;
 					$fullOk = $this->moveUploadedFile($f['tmp_name'], $targetPath, $overwrite, false);
 					// Reload the written original if thumbnails are requested.
@@ -350,7 +350,7 @@ final class Upload extends BaseService {
 			}
 
 			if (!$fullOk) {
-				if ($src) { \imagedestroy($src); }
+				unset($src);
 				$msg = $this->t('err_write_failed','Failed to write file.');
 				if ($orig !== '') { $msg .= ' (' . $orig . ')'; }
 				return [
@@ -406,12 +406,12 @@ final class Upload extends BaseService {
 						? $this->imageResizeStretch($src, $tw, $th)
 						: $this->imageResizeCropCenter($src, $tw, $th);
 					if (!$ti || !$this->imageSave($ti, $thumbAbs, $tfmt, $tqual)) {
-						if ($ti) { \imagedestroy($ti); }
+						unset($ti);
 						$thumbCols['_errors'][] = $this->t('err_thumb_write','Failed to write thumbnail.');
 						$writtenThumbAbs[] = null;
 						continue;
 					}
-					\imagedestroy($ti);
+					unset($ti);
 					$this->tryChmodPublic($thumbAbs);
 					$writtenThumbAbs[] = $thumbAbs;
 
@@ -431,12 +431,12 @@ final class Upload extends BaseService {
 				foreach ((array)($thumbCols['_paths'] ?? []) as $pub) {
 					$this->deleteIfFile($this->fromPublicPath((string)$pub));
 				}
-				if ($src) { \imagedestroy($src); }
+				unset($src);
 				$errs = (array)$thumbCols['_errors'];
 				if ($orig !== '') { $errs = \array_map(fn($e) => (string)$e . ' (' . $orig . ')', $errs); }
 				return ['status'=>false,'path'=>null,'thumbs'=>[],'error'=>$errs,'deleted'=>[]];
 			}
-			if ($src) { \imagedestroy($src); }
+			unset($src);
 			unset($thumbCols['_errors'], $thumbCols['_paths']);
 
 			// Delete old files after successful write
@@ -623,15 +623,15 @@ final class Upload extends BaseService {
 				continue;
 			}
 			if ($maxMP > 0) {
-				$mp = (int)\ceil(($w * $h) / 1_000_000);
-				if ($mp > $maxMP) {
+				$pixels = (float)$w * (float)$h;
+				if ($pixels > ($maxMP * 1_000_000.0)) {
 					$msg = $this->t('err_too_large_megapixel', 'Image exceeds megapixel limit.');
 					if ($orig !== '') { $msg .= ' (' . $orig . ')'; }
 					$out['files'][] = ['ok' => false, 'error' => $msg];
 					continue;
 				}
 			}
-			$estimated = (int)($w * $h * 5);
+			$estimated = (float)$w * (float)$h * 5.0;
 			if ($ramCap > 0 && $estimated > $ramCap) {
 				$msg = $this->t('err_image_memory', 'Image is too large to process safely.');
 				if ($orig !== '') { $msg .= ' (' . $orig . ')'; }
@@ -686,14 +686,14 @@ final class Upload extends BaseService {
 					: $this->imageResizeCropCenter($src, $targetW, $targetH);
 				if ($dst) {
 					$fullOk = $this->imageSave($dst, $fullAbsPath, $ext, $quality);
-					\imagedestroy($dst);
+					unset($dst);
 				}
 			} else {
 				$fullOk = $this->imageSave($src, $fullAbsPath, $ext, $quality);
 			}
 
 			if (!$fullOk) {
-				if ($src) { \imagedestroy($src); }
+				unset($src);
 				$msg = $this->t('err_write_failed', 'Failed to write file.');
 				if ($orig !== '') { $msg .= ' (' . $orig . ')'; }
 				$out['files'][] = ['ok' => false, 'error' => $msg];
@@ -738,11 +738,11 @@ final class Upload extends BaseService {
 						? $this->imageResizeStretch($src, $tw, $th)
 						: $this->imageResizeCropCenter($src, $tw, $th);
 					if (!$ti || !$this->imageSave($ti, $thumbAbs, $tfmt, $tqual)) {
-						if ($ti) { \imagedestroy($ti); }
+						unset($ti);
 						$thumbCols['_errors'][] = $this->t('err_thumb_write', 'Failed to write thumbnail.');
 						continue;
 					}
-					\imagedestroy($ti);
+					unset($ti);
 					$this->tryChmodPublic($thumbAbs);
 					$writtenThumbAbs[] = $thumbAbs;
 
@@ -761,14 +761,14 @@ final class Upload extends BaseService {
 				foreach ((array)($thumbCols['_paths'] ?? []) as $pub) {
 					$this->deleteIfFile($this->fromPublicPath((string)$pub));
 				}
-				if ($src) { \imagedestroy($src); }
+				unset($src);
 				$msg = \implode(' ', (array)$thumbCols['_errors']);
 				if ($orig !== '') { $msg .= ' (' . $orig . ')'; }
 				$out['files'][] = ['ok' => false, 'error' => $msg];
 				continue;
 			}
 
-			if ($src) { \imagedestroy($src); }
+			unset($src);
 			unset($thumbCols['_errors'], $thumbCols['_paths']);
 
 			$accepted++;
@@ -928,12 +928,12 @@ final class Upload extends BaseService {
 			'Ç'=>'C','ç'=>'c','Ñ'=>'N','ñ'=>'n'
 		];
 		$s = \strtr($s, $map);
-		$s = \mb_strtolower($s);
+		$s = \strtolower($s);
 		$s = (string)\preg_replace('~[^a-z0-9]+~', '-', $s);
 		$s = (string)\preg_replace('~-+~', '-', $s);
 		$s = \trim($s, '-');
-		if ($max > 0 && \mb_strlen($s) > $max) {
-			$s = \mb_substr($s, 0, $max);
+		if ($max > 0 && \strlen($s) > $max) {
+			$s = \substr($s, 0, $max);
 			$s = \rtrim($s, '-');
 		}
 		return $s;
@@ -954,8 +954,12 @@ final class Upload extends BaseService {
 		if ($b === '') {
 			return '';
 		}
-		if (\mb_strlen($b) > 120) {
-			$b = \mb_substr($b, 0, 120) . '…';
+		if (\function_exists('mb_strlen')) {
+			if (\mb_strlen($b) > 120) {
+				$b = \mb_substr($b, 0, 120) . '…';
+			}
+		} elseif (\strlen($b) > 120) {
+			$b = \substr($b, 0, 120) . '…';
 		}
 		return $b;
 	}
@@ -991,26 +995,18 @@ final class Upload extends BaseService {
 
 		$suffix = '';
 		if ($addRand) {
-			$hexTs = \dechex(\time());
-			
-			try {
-				$rand4 = \substr(\bin2hex(\random_bytes(2)), 0, 4);
-			} catch (\Throwable) {
-				$rand4 = \substr(\bin2hex((string)\mt_rand()), 0, 4);
-			}
-			
-			$suffix = '-' . $hexTs . $rand4;
+			$suffix = '-' . \dechex(\time()) . \bin2hex(\random_bytes(2));
 		}
 		$out = $base . $suffix;
 
-		if ($maxLen > 0 && \mb_strlen($out) > $maxLen) {
+		if ($maxLen > 0 && \strlen($out) > $maxLen) {
 			if ($addRand && $suffix !== '') {
-				$allow = $maxLen - \mb_strlen($suffix);
+				$allow = $maxLen - \strlen($suffix);
 				if ($allow < 1) { $allow = 1; }
-				$baseTrimmed = \mb_substr($base, 0, $allow);
+				$baseTrimmed = \substr($base, 0, $allow);
 				$out = $baseTrimmed . $suffix;
 			} else {
-				$out = \mb_substr($out, 0, $maxLen);
+				$out = \substr($out, 0, $maxLen);
 			}
 		}
 		$out = (string)\preg_replace('~-+~', '-', $out);
@@ -1099,16 +1095,21 @@ final class Upload extends BaseService {
 	}
 
 	private function detectMime(string $tmpPath): string {
-		if ($this->finfo) {
-			$mime = @\finfo_file($this->finfo, $tmpPath);
+		if ($this->finfo !== null) {
+			$mime = @$this->finfo->file($tmpPath);
 			if (\is_string($mime) && $mime !== '') {
 				return $mime;
 			}
 		}
-		$f = @\finfo_open(\FILEINFO_MIME_TYPE);
-		$mime = $f ? (@\finfo_file($f, $tmpPath) ?: 'application/octet-stream') : 'application/octet-stream';
-		if ($f) { @\finfo_close($f); }
-		return (string)$mime;
+
+		if (\function_exists('mime_content_type')) {
+			$mime = @\mime_content_type($tmpPath);
+			if (\is_string($mime) && $mime !== '') {
+				return $mime;
+			}
+		}
+
+		return 'application/octet-stream';
 	}
 
 	private function isImageMime(string $mime): bool {
@@ -1182,7 +1183,7 @@ final class Upload extends BaseService {
 		$baseNoExt = (string)($pi['filename'] ?? 'file');
 		$ext = isset($pi['extension']) ? ('.' . $pi['extension']) : '';
 		do {
-			$suffix = '-' . \dechex(\time()) . \substr(\bin2hex(\random_bytes(2)), 0, 4);
+			$suffix = '-' . \dechex(\time()) . \bin2hex(\random_bytes(2));
 			$candidate = $dirAbs . DIRECTORY_SEPARATOR . $baseNoExt . $suffix . $ext;
 		} while (\is_file($candidate));
 		return $candidate;
@@ -1199,7 +1200,7 @@ final class Upload extends BaseService {
 			$pi = \pathinfo($targetPath);
 			$base = (string)($pi['dirname'] . DIRECTORY_SEPARATOR . ($pi['filename'] ?? 'file'));
 			$ext  = isset($pi['extension']) ? ('.' . $pi['extension']) : '';
-			$targetPath = $base . '-' . \dechex(\time()) . \substr(\bin2hex(\random_bytes(2)), 0, 4) . $ext;
+			$targetPath = $base . '-' . \dechex(\time()) . \bin2hex(\random_bytes(2)) . $ext;
 		}
 		if (\function_exists('is_uploaded_file') && @\is_uploaded_file($tmpPath)) {
 			return @\move_uploaded_file($tmpPath, $targetPath);
@@ -1362,7 +1363,7 @@ final class Upload extends BaseService {
 
 			$dstAbs = $dirAbs . DIRECTORY_SEPARATOR . $baseNoExt . $suffix . '.' . $fmt;
 			$ok = $this->imageSave($thumb, $dstAbs, $fmt, $q);
-			\imagedestroy($thumb);
+			unset($thumb);
 
 			if (!$ok) {
 				$out['_errors'][] = $this->t('err_thumb_write', 'Failed to write thumbnail.');
@@ -1381,7 +1382,7 @@ final class Upload extends BaseService {
 			}
 		}
 
-		\imagedestroy($srcImg);
+		unset($srcImg);
 		return $out;
 	}
 
@@ -1507,11 +1508,12 @@ final class Upload extends BaseService {
 	private function imageLoad(string $path): \GdImage|false {
 		$info = @\getimagesize($path);
 		if ($info === false) { return false; }
+
 		$mime = (string)($info['mime'] ?? '');
 		return match ($mime) {
-			'image/webp' => @\imagecreatefromwebp($path),
-			'image/png'  => @\imagecreatefrompng($path),
-			'image/jpeg' => @\imagecreatefromjpeg($path),
+			'image/webp' => \function_exists('imagecreatefromwebp') ? @\imagecreatefromwebp($path) : false,
+			'image/png' => \function_exists('imagecreatefrompng') ? @\imagecreatefrompng($path) : false,
+			'image/jpeg' => \function_exists('imagecreatefromjpeg') ? @\imagecreatefromjpeg($path) : false,
 			default => false
 		};
 	}
@@ -1524,7 +1526,6 @@ final class Upload extends BaseService {
 		$sw = \imagesx($src);
 		$sh = \imagesy($src);
 		if (!\imagecopyresampled($dst, $src, 0, 0, 0, 0, $w, $h, $sw, $sh)) {
-			\imagedestroy($dst);
 			return false;
 		}
 		return $dst;
@@ -1558,21 +1559,18 @@ final class Upload extends BaseService {
 		\imagesavealpha($dst, true);
 
 		if (!\imagecopyresampled($dst, $src, 0, 0, $srcX, $srcY, $w, $h, $newW, $newH)) {
-			\imagedestroy($dst);
 			return false;
 		}
 		return $dst;
 	}
 
 	private function imageSave(\GdImage $img, string $path, string $fmt, int $q): bool {
+		$q = \max(0, \min(100, $q));
+
 		return match ($fmt) {
-			'webp' => @\imagewebp($img, $path, \max(0, \min(100, $q))),
-			'png'  => (function() use ($img, $path, $q): bool {
-				$lvl = (int)\round((100 - \max(0, \min(100, $q))) / 11.111); // 0..9
-				$lvl = \max(0, \min(9, $lvl));
-				return @\imagepng($img, $path, $lvl);
-			})(),
-			'jpg'  => @\imagejpeg($img, $path, \max(0, \min(100, $q))),
+			'webp' => \function_exists('imagewebp') && @\imagewebp($img, $path, $q),
+			'png' => \function_exists('imagepng') && @\imagepng($img, $path, \max(0, \min(9, (int)\round((100 - $q) / 11.111)))),
+			'jpg' => \function_exists('imagejpeg') && @\imagejpeg($img, $path, $q),
 			default => false
 		};
 	}
@@ -1585,7 +1583,7 @@ final class Upload extends BaseService {
 			$this->orientImageFromExif($img, $tmpPath);
 		}
 		$ok = $this->imageSave($img, $targetPath, $fmt, $q);
-		\imagedestroy($img);
+		unset($img);
 		return $ok;
 	}
 
@@ -1602,7 +1600,6 @@ final class Upload extends BaseService {
 			return false;
 		}
 
-		\imagedestroy($img);
 		$img = $oriented;
 		return true;
 	}
