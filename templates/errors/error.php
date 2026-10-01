@@ -541,7 +541,7 @@ $quaternary_label_txt	= (string) $txt['page_txt']['quaternary_label'] ?? 'Report
 				'trace'=> $issueTrace,
 
 				// Optional metadata
-				'vers'  => '',        // "citomni/http x.y.z; kernel x.y.z; PHP 8.2.x"
+				'vers'  => '',        // "citomni/http x.y.z; kernel x.y.z; PHP 8.5.x"
 				'notes' => '',        // extra context
 			];
 

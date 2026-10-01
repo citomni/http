@@ -18,7 +18,7 @@ declare(strict_types=1);
  * SystemController full-route test (HTTP integration via cURL).
  *
  * Requirements:
- * - PHP >= 8.2 with cURL enabled.
+ * - PHP >= 8.5+ with cURL enabled.
  * - Your app must be running and exposing the SystemController routes.
  *
  * What it does:
