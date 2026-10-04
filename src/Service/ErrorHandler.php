@@ -23,7 +23,7 @@ use CitOmni\Kernel\Service\BaseService;
  * Responsibilities:
  * - Install process-wide handlers and guarantee "no blank page".
  *   1) Registers exception, error, and shutdown handlers.
- *   2) Always logs; always renders for fatals/exceptions/router; optional render for non-fatals.
+ *   2) Always logs; always renders for fatals/exceptions/HTTP errors; optional render for non-fatals.
  *   3) Terminates deterministically after rendering (exit(0)).
  * - Emit safe, negotiated responses (HTML/JSON) with correlation.
  *   1) Adds X-Request-Id (uses inbound header if present, otherwise generates).
@@ -35,12 +35,12 @@ use CitOmni\Kernel\Service\BaseService;
  *   3) Prunes rotated siblings according to max_files.
  * - Respect environment and developer ergonomics.
  *   1) Hides client details by default; exposes traces to clients only in dev and when enabled.
- *   2) Redacts sensitive keys in router context (authorization, tokens, etc.).
+ *   2) Redacts sensitive keys in HTTP context (authorization, tokens, etc.).
  *   3) Never throws from handlers; failures degrade to error_log.
  *
  * Collaborators:
  * - App container (read-only): Reads $this->app->cfg->error_handler during init.
- * - Router: Calls httpError(404|405|5xx, array $context) for HTTP-layer errors.
+ * - Kernel/Router/HTTP adapters: Call httpError(int $status, array $context) for terminal HTTP errors.
  * - BaseService: Construction/options plumbing; no other services are resolved here.
  *
  * Configuration keys:
@@ -391,22 +391,22 @@ final class ErrorHandler extends BaseService {
  */
 
 	/**
-	 * Emit and log an HTTP-layer error (404/405/5xx) on behalf of the Router.
+	 * Emit and log a terminal HTTP-layer error on behalf of Kernel, Router or HTTP adapters.
 	 *
 	 * Behavior:
 	 * - Generates a new error id and writes a structured JSONL record
 	 * - Redacts obvious secrets in the provided $context (tokens, cookies, etc.)
-	 * - Picks a log file based on status class (404, 405, 5xx, other)
+	 * - Logs context source 'request' to http_request.jsonl; otherwise preserves router status logs
 	 * - Always renders a client response (HTML or JSON via content negotiation)
 	 * - Re-entrancy-safe: A concurrent handler run is ignored
 	 *
 	 * Notes:
-	 * - Intended for Router-originated errors only; application exceptions go through handleException().
+	 * - Intended for terminal HTTP outcomes; application exceptions go through handleException().
 	 * - Logging is fail-soft; errors during logging are routed to PHP's error_log.
 	 * - The response includes X-Request-Id and a stable error_id for support correlation.
 	 *
 	 * Typical usage:
-	 *   Call when the Router decides on a terminal HTTP outcome and no controller will run.
+	 *   Call when an HTTP adapter decides on a terminal HTTP outcome and execution must stop.
 	 *
 	 * Examples:
 	 *
@@ -430,7 +430,7 @@ final class ErrorHandler extends BaseService {
 	 *   ]);
 	 *
 	 * @param int   $status  HTTP status (404, 405, 500, ...).
-	 * @param array $context Optional, non-sensitive metadata to log and (in dev) echo back.
+	 * @param array $context Optional metadata; source 'request' selects request-level logging.
 	 * @return void
 	 */
 	public function httpError(int $status, array $context = []): void {
@@ -447,13 +447,14 @@ final class ErrorHandler extends BaseService {
 			// Best-effort scrub for sensitive content (so logs do not become a secrets vault)
 			$context = $this->scrubContext($context);
 
-			// Base record + router context for the log.
+			// Base record + HTTP context for the log.
 			$rec = $this->baseRecord('http_error', $errorId, $status) + [
 				'context' => $context,
 			];
 
 			// Route to a dedicated file per family to keep triage fast
 			$logFile = match (true) {
+				($context['source'] ?? null) === 'request' => $this->logDir . '/http_request.jsonl',
 				$status === 404 => $this->logDir . '/http_router_404.jsonl',
 				$status === 405 => $this->logDir . '/http_router_405.jsonl',
 				$status >= 500  => $this->logDir . '/http_router_5xx.jsonl',
@@ -461,7 +462,7 @@ final class ErrorHandler extends BaseService {
 			};
 			$this->writeJsonl($logFile, $rec);
 
-			// Router errors must always produce a response: No blank pages.
+			// Terminal HTTP errors must always produce a response: No blank pages.
 			$this->renderResponse($status, $errorId, [
 				'title'   => (string)($context['title'] ?? "{$status} Error"),
 				'message' => (string)($context['message'] ?? $this->statusText($status)),
@@ -1705,6 +1706,7 @@ HTML;
 			404 => 'Not Found',
 			405 => 'Method Not Allowed',
 			409 => 'Conflict',
+			413 => 'Content Too Large',
 			429 => 'Too Many Requests',
 			500 => 'Internal Server Error',
 			502 => 'Bad Gateway',

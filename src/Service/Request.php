@@ -35,6 +35,7 @@ use CitOmni\Kernel\Service\BaseService;
  *   4) Case-insensitive header reads and header enumeration.
  *   5) Client IP resolution with optional trusted-proxy awareness.
  *   6) URL parts and predicates: scheme, host, port, path, query string, full URL, base URL, isHttps(), isAjax().
+ *   7) Declared body length and PHP's POST size limit (metadata only; never reads the body).
  *
  * Collaborators:
  * - $this->app->cfg->http->trust_proxy       (bool) Toggle proxy-aware scheme/IP detection.
@@ -221,6 +222,77 @@ class Request extends BaseService {
 	public function method(): string {
 		$m = $_SERVER['REQUEST_METHOD'] ?? 'GET';
 		return \strtoupper((string)$m);
+	}
+
+
+	/**
+	 * Return the SAPI-declared request body length in bytes.
+	 *
+	 * Notes:
+	 * - Reads CONTENT_LENGTH only; never reads or buffers php://input.
+	 * - Missing, malformed, negative or unrepresentable lengths return null.
+	 * - A declared length of zero is valid; leading zeroes are accepted.
+	 *
+	 * @return int|null Non-negative byte count, or null when unavailable/invalid.
+	 */
+	public function contentLength(): ?int {
+		$value = $_SERVER['CONTENT_LENGTH'] ?? null;
+		if (\is_int($value)) {
+			return $value >= 0 ? $value : null;
+		}
+		if (!\is_string($value) || $value === '' || \strspn($value, '0123456789') !== \strlen($value)) {
+			return null;
+		}
+
+		// Avoid silently overflowing the platform's integer range.
+		$digits = \ltrim($value, '0');
+		$max = (string)\PHP_INT_MAX;
+		$length = \strlen($digits);
+		$maxLength = \strlen($max);
+		if ($length > $maxLength || ($length === $maxLength && \strcmp($digits, $max) > 0)) {
+			return null;
+		}
+
+		return (int)$value;
+	}
+
+
+	/**
+	 * Return PHP's configured post_max_size in bytes using PHP's own INI parser.
+	 *
+	 * Notes:
+	 * - Non-positive values disable this size limit in PHP 8.5.
+	 * - Suppresses duplicate parser diagnostics: PHP already interpreted the INI
+	 *   value at startup, including legacy fallback behavior for invalid syntax.
+	 *
+	 * @return int Parsed byte limit; values <= 0 mean no active limit.
+	 */
+	public function postMaxSize(): int {
+		return @\ini_parse_quantity((string)\ini_get('post_max_size'));
+	}
+
+
+	/**
+	 * Determine whether this POST body's declared length exceeds PHP's active limit.
+	 *
+	 * Behavior:
+	 * - Applies only to POST, independent of Content-Type and parsed superglobals.
+	 * - Requires a valid CONTENT_LENGTH and a positive post_max_size.
+	 * - Equal-to-limit bodies are accepted; missing lengths are not guessed.
+	 *
+	 * @return bool True only when the declared POST body exceeds the active limit.
+	 */
+	public function exceedsPostMaxSize(): bool {
+		if ($this->method() !== 'POST') {
+			return false;
+		}
+		$contentLength = $this->contentLength();
+		if ($contentLength === null || $contentLength === 0) {
+			return false;
+		}
+
+		$limit = $this->postMaxSize();
+		return $limit > 0 && $contentLength > $limit;
 	}
 
 

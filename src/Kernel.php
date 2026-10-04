@@ -40,9 +40,10 @@ use CitOmni\Kernel\Runtime;
  * - Dispatch the HTTP request lifecycle.
  *   1) Start a single, top-level output buffer as early as possible to prevent partial output. This allows
  *      the ErrorHandler to fully replace the response on failures (status line + headers + body).
- *   2) Enforce maintenance via $app->maintenance->guard() (flag-first, deterministic behavior).
- *   3) Route and dispatch via $app->router->run() (404/405/5xx are delegated to ErrorHandler::httpError()).
- *   4) Optionally emit a DEV-friendly performance footer when ?_perf is present.
+ *   2) Reject POST bodies exceeding PHP's post_max_size with HTTP 413 before dispatch.
+ *   3) Enforce maintenance via $app->maintenance->guard() (flag-first, deterministic behavior).
+ *   4) Route and dispatch via $app->router->run() (404/405/5xx are delegated to ErrorHandler::httpError()).
+ *   5) Optionally emit a DEV-friendly performance footer when ?_perf is present.
  *
  * Request lifecycle (order of operations):
  *   - Output buffer start
@@ -50,6 +51,7 @@ use CitOmni\Kernel\Runtime;
  *       resolve paths -> instantiate App -> ErrorHandler install
  *       -> Runtime::configure() -> intl requirement assertion
  *       -> public root URL -> trusted proxies
+ *   - POST size guard (413)
  *   - maintenance guard
  *   - router run
  *   - optional perf footer
@@ -64,7 +66,7 @@ use CitOmni\Kernel\Runtime;
  * - No try/catch in Kernel. The ErrorHandler service is installed early and is responsible for:
  *     - Uncaught exceptions,
  *     - Shutdown fatals,
- *     - Router HTTP errors (404/405/5xx),
+ *     - Request/router HTTP errors (413/404/405/5xx),
  *     ensuring a complete client response (HTML or JSON) and structured logs (JSONL).
  * - Output buffering:
  *     - Kernel starts one top-level output buffer before booting the App. This prevents accidental
@@ -146,7 +148,7 @@ final class Kernel {
 	
 
 	/**
-	 * Run the HTTP application: boot -> maintenance guard -> router -> optional perf footer.
+	 * Run the HTTP application: boot -> POST size guard -> maintenance -> router -> optional perf footer.
 	 *
 	 * Notes:
 	 * - Maintenance is enforced via $app->maintenance->guard() with no arguments to keep
@@ -170,6 +172,19 @@ final class Kernel {
 		// boot() performs HTTP-mode bootstrap, shared runtime configuration,
 		// and HTTP-specific early wiring before maintenance/router dispatch.
 		$app = self::boot($entryPath, $opts);
+
+		// PHP may discard both POST fields and uploads when the whole body is too large.
+		// Reject before maintenance/router/controller work can misreport a missing CSRF token.
+		if ($app->request->exceedsPostMaxSize()) {
+			$app->errorHandler->httpError(413, [
+				'source' => 'request',
+				'reason' => 'post_max_size_exceeded',
+				'title' => 'Content Too Large',
+				'message' => 'The request body exceeds the maximum allowed size.',
+				'content_length' => $app->request->contentLength(),
+				'post_max_size' => $app->request->postMaxSize(),
+			]);
+		}
 
 		// Deliberately call guard() with no arguments.
 		// Rationale: The maintenance policy (enabled, allowlist, retry_after) is defined by the flag file

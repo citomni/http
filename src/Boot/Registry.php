@@ -161,7 +161,7 @@ final class Registry {
 		 *   - Always renders for:
 		 *       * Uncaught exceptions,
 		 *       * Shutdown fatals (E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR, E_USER_ERROR),
-		 *       * Router HTTP errors (404/405/5xx via httpError(...)).
+		 *       * Terminal request/router HTTP errors (413/404/405/5xx via httpError(...)).
 		 *     These are NOT configurable (to prevent "blank pages").
 		 *
 		 * Rendering of non-fatal PHP errors (warnings/notices/etc.) is optional and generally
@@ -233,10 +233,11 @@ final class Registry {
 				 * Which non-fatal PHP errors (bitmask) should be **logged**?
 				 * - Baseline: allow all active non-fatal PHP errors through the log mask (E_ALL).
 				 * - The active PHP error_reporting() mask is honored first.
-				 * - Exceptions, shutdown fatals and Router HTTP errors are logged independently
+				 * - Exceptions, shutdown fatals and terminal HTTP errors are logged independently
 				 *   of this mask.
 				 * - Router errors use separate files:
 				 *   http_router_404.jsonl, http_router_405.jsonl, http_router_5xx.jsonl
+				 * - HTTP errors with context source 'request' use http_request.jsonl.
 				 */
 				'trigger'   => E_ALL,
 
