@@ -332,24 +332,6 @@ class Request extends BaseService {
  *   Safe access to $_FILES and (lazy) JSON body parsing.
  */
 
-	/**
-	 * Uploaded file wrapper (or null).
-	 *
-	 * @param string $key
-	 * @return \CitOmni\Http\Service\UploadedFile|null
-	 */
-	/*
-	public function file(string $key): ?\CitOmni\Http\Service\UploadedFile {
-		return $this->app->files->get($key);
-	}
-	*/
-
-	/** All uploaded files as value objects. */
-	/*
-	public function files(): array {
-		return $this->app->files->all();
-	}
-	*/
 
 	/**
 	 * Parse the request body as JSON (associative array) with caching.
