@@ -453,21 +453,30 @@ final class SystemController extends BaseController {
 
 
 	/**
-	 * Reset OPcache and remove CitOmni cache files (protected by WebhooksAuth).
+	 * Reset OPcache and remove the HTTP cache files (protected by WebhooksAuth).
 	 *
 	 * Behavior:
 	 * - Verifies HMAC via WebhooksAuth; unauthorized returns 404.
-	 * - OPcache: try opcache_reset(); also invalidate known cache files if any.
-	 * - Reports whether invalidation/reset functions were available and whether each call succeeded.
-	 * - Files: remove var/cache/{cfg.http.php,routes.http.php,services.http.php} if they exist.
-	 *          (Legacy layouts may not have routes.http.php.)
-	 * - Accepts optional JSON body with absolute file paths to invalidate:
+	 * - Files: removes this App's HTTP cache files through App::clearCache(), which owns
+	 *   the file names and invalidates each file in OPcache before unlinking it.
+	 *   Missing files are ignored.
+	 * - Accepts an optional JSON body with absolute file paths to invalidate in OPcache.
+	 *   These files are only invalidated, never removed:
 	 *   Body:
-	 *     (optional) JSON { "paths": ["/abs/extra/file1.php", ...] } to invalidate files.
+	 *     (optional) JSON { "paths": ["/abs/extra/file1.php", ...] }
+	 * - OPcache: calls opcache_reset() last and reports availability and the result.
 	 *
 	 * Notes:
-	 * - Only operates on known cache files by default; extra paths must be absolute.
-	 * - Idempotent: Missing files are ignored; failures are reported in "failed".
+	 * - Fail-fast: a cache file that exists but cannot be removed throws from
+	 *   App::clearCache() and reaches the global error handler; opcache_reset() is not
+	 *   called in that case.
+	 * - "ok" is always true and "failed" always empty in a response; both keys are kept
+	 *   for compatibility. "invalidated" and "opcache.invalidation_failed" list extra
+	 *   paths only.
+	 * - Extra paths must be absolute and must exist; other entries are skipped.
+	 * - Runs in the web server's PHP process, so the invalidation and the reset reach
+	 *   the web server's OPcache, unlike cache:clear from the CLI.
+	 * - Idempotent: a repeated call returns an empty "removed" list.
 	 *
 	 * Typical usage:
 	 *   Triggered post-deploy when OPcache timestamps are disabled.
@@ -482,6 +491,7 @@ final class SystemController extends BaseController {
 	 *
 	 * Failure:
 	 * - HMAC guard failure -> 404 via ErrorHandler (endpoint remains undisclosed).
+	 * - Cache file that cannot be removed -> \RuntimeException via ErrorHandler.
 	 *
 	 * @return void
 	 */
@@ -489,60 +499,42 @@ final class SystemController extends BaseController {
 		$this->app->response->noCache();
 		$raw = $this->app->webhooksAuth->requireOrAbort(self::PROTECTED_FAIL_STATUS);
 
-		$removed = [];
-		$failed = [];
+		// -- 1. Remove the HTTP cache files (the kernel owns the paths) --------
+		$removed = \array_values(\array_filter($this->app->clearCache()));
+
+		// -- 2. Invalidate optional extra files from the JSON body -------------
 		$invalidated = [];
 		$invalidationFailed = [];
-
-		// Known cache file candidates (HTTP mode).
-		$candidates = [
-			\CITOMNI_APP_PATH . '/var/cache/cfg.http.php',
-			\CITOMNI_APP_PATH . '/var/cache/routes.http.php',
-			\CITOMNI_APP_PATH . '/var/cache/services.http.php',
-		];
-
-		// Optional extra files from JSON body (parsed from captured $raw)
-		$body = \json_decode($raw, true);
-		$body = \is_array($body) ? $body : [];
-		if (!empty($body['paths']) && \is_array($body['paths'])) {
-			foreach ($body['paths'] as $p) {
-				$p = (string)$p;
-				
-				// Security: only allow absolute paths to avoid cwd tricks
-				if ($p !== '' && $p[0] === \DIRECTORY_SEPARATOR) {
-					$candidates[] = $p;
-				}
-			}
-		}
-
-		// Invalidate OPcache for candidates (if enabled) before deletion
 		$canInvalidate = \function_exists('opcache_invalidate');
 
-		foreach ($candidates as $path) {
-			if (\is_file($path)) {
-				if ($canInvalidate) {
-					if (@\opcache_invalidate($path, true)) {
-						$invalidated[] = $path;
-					} else {
-						$invalidationFailed[] = $path;
-					}
+		$body = \json_decode($raw, true);
+		$body = \is_array($body) ? $body : [];
+		if ($canInvalidate && !empty($body['paths']) && \is_array($body['paths'])) {
+			foreach ($body['paths'] as $p) {
+				$p = (string)$p;
+
+				// Security: only allow absolute paths to avoid cwd tricks
+				if ($p === '' || $p[0] !== \DIRECTORY_SEPARATOR || !\is_file($p)) {
+					continue;
 				}
-				if (@\unlink($path)) {
-					$removed[] = $path;
+
+				if (@\opcache_invalidate($p, true)) {
+					$invalidated[] = $p;
 				} else {
-					$failed[] = $path;
+					$invalidationFailed[] = $p;
 				}
 			}
 		}
 
+		// -- 3. Reset the web server's OPcache ---------------------------------
 		$canReset = \function_exists('opcache_reset');
 		$resetSucceeded = $canReset ? @\opcache_reset() : null;
 
 		$this->app->response->jsonStatus([
-			'ok'          => $failed === [],
+			'ok'          => true,
 			'removed'     => $removed,
 			'invalidated' => $invalidated,
-			'failed'      => $failed,
+			'failed'      => [],
 			'opcache'     => [
 				'invalidate_available' => $canInvalidate,
 				'invalidation_failed' => $invalidationFailed,
