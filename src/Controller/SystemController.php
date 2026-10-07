@@ -23,7 +23,7 @@ use CitOmni\Kernel\Support\AppInfo;
  *
  * Responsibilities:
  * - Expose tiny, deterministic endpoints for admin tasks, uptime, and smoke tests.
- * - Offer protected maintenance/cache controls via HMAC-based WebhooksAuth.
+ * - Offer protected maintenance/cache controls and diagnostics via HMAC-based WebhooksAuth.
  * - Expose HTTP application-information endpoints backed by Kernel Support\AppInfo.
  *
  * Collaborators:
@@ -581,6 +581,45 @@ final class SystemController extends BaseController {
 		$this->app->response->jsonStatus([
 			'written' => \count(\array_filter($result)),
 			'status'  => 'ok',
+		], 200);
+	}
+
+
+	/**
+	 * Return the effective upload limits of the HTTP context (protected by WebhooksAuth).
+	 *
+	 * Behavior:
+	 * - Verifies HMAC; unauthorized returns 404.
+	 * - Emits upload_max_filesize and post_max_size as the raw INI values PHP reports,
+	 *   and max_file_uploads as an integer.
+	 *
+	 * Notes:
+	 * - Values belong to the web server's PHP process serving this request, including FPM
+	 *   pool settings, PHP_VALUE, and per-directory overrides (.user.ini, .htaccess).
+	 *   The CLI SAPI can report different values.
+	 * - No filesystem paths, secrets, or credentials are returned.
+	 *
+	 * Typical usage:
+	 *   Verify a remote host's upload limits after provisioning or a PHP configuration change.
+	 *
+	 * Examples:
+	 *
+	 *   // Happy path
+	 *   GET /_system/upload-limits.json  (HMAC ok) -> { "upload_max_filesize":"64M", "post_max_size":"72M", "max_file_uploads":20 }
+	 *
+	 * Failure:
+	 * - HMAC guard failure -> 404 via ErrorHandler (endpoint remains undisclosed).
+	 *
+	 * @return void
+	 */
+	public function uploadLimitsJson(): void {
+		$this->app->response->noCache();
+		$this->app->webhooksAuth->requireOrAbort(self::PROTECTED_FAIL_STATUS);
+
+		$this->app->response->jsonStatus([
+			'upload_max_filesize' => (string)\ini_get('upload_max_filesize'),
+			'post_max_size'       => (string)\ini_get('post_max_size'),
+			'max_file_uploads'    => (int)\ini_get('max_file_uploads'),
 		], 200);
 	}
 

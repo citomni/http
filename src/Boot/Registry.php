@@ -940,6 +940,11 @@ final class Registry {
 			'action' => 'warmupCache',
 			'methods' => ['POST'],
 		],
+		'/_system/upload-limits.json' => [
+			'controller' => \CitOmni\Http\Controller\SystemController::class,
+			'action' => 'uploadLimitsJson',
+			'methods' => ['GET'],
+		],
 		'/_system/maintenance' => [
 			'controller' => \CitOmni\Http\Controller\SystemController::class,
 			'action' => 'maintenance',

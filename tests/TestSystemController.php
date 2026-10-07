@@ -23,7 +23,7 @@ declare(strict_types=1);
  *
  * What it does:
  * - Tests all public endpoints (ping, health, version, time, client-ip, request-echo, trusted-proxies).
- * - Tests all protected endpoints with valid HMAC (maintenance snapshot/enable/disable, warmup-cache, reset-cache).
+ * - Tests all protected endpoints with valid HMAC (upload-limits, maintenance snapshot/enable/disable, warmup-cache, reset-cache).
  * - Calculates signature exactly as your WebhooksAuth:
  *     Simple: "<ts>.<nonce>.<rawBody>"
  *     Context-bound: ts\nnonce\nMETHOD\nPATH\nQUERY\nsha256(body)
@@ -57,6 +57,7 @@ final class TestSystemController {
 		'trusted_proxies'    => '_system/trusted-proxies',
 		'reset_cache'        => '_system/reset-cache',
 		'warmup_cache'       => '_system/warmup-cache',
+		'upload_limits'      => '_system/upload-limits.json',
 		'maintenance'        => '_system/maintenance',
 		'maintenance_enable' => '_system/maintenance/enable',
 		'maintenance_disable'=> '_system/maintenance/disable',
@@ -82,6 +83,7 @@ final class TestSystemController {
 		$this->testTrustedProxies();
 
 		// Protected endpoints
+		$this->testUploadLimits();          // GET (protected)
 		$this->testMaintenanceSnapshot();   // GET (protected)
 		$this->testMaintenanceEnable();     // POST (protected)
 		$this->testMaintenanceSnapshot();   // verify enable took effect
@@ -164,6 +166,18 @@ final class TestSystemController {
 	// -----------------------------
 	// Tests (protected)
 	// -----------------------------
+
+	private function testUploadLimits(): void {
+		// Unsigned requests must not reveal the endpoint.
+		$resp = $this->http('GET', self::ROUTES['upload_limits']);
+		$this->assertStatus('upload-limits (unsigned -> 404)', $resp, 404);
+
+		$resp = $this->httpSigned('GET', self::ROUTES['upload_limits'], '', []);
+		$this->assertStatus('upload-limits', $resp, 200);
+		$j = $this->decodeJson($resp['body']);
+		$this->assertHasKeys('upload-limits json', $j, ['upload_max_filesize','post_max_size','max_file_uploads']);
+		$this->showResponse('upload-limits', $resp);
+	}
 
 	private function testMaintenanceSnapshot(): void {
 		// The controller method is GET-like, but protected; we send GET with HMAC headers and empty body.
