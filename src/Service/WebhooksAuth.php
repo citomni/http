@@ -568,7 +568,8 @@ final class WebhooksAuth extends BaseService {
 	 *
 	 * Supports exact IPv4/IPv6 strings and CIDR notation for both families.
 	 * Mixed-family comparisons (IPv4 against IPv6 CIDR or vice versa) are
-	 * always rejected.
+	 * always rejected. An entry whose mask is not a decimal number
+	 * ("10.0.0.0/", "10.0.0.0/x") matches nothing.
 	 */
 	private function ipAllowed(string $ip): bool {
 		$ipBin = @\inet_pton($ip);
@@ -586,9 +587,13 @@ final class WebhooksAuth extends BaseService {
 				continue;
 			}
 
-			$net  = \substr($entry, 0, $slash);
-			$bits = (int)\substr($entry, $slash + 1);
-			if ($this->ipMatchesCidr($ipBin, $net, $bits)) {
+			// The mask must be a decimal bit count. (int) would read "" or "x" as 0,
+			// and a /0 mask matches every address.
+			$bits = \trim(\substr($entry, $slash + 1));
+			if (!\ctype_digit($bits)) {
+				continue;
+			}
+			if ($this->ipMatchesCidr($ipBin, \substr($entry, 0, $slash), (int)$bits)) {
 				return true;
 			}
 		}

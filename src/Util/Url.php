@@ -41,6 +41,10 @@ final class Url {
 	 * with "//" or "/\" are rejected because some clients interpret them
 	 * as protocol-relative or slash-equivalent external targets.
 	 *
+	 * Strings containing control characters (U+0000 to U+001F, U+007F) are
+	 * rejected too. Browsers remove tab and newline characters from a URL
+	 * before parsing it, so "/\t/evil.com" would be read as "//evil.com".
+	 *
 	 * This method is intended for low-level locality checks such as
 	 * guarding user-supplied redirect targets against open-redirect abuse.
 	 *
@@ -61,7 +65,8 @@ final class Url {
 			return false;
 		}
 
-		return true;
+		// Reject control characters; browsers drop tab and newline before parsing.
+		return \preg_match('/[\x00-\x1F\x7F]/', $path) !== 1;
 	}
 
 }

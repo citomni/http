@@ -20,7 +20,7 @@ Each case is one request to PHP's built-in web server with `server.php` as route
 ## Notes
 
 - `server.php` is the router, not a suite; `tests/run.php` only collects `run.php` and `database.php`.
-- The router collects PHP warnings and continues, as the production ErrorHandler does for non-fatal errors. A throwing handler would preempt the `false` return value from `session_regenerate_id()` that these cases are about. `run.php` itself throws on every warning.
+- The router collects PHP warnings and continues, as the production ErrorHandler does for non-fatal errors. A throwing handler would preempt the `false` return value from `session_regenerate_id()` that these cases are about. `run.php` itself throws on every diagnostic that is not silenced with `@`.
 
 ## Regression proof
 

@@ -57,6 +57,9 @@ use CitOmni\Kernel\Service\BaseService;
  * - trusted_origins config accepts full origins (scheme://host:port, recommended)
  *   or bare hostnames (legacy/convenience - matches any scheme/port for that host).
  *   Full origins are compared strictly; bare hostnames match the host portion only.
+ * - A request whose Origin header is a trusted origin also passes the fetch metadata
+ *   layer, which otherwise refuses "cross-site" (and "same-site" when allow_same_site
+ *   is off). The Origin/Referer layer and the token still apply.
  * - For PUT/PATCH/DELETE requests, the token must be submitted via the HTTP header
  *   (headerName). The form field fallback reads only $_POST, which PHP populates
  *   exclusively for POST requests. HTML forms natively support only GET/POST;
@@ -542,6 +545,12 @@ final class Csrf extends BaseService {
 	 * Browsers that do not send the header are silently skipped (null = pass).
 	 * This is intentional: the header is additive defense, not a hard gate.
 	 *
+	 * Behavior:
+	 * - same-origin and none pass; same-site passes when allow_same_site is on.
+	 * - Any other value passes only when the Origin header is a trusted origin.
+	 *   Browsers send "cross-site" for every request from another site, so this is
+	 *   what makes a trusted_origins entry for another site usable.
+	 *
 	 * @return ?CsrfFailureReason Null on pass, FetchMetadataRejected on fail.
 	 */
 	private function checkFetchMetadata(): ?CsrfFailureReason {
@@ -567,6 +576,11 @@ final class Csrf extends BaseService {
 		// same-site: configurable - safe for most setups, but some apps
 		// serving multiple subdomains may want to restrict this.
 		if ($site === 'same-site' && $this->fetchMetadataAllowSameSite) {
+			return null;
+		}
+
+		// Other sites pass only from a trusted origin; layers 2 and 3 still apply.
+		if ($this->requestOriginIsTrusted()) {
 			return null;
 		}
 
@@ -643,6 +657,9 @@ final class Csrf extends BaseService {
 	 * For PUT/PATCH/DELETE, the header is the only accepted transport - PHP only
 	 * populates $_POST for POST requests.
 	 *
+	 * A form field that is not a string (PHP parses "_csrf[]=x" into an array)
+	 * fails as TokenInvalid.
+	 *
 	 * Starts the session if not already active (required for token comparison).
 	 *
 	 * @return ?CsrfFailureReason Null on pass, specific reason on fail.
@@ -666,7 +683,10 @@ final class Csrf extends BaseService {
 			return CsrfFailureReason::TokenMissing;
 		}
 
-		$submitted = (string)$submitted;
+		// Form input is untrusted: "_csrf[]=x" arrives as an array, which is no token.
+		if (!\is_string($submitted)) {
+			return CsrfFailureReason::TokenInvalid;
+		}
 
 		// -- 2. Load and validate session token -----------------------------
 		// Read session token.
@@ -902,6 +922,21 @@ final class Csrf extends BaseService {
 			return true;
 		}
 
+		return $this->isTrustedOrigin($origin);
+	}
+
+
+	/**
+	 * Check if a normalized origin is configured in trusted_origins.
+	 *
+	 * Matching order:
+	 * 1) Exact match against trusted full origins (entries configured with "://").
+	 * 2) Host-only match against trusted bare hostnames (entries configured without "://").
+	 *
+	 * @param string $origin Normalized origin (from normalizeOrigin()).
+	 * @return bool True if the origin is a trusted origin.
+	 */
+	private function isTrustedOrigin(string $origin): bool {
 		// Exact match against configured full origins.
 		if (\in_array($origin, $this->trustedFullOrigins, true)) {
 			return true;
@@ -916,6 +951,27 @@ final class Csrf extends BaseService {
 		}
 
 		return false;
+	}
+
+
+	/**
+	 * Check if the request's Origin header names a trusted origin.
+	 *
+	 * @return bool False when no trusted origins are configured, or when Origin is
+	 *              absent, "null" or not an http(s) origin.
+	 */
+	private function requestOriginIsTrusted(): bool {
+		if ($this->trustedFullOrigins === [] && $this->trustedHosts === []) {
+			return false;
+		}
+
+		$origin = $this->app->request->header('Origin');
+		if ($origin === null || $origin === '' || \strtolower($origin) === 'null') {
+			return false;
+		}
+
+		$normalized = $this->normalizeOrigin($origin);
+		return $normalized !== null && $this->isTrustedOrigin($normalized);
 	}
 
 

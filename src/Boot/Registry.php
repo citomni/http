@@ -120,6 +120,8 @@ final class Registry {
 		 * - The current peer (REMOTE_ADDR) must match one of these entries for
 		 *   proxy headers to be considered.
 		 * - IMPORTANT: An empty list means "trust NO proxies". There is no "trust all" mode.
+		 * - An entry that is not a valid IP or CIDR (e.g., a missing or non-decimal mask)
+		 *   matches nothing.
 		 * - Examples: ['10.0.0.0/8', '192.168.0.0/16', '::1']
 		 *
 		 * Proxy headers considered (when trust_proxy=true AND REMOTE_ADDR is trusted):
@@ -127,8 +129,12 @@ final class Registry {
 		 *             X-Forwarded-Scheme, Front-End-Https, X-URL-Scheme, CF-Visitor
 		 * - Host:     X-Forwarded-Host (first), or Forwarded: host=... (first hop)
 		 * - Port:     X-Forwarded-Port (>0), or parsed from Forwarded host token
-		 * - Client IP: X-Forwarded-For (first public IP in the list); otherwise REMOTE_ADDR
-		 *   (Private/reserved addresses are filtered out.)
+		 * - Client IP: X-Forwarded-For, read from the right. Entries are skipped while they
+		 *   are trusted proxies; the first other entry is the client, and everything to its
+		 *   left (supplied by the client) is ignored. Without X-Forwarded-For: REMOTE_ADDR.
+		 *   A private/reserved result becomes "unknown".
+		 * - List every proxy in the chain (load balancer, CDN ranges). The first unlisted
+		 *   proxy is taken as the client.
 		 *
 		 * router_case_insensitive (bool)
 		 * - When true, Router:
@@ -357,7 +363,7 @@ final class Registry {
 				'origin_check'                 => true,                              // Enable Origin/Referer validation as an additional CSRF defense layer.
 				'referer_fallback_on_https'    => true,                              // Use Referer validation on HTTPS requests when the Origin header is missing.
 				'allow_missing_origin_on_http' => true,                              // Allow missing Origin header on plain HTTP requests (useful for local/dev setups).
-				'trusted_origins'              => [],                                // Additional trusted origins or hostnames allowed by Origin/Referer validation.
+				'trusted_origins'              => [],                                // Additional trusted origins or hostnames allowed by Origin/Referer validation; requests from them also pass fetch metadata.
 
 				'fetch_metadata' => [
 					'enabled'                   => true,                              // Enable Fetch Metadata validation via the Sec-Fetch-Site header.
@@ -749,7 +755,7 @@ final class Registry {
 			'ttl_clock_skew_tolerance' => 60,
 
 			// Optional allow-list of source IPs. Empty = no IP restriction.
-			// Supports exact IPv4/IPv6 and IPv4/IPv6 CIDR.
+			// Supports exact IPv4/IPv6 and IPv4/IPv6 CIDR. Malformed entries match nothing.
 			'allowed_ips' => [
 				// '203.0.113.10',
 				// '198.51.100.0/24',

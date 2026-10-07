@@ -290,7 +290,7 @@ return [
 
 #### Reverse proxy & base URL
 
-If you run behind Nginx/Apache/Cloudflare, configure **`http.trust_proxy`** and **`http.trusted_proxies`** correctly. Only include **trusted** proxy IPs/CIDR blocks.
+If you run behind Nginx/Apache/Cloudflare, configure **`http.trust_proxy`** and **`http.trusted_proxies`** correctly. Only include **trusted** proxy IPs/CIDR blocks, but include **every** proxy in the chain (load balancer, CDN ranges): the client IP is read from the right end of `X-Forwarded-For`, and the first address that is not a trusted proxy counts as the client.
 
 **Config:**
 

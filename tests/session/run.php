@@ -15,6 +15,10 @@ declare(strict_types=1);
 
 namespace CitOmni\Http\Tests\Session;
 
+use CitOmni\Http\Tests\Support\FixtureServer;
+use function CitOmni\Http\Tests\Support\removeTree;
+use function CitOmni\Http\Tests\Support\tempDir;
+
 /*
  * Isolated suite for CitOmni\Http\Service\Session: session id regeneration.
  *
@@ -31,9 +35,16 @@ if (\PHP_SAPI !== 'cli') {
 	throw new \RuntimeException('CLI only.');
 }
 
+// Fail fast on every diagnostic the production ErrorHandler would report; like
+// that handler, leave diagnostics silenced with @ to PHP.
 \set_error_handler(static function (int $errno, string $errstr, string $errfile, int $errline): bool {
+	if ((\error_reporting() & $errno) === 0) {
+		return false;
+	}
 	throw new \ErrorException($errstr, 0, $errno, $errfile, $errline);
 });
+
+require \dirname(__DIR__) . '/support/fixtures.php';
 
 const SESSION_NAME = 'CITSESSID';
 const REGENERATE_FAILED = \RuntimeException::class . ': session_regenerate_id() failed; refusing to continue on the previous session id.';
@@ -64,22 +75,15 @@ function same(mixed $expected, mixed $actual): void {
  *
  * @return array{headers: list<string>, json: array<string, mixed>}
  */
-function fetch(string $baseUrl, string $case, string $dir, string $cookieHeader = ''): array {
-	$context = \stream_context_create(['http' => [
-		'method'        => 'GET',
-		'header'        => $cookieHeader !== '' ? "Cookie: {$cookieHeader}\r\n" : '',
-		'ignore_errors' => true,
-		'timeout'       => 5,
-	]]);
-	$body = \file_get_contents($baseUrl . '/?case=' . $case . '&dir=' . $dir, false, $context);
-	$headers = \http_get_last_response_headers() ?? [];
+function fetch(FixtureServer $server, string $case, string $dir, string $cookieHeader = ''): array {
+	$r = $server->request('GET', '/?case=' . $case . '&dir=' . $dir, $cookieHeader !== '' ? ['Cookie' => $cookieHeader] : []);
 
 	// A case may print output before its report; the report is the JSON object at the end.
-	$start = \strpos($body, '{');
+	$start = \strpos($r['body'], '{');
 	if ($start === false) {
-		throw new \RuntimeException('No JSON report in response: ' . \trim($body));
+		throw new \RuntimeException('No JSON report in response: ' . \trim($r['body']));
 	}
-	return ['headers' => $headers, 'json' => \json_decode(\substr($body, $start), true, 512, \JSON_THROW_ON_ERROR)];
+	return ['headers' => $r['headers'], 'json' => \json_decode(\substr($r['body'], $start), true, 512, \JSON_THROW_ON_ERROR)];
 }
 
 /** @return list<string> Values of the Set-Cookie headers for the session cookie. */
@@ -100,67 +104,15 @@ function sessionFiles(string $root, string $dir): array {
 	return $files;
 }
 
-function removeTree(string $dir): void {
-	foreach (\glob($dir . '/*') ?: [] as $path) {
-		if (\is_dir($path)) {
-			removeTree($path);
-		} else {
-			\unlink($path);
-		}
-	}
-	\rmdir($dir);
-}
-
-$root = \sys_get_temp_dir() . '/citomni_http_session_test_' . \bin2hex(\random_bytes(6));
-\mkdir($root . '/sessions', 0700, true);
+$root = tempDir('session');
+\mkdir($root . '/sessions', 0700);
 $server = null;
 
 try {
+	$server = new FixtureServer($root, __DIR__ . '/server.php');
 
-	// -- 1. Start the fixture server -------------------------------------------
-
-	// Same php.ini as this process: the loaded file, the default lookup, or none at all.
-	$iniArgs = match (true) {
-		\php_ini_loaded_file() !== false   => ['-c', \php_ini_loaded_file()],
-		\php_ini_scanned_files() !== false => [],
-		default                            => ['-n'],
-	};
-
-	// Reserve a free port, then hand it to the server.
-	$socket = \stream_socket_server('tcp://127.0.0.1:0');
-	$address = \stream_socket_get_name($socket, false);
-	\fclose($socket);
-
-	$server = \proc_open([\PHP_BINARY, ...$iniArgs, '-S', $address, '-t', $root, __DIR__ . '/server.php'], [
-		0 => ['pipe', 'r'],
-		1 => ['file', $root . '/server.out', 'w'],
-		2 => ['file', $root . '/server.err', 'w'],
-	], $pipes);
-	if (!\is_resource($server)) {
-		throw new \RuntimeException('Cannot start the fixture server.');
-	}
-	\fclose($pipes[0]);
-
-	// Connection attempts fail with a warning until the server listens.
-	$deadline = \microtime(true) + 5;
-	while (true) {
-		try {
-			\fclose(\stream_socket_client('tcp://' . $address, $errno, $errstr, 0.1));
-			break;
-		} catch (\ErrorException $notListening) {
-			if (\microtime(true) >= $deadline) {
-				throw new \RuntimeException('Fixture server did not start: ' . $notListening->getMessage());
-			}
-			\usleep(10_000);
-		}
-	}
-	$baseUrl = 'http://' . $address;
-
-
-	// -- 2. Cases ----------------------------------------------------------------
-
-	check('regenerate() starts a missing session and sends only the final id', function () use ($baseUrl, $root): void {
-		$r = fetch($baseUrl, 'regenerate_without_session', 'without-session');
+	check('regenerate() starts a missing session and sends only the final id', function () use ($server, $root): void {
+		$r = fetch($server, 'regenerate_without_session', 'without-session');
 		same(false, $r['json']['active_before']);
 		same(null, $r['json']['exception']);
 		same(true, $r['json']['active_after']);
@@ -170,12 +122,12 @@ try {
 		same([], $r['json']['warnings']);
 	});
 
-	check('regenerate() on an existing session rotates the id, keeps its data and deletes the old file', function () use ($baseUrl, $root): void {
-		$seed = fetch($baseUrl, 'seed', 'existing');
+	check('regenerate() on an existing session rotates the id, keeps its data and deletes the old file', function () use ($server, $root): void {
+		$seed = fetch($server, 'seed', 'existing');
 		$old = $seed['json']['id'];
 		same([$old], sessionCookies($seed['headers']));
 
-		$r = fetch($baseUrl, 'regenerate_existing', 'existing', SESSION_NAME . '=' . $old);
+		$r = fetch($server, 'regenerate_existing', 'existing', SESSION_NAME . '=' . $old);
 		same(null, $r['json']['exception']);
 		same($old, $r['json']['id_before']);
 		same('value', $r['json']['kept_before']);
@@ -186,24 +138,21 @@ try {
 		same(['sess_' . $r['json']['id']], sessionFiles($root, 'existing'));
 	});
 
-	check('regenerate() throws when storage cannot destroy the old session, and records nothing', function () use ($baseUrl): void {
-		$r = fetch($baseUrl, 'regenerate_storage_failure', 'storage-failure');
+	check('regenerate() throws when storage cannot destroy the old session, and records nothing', function () use ($server): void {
+		$r = fetch($server, 'regenerate_storage_failure', 'storage-failure');
 		same(REGENERATE_FAILED, $r['json']['exception']);
 		same(true, $r['json']['no_new_id']);
 		same(false, $r['json']['rotated_at_recorded']);
 	});
 
-	check('regenerate() throws after headers were sent instead of keeping the old id', function () use ($baseUrl): void {
-		$r = fetch($baseUrl, 'regenerate_after_output', 'after-output');
+	check('regenerate() throws after headers were sent instead of keeping the old id', function () use ($server): void {
+		$r = fetch($server, 'regenerate_after_output', 'after-output');
 		same(REGENERATE_FAILED, $r['json']['exception']);
 		same(true, $r['json']['id_unchanged']);
 	});
 
 } finally {
-	if (\is_resource($server)) {
-		\proc_terminate($server);
-		\proc_close($server);
-	}
+	$server?->stop();
 	removeTree($root);
 }
 

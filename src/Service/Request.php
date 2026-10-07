@@ -76,7 +76,8 @@ use CitOmni\Kernel\Service\BaseService;
  *   7) getUserAgent(): ?string - user agent if present.
  * - Client IP:
  *   1) ip(?bool $trustProxy = null): string - "CLI" in CLI; public IP if resolvable; "unknown" otherwise.
- *   2) Honors X-Forwarded-For / Forwarded only when trust_proxy is enabled AND REMOTE_ADDR is trusted.
+ *   2) Honors X-Forwarded-For only when trust_proxy is enabled AND REMOTE_ADDR is trusted. The list
+ *      is read from the right, past trusted proxies; the first other entry is the client.
  *   3) getClientIp() is an alias of ip().
  * - Predicates:
  *   1) isHttps(): bool - proxy-aware if allowed and trusted.
@@ -382,16 +383,25 @@ class Request extends BaseService {
 
 	/**
 	 * Simple sanitizer (trim + htmlspecialchars). Returns null if missing.
+	 *
+	 * Behavior:
+	 * - $method 'get', 'post' or 'both' (query first, then form body).
+	 * - Only string values count. Array-shaped input (PHP parses "?q[]=x" into an
+	 *   array) is treated as missing, so 'both' falls through to the form body.
+	 *
+	 * @param string $key    Input key.
+	 * @param string $method 'get', 'post' or 'both'.
+	 * @return ?string Trimmed, HTML-escaped value, or null when no string value exists.
 	 */
 	public function sanitize(string $key, string $method = 'both'): ?string {
 		$value = null;
 		if ($method === 'get' || $method === 'both') {
 			$value = $_GET[$key] ?? null;
 		}
-		if ($value === null && ($method === 'post' || $method === 'both')) {
+		if (!\is_string($value) && ($method === 'post' || $method === 'both')) {
 			$value = $_POST[$key] ?? null;
 		}
-		return $value !== null ? \htmlspecialchars(\trim((string)$value), \ENT_QUOTES | \ENT_SUBSTITUTE, 'UTF-8') : null;
+		return \is_string($value) ? \htmlspecialchars(\trim($value), \ENT_QUOTES | \ENT_SUBSTITUTE, 'UTF-8') : null;
 	}
 
 
@@ -1018,58 +1028,53 @@ class Request extends BaseService {
  */
 
 	/**
-	 * Client IP address. If $trustProxy is null, uses http.trust_proxy.
-	 * Honors proxy headers only when enabled AND REMOTE_ADDR is trusted.
+	 * Client IP address, proxy-aware when allowed.
+	 *
+	 * Behavior:
+	 * - In CLI: always "CLI".
+	 * - Without proxy trust, or when REMOTE_ADDR is not a trusted proxy: REMOTE_ADDR.
+	 * - Behind a trusted proxy: X-Forwarded-For is read from the right. Each proxy
+	 *   appends the address it received the request from, so entries are skipped while
+	 *   they are trusted proxies, and the first other entry is the client. Entries to
+	 *   its left come from the client and are never used.
+	 * - Behind a trusted proxy without X-Forwarded-For: REMOTE_ADDR.
+	 * - The result is returned only when it is a public address; otherwise "unknown".
+	 *
+	 * Notes:
+	 * - Every proxy in the chain (load balancer, CDN) must be listed in
+	 *   http.trusted_proxies. The first unlisted one is taken as the client.
+	 * - Other client-IP headers (Client-Ip, X-Cluster-Client-Ip, ...) are not read;
+	 *   proxies pass them on from the client unchanged.
+	 *
+	 * @param bool|null $trustProxy Overrides http.trust_proxy when not null.
+	 * @return string Public client IP, "unknown", or "CLI".
 	 */
 	public function ip(?bool $trustProxy = null): string {
 		if (\PHP_SAPI === 'cli') {
 			return 'CLI';
 		}
 
-		$server     = $_SERVER;
-		$remoteAddr = (string)($server['REMOTE_ADDR'] ?? '');
+		$remoteAddr = (string)($_SERVER['REMOTE_ADDR'] ?? '');
+		$client = $remoteAddr;
 
-		// Decide proxy behavior
 		$useProxy = $trustProxy ?? $this->trustProxy();
-		$proxyAllowed = $useProxy && $remoteAddr !== '' && $this->clientIpIsTrusted($this->trustedProxies);
-
-		if ($proxyAllowed) {
-			// Canonical client IP from X-Forwarded-For (first public)
-			$xff = (string)($server['HTTP_X_FORWARDED_FOR'] ?? '');
+		if ($useProxy && $remoteAddr !== '' && $this->clientIpIsTrusted($this->trustedProxies)) {
+			$xff = (string)($_SERVER['HTTP_X_FORWARDED_FOR'] ?? '');
 			if ($xff !== '') {
-				$forwardedIps = \array_map('trim', \explode(',', $xff));
-				foreach ($forwardedIps as $candidate) {
-					if ($this->isPublicIp($candidate)) {
-						return $candidate;
-					}
-				}
-			}
-			// Fall back to other headers (rare)
-			$headers = [
-				'HTTP_CLIENT_IP',
-				'HTTP_X_FORWARDED',
-				'HTTP_X_CLUSTER_CLIENT_IP',
-				'HTTP_FORWARDED_FOR',
-				'HTTP_FORWARDED'
-			];
-			foreach ($headers as $h) {
-				if (!empty($server[$h])) {
-					$ipList = \explode(',', (string)$server[$h]);
-					foreach ($ipList as $cand) {
-						$cand = \trim($cand);
-						if ($this->isPublicIp($cand)) {
-							return $cand;
-						}
+				// Right to left: skip trusted proxies; the first other entry is the client.
+				$client = '';
+				$hops = \explode(',', $xff);
+				for ($i = \count($hops) - 1; $i >= 0; $i--) {
+					$hop = \trim($hops[$i]);
+					if (!$this->isTrustedProxy($hop)) {
+						$client = $hop;
+						break;
 					}
 				}
 			}
 		}
 
-		// No proxy or not trusted -> REMOTE_ADDR if public, else unknown
-		if ($this->isPublicIp($remoteAddr)) {
-			return $remoteAddr;
-		}
-		return 'unknown';
+		return $this->isPublicIp($client) ? $client : 'unknown';
 	}
 
 
@@ -1114,6 +1119,22 @@ class Request extends BaseService {
 
 
 	/**
+	 * Check whether an address is one of the trusted proxies (http.trusted_proxies).
+	 *
+	 * @param string $ip Candidate address, e.g. one X-Forwarded-For entry.
+	 * @return bool True if $ip matches a trusted proxy entry; false for invalid input.
+	 */
+	private function isTrustedProxy(string $ip): bool {
+		foreach ($this->trustedProxies as $cidr) {
+			if ($this->ipInCidr($ip, (string)$cidr)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+
+	/**
 	 * Test whether an IP address belongs to a CIDR block (or equals a single IP).
 	 *
 	 * Supports IPv4 and IPv6. Returns false on invalid inputs or address-family
@@ -1123,6 +1144,7 @@ class Request extends BaseService {
 	 * Behavior:
 	 * - Uses inet_pton() for binary-safe comparisons (no string parsing pitfalls).
 	 * - Validates mask length against address family (0..32 for IPv4, 0..128 for IPv6).
+	 * - A mask that is not a decimal number ("10.0.0.0/", "10.0.0.0/x") matches nothing.
 	 * - Builds a byte mask and compares the network portions.
 	 *
 	 * Typical usage:
@@ -1158,8 +1180,15 @@ class Request extends BaseService {
 			return false; // Invalid subnet or IPv4/IPv6 family mismatch.
 		}
 
-		// Normalize and validate mask length against the address family.
-		$maskBits = (int)\trim((string)$maskBitsRaw); // e.g., 16 for IPv4 or 64 for IPv6
+		// The mask must be a decimal bit count. (int) would read "" or "x" as 0, and a
+		// /0 mask matches every address.
+		$maskBitsRaw = \trim($maskBitsRaw);
+		if ($maskBitsRaw === '' || \strspn($maskBitsRaw, '0123456789') !== \strlen($maskBitsRaw)) {
+			return false; // Malformed mask.
+		}
+
+		// Validate mask length against the address family.
+		$maskBits = (int)$maskBitsRaw; // e.g., 16 for IPv4 or 64 for IPv6
 		$addrLen  = \strlen($ipBin);      // 4 bytes for IPv4, 16 bytes for IPv6.
 		$maxBits  = $addrLen * 8;         // 32 or 128.
 		if ($maskBits < 0 || $maskBits > $maxBits) {
