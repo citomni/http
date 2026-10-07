@@ -55,10 +55,12 @@ use CitOmni\Kernel\Service\BaseService;
  *           computed scope (domain/path) applies to the current request; otherwise leaves $_COOKIE unchanged.
  *
  * - get(string $name, ?string $default = null): ?string
- *     Return the cookie value as string, or $default when absent.
+ *     Return the cookie value as string, or $default when absent or not a string.
+ *     Cookie input is untrusted: PHP parses "Cookie: name[]=x" into an array, and such
+ *     values are treated as absent rather than cast to "Array".
  *
  * - has(string $name): bool
- *     True if the cookie key is present in the current request.
+ *     True if the cookie is present in the current request as a string value.
  *
  * - delete(string $name, array $options = []): bool
  *     Delete by setting an expiry in the past. You may pass path/domain/etc. to match scope.
@@ -79,7 +81,8 @@ use CitOmni\Kernel\Service\BaseService;
  *   - delete(): unsets $_COOKIE[$name] locally regardless of setcookie()'s return value.
  *
  * Error handling:
- * - User mistakes (missing cookie on get/has) return null/false; no exceptions.
+ * - Missing cookies and non-string (array-shaped) values on get/has return $default/false;
+ *   no exceptions and no warnings.
  * - set()/delete() return false if PHP refuses the operation (e.g., headers already sent).
  * - Invalid names or SameSite=None without Secure=true throw \InvalidArgumentException or \RuntimeException.
  * - Misconfiguration may be detected at init() time (e.g., samesite=None + secure!=true).
@@ -316,6 +319,8 @@ class Cookie extends BaseService {
 	 *
 	 * Notes:
 	 * - Returns $default when the cookie key is absent.
+	 * - Returns $default when the value is not a string (array-shaped input such as
+	 *   "name[]=x"). Never casts untrusted arrays to the string "Array".
 	 *
 	 * @param string      $name
 	 * @param string|null $default
@@ -324,20 +329,24 @@ class Cookie extends BaseService {
 	 */
 	public function get(string $name, ?string $default = null): ?string {
 		$this->assertValidName($name);
-		return \array_key_exists($name, $_COOKIE) ? (string)$_COOKIE[$name] : $default;
+		$value = $_COOKIE[$name] ?? null;
+		return \is_string($value) ? $value : $default;
 	}
 
 
 	/**
-	 * Test if a cookie key exists in the current request view.
+	 * Test if a cookie is present in the current request view.
+	 *
+	 * Notes:
+	 * - Consistent with get(): non-string (array-shaped) values count as absent.
 	 *
 	 * @param string $name
-	 * @return bool True if present in $_COOKIE.
+	 * @return bool True if present in $_COOKIE as a string.
 	 * @throws \InvalidArgumentException For invalid cookie name.
 	 */
 	public function has(string $name): bool {
 		$this->assertValidName($name);
-		return \array_key_exists($name, $_COOKIE);
+		return \is_string($_COOKIE[$name] ?? null);
 	}
 
 

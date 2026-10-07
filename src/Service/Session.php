@@ -60,7 +60,7 @@ use CitOmni\Kernel\Service\BaseService;
  * - destroy($forgetCookie=true):
  *   1) session_unset() + session_destroy() + $_SESSION = [].
  *   2) Expires the session cookie using the active cookie params.
- * - regenerate($deleteOld=true): rotates session id; requires active session.
+ * - regenerate($deleteOld=true): starts the session if needed, then rotates the id; throws on failure.
  * - Fingerprint policy:
  *   - When enabled, stores a compact UA/IP prefix signature in '_sess_fpr'.
  *   - On mismatch, destroys the session, restarts cleanly, and stores new signature
@@ -72,7 +72,7 @@ use CitOmni\Kernel\Service\BaseService;
  *   1) headers were already sent before start(),
  *   2) session_start() fails,
  *   3) SameSite=None is configured without Secure=true,
- *   4) regenerate() is called without an active session.
+ *   4) session_regenerate_id() fails (the request would otherwise stay on the old id).
  * - Other PHP warnings/notices bubble to the global handler (fail fast).
  *
  * Performance & determinism:
@@ -441,24 +441,34 @@ class Session extends BaseService {
 	 * Regenerate the session ID (mitigate fixation; rotate on privilege change).
 	 *
 	 * Behavior:
-	 * - Requires an active session; rotates the session id via session_regenerate_id().
-	 * - Records a rotation timestamp in $_SESSION['_sess_rotated_at'].
+	 * - Starts the session when it is not active yet (same lazy contract as get()/set()), so
+	 *   callers never depend on an earlier read having started it.
+	 * - Rotates the session id via session_regenerate_id().
+	 * - Throws when PHP refuses the rotation. Continuing would leave the request on the
+	 *   previous id, which defeats the purpose of rotating at a privilege boundary.
+	 * - Records a rotation timestamp in $_SESSION['_sess_rotated_at'] only after success.
 	 *
 	 * Notes:
 	 * - Call after login or privilege escalation to prevent session fixation.
+	 * - session_regenerate_id() returns false when headers were already sent, and when the
+	 *   storage handler cannot destroy the old session ($deleteOld = true). In the latter case
+	 *   PHP also closes the session, so a later write would silently reopen the old id.
+	 * - When no session existed yet, session_start() issues an id and this call rotates it once
+	 *   more. PHP replaces the queued Set-Cookie header, so only the final id reaches the client.
 	 *
 	 * Typical usage:
 	 *   $this->app->session->regenerate(true); // delete old id mapping
 	 *
 	 * @param bool $deleteOld When true, delete old session id mapping on rotation.
 	 * @return void
-	 * @throws \RuntimeException If no active session exists.
+	 * @throws \RuntimeException If the session cannot be started (headers already sent,
+	 *                           session_start() failure), or if session_regenerate_id() fails.
 	 */
 	public function regenerate(bool $deleteOld = true): void {
-		if (\session_status() !== \PHP_SESSION_ACTIVE) {
-			throw new \RuntimeException('Cannot regenerate ID: no active session.');
+		$this->ensureStarted();
+		if (!\session_regenerate_id($deleteOld)) {
+			throw new \RuntimeException('session_regenerate_id() failed; refusing to continue on the previous session id.');
 		}
-		\session_regenerate_id($deleteOld);
 		$_SESSION['_sess_rotated_at'] = \time();
 	}
 
