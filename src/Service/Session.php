@@ -535,7 +535,9 @@ class Session extends BaseService {
 	 * - Reads optional cfg from:
 	 *   - session.* for session runtime settings and cookie overrides
 	 *   - cookie.*  as fallback for cookie flags
-	 *   - http.base_url / Request::isHttps() to infer Secure when not configured
+	 *   - http.base_url, and Request::isHttps() when the request service is
+	 *     registered (else the HTTPS and SERVER_PORT server variables), to infer
+	 *     Secure when not configured
 	 * - Applies hardened defaults and session cookie params.
 	 * - Creates save_path directory when configured and missing.
 	 *
@@ -593,7 +595,9 @@ class Session extends BaseService {
 				$baseUrlHttps = isset($cfgHttp['base_url']) && \is_string($cfgHttp['base_url'])
 					? (\preg_match('#^https://#i', (string)$cfgHttp['base_url']) === 1)
 					: false;
-				$fromRequest  = isset($this->app->request) ? $this->app->request->isHttps() : $this->fallbackIsHttps();
+				// hasService(), not isset(): App resolves services through __get() and
+				// has no __isset(), so isset($this->app->request) is always false.
+				$fromRequest  = $this->app->hasService('request') ? $this->app->request->isHttps() : $this->fallbackIsHttps();
 				$secure = $baseUrlHttps || $fromRequest;
 			}
 		}

@@ -15,6 +15,7 @@ declare(strict_types=1);
 
 namespace CitOmni\Http\Tests\Session;
 
+use CitOmni\Http\Service\Request;
 use CitOmni\Http\Service\Session;
 use CitOmni\Http\Tests\Support\App;
 
@@ -34,6 +35,9 @@ use CitOmni\Http\Tests\Support\App;
  *   these cases are about.
  * - The session is written and closed before the report is sent, so session files
  *   are final when run.php inspects them.
+ * - The secure_* cases leave the Secure flag to Session's inference and register the
+ *   real Request service, which is the only HTTPS signal they have: base_url is
+ *   http, and the server listens on plain HTTP.
  */
 
 if (\PHP_SAPI !== 'cli-server') {
@@ -41,6 +45,7 @@ if (\PHP_SAPI !== 'cli-server') {
 }
 
 require \dirname(__DIR__) . '/support/doubles.php';
+require \dirname(__DIR__, 2) . '/src/Service/Request.php';
 require \dirname(__DIR__, 2) . '/src/Service/Session.php';
 
 /** Storage handler whose destroy() fails, as a failing unlink() in the files handler would. */
@@ -60,9 +65,10 @@ $dir = (string)($_GET['dir'] ?? '');
 if (\preg_match('/^[a-z0-9-]+$/', $dir) !== 1) {
 	throw new \RuntimeException('Missing or invalid ?dir=.');
 }
+$case = (string)($_GET['case'] ?? '');
 
 // Session creates the storage directory on first start.
-$session = new Session(new App([
+$cfg = [
 	'http'    => ['base_url' => 'http://127.0.0.1'],
 	'session' => [
 		'name'            => 'CITSESSID',
@@ -76,7 +82,18 @@ $session = new Session(new App([
 		'cookie_path'     => '/',
 		'cookie_domain'   => null,
 	],
-]));
+];
+$inferSecure = \str_starts_with($case, 'secure_');
+if ($inferSecure) {
+	$cfg['session']['cookie_secure'] = null;
+	$cfg['http']['trust_proxy'] = $case === 'secure_trusted_proxy';
+	$cfg['http']['trusted_proxies'] = ['127.0.0.1'];
+}
+$app = new App($cfg);
+if ($inferSecure) {
+	$app->set('request', new Request($app));
+}
+$session = new Session($app);
 $out = [];
 $attempt = static function (callable $fn) use (&$out): void {
 	try {
@@ -87,7 +104,7 @@ $attempt = static function (callable $fn) use (&$out): void {
 	}
 };
 
-switch ((string)($_GET['case'] ?? '')) {
+switch ($case) {
 
 	// No session cookie and no active session before regenerate().
 	case 'regenerate_without_session':
@@ -131,6 +148,14 @@ switch ((string)($_GET['case'] ?? '')) {
 		\flush();
 		$attempt(static fn () => $session->regenerate(true));
 		$out['id_unchanged'] = \session_id() === $before;
+		break;
+
+	// TLS ends at a proxy on 127.0.0.1, which sends X-Forwarded-Proto: https.
+	// Only the secure_trusted_proxy case trusts it.
+	case 'secure_trusted_proxy':
+	case 'secure_untrusted_proxy':
+		$session->start();
+		$out['request_is_https'] = $app->request->isHttps();
 		break;
 
 	default:

@@ -75,8 +75,11 @@ function same(mixed $expected, mixed $actual): void {
  *
  * @return array{headers: list<string>, json: array<string, mixed>}
  */
-function fetch(FixtureServer $server, string $case, string $dir, string $cookieHeader = ''): array {
-	$r = $server->request('GET', '/?case=' . $case . '&dir=' . $dir, $cookieHeader !== '' ? ['Cookie' => $cookieHeader] : []);
+function fetch(FixtureServer $server, string $case, string $dir, string $cookieHeader = '', array $headers = []): array {
+	if ($cookieHeader !== '') {
+		$headers['Cookie'] = $cookieHeader;
+	}
+	$r = $server->request('GET', '/?case=' . $case . '&dir=' . $dir, $headers);
 
 	// A case may print output before its report; the report is the JSON object at the end.
 	$start = \strpos($r['body'], '{');
@@ -95,6 +98,17 @@ function sessionCookies(array $headers): array {
 		}
 	}
 	return $values;
+}
+
+/** @return list<bool> Whether each Set-Cookie header for the session cookie has the Secure attribute. */
+function sessionCookiesSecure(array $headers): array {
+	$flags = [];
+	foreach ($headers as $header) {
+		if (\preg_match('/^Set-Cookie:\s*' . SESSION_NAME . '=/i', $header) === 1) {
+			$flags[] = \preg_match('/;\s*secure\s*(;|$)/i', $header) === 1;
+		}
+	}
+	return $flags;
 }
 
 /** @return list<string> Session file names in one case's storage directory, sorted. */
@@ -149,6 +163,18 @@ try {
 		$r = fetch($server, 'regenerate_after_output', 'after-output');
 		same(REGENERATE_FAILED, $r['json']['exception']);
 		same(true, $r['json']['id_unchanged']);
+	});
+
+	check('Inferred Secure follows the request service behind a trusted TLS proxy', function () use ($server): void {
+		$r = fetch($server, 'secure_trusted_proxy', 'trusted-proxy', '', ['X-Forwarded-Proto' => 'https']);
+		same(true, $r['json']['request_is_https']);
+		same([true], sessionCookiesSecure($r['headers']));
+	});
+
+	check('Inferred Secure ignores X-Forwarded-Proto when the proxy is not trusted', function () use ($server): void {
+		$r = fetch($server, 'secure_untrusted_proxy', 'untrusted-proxy', '', ['X-Forwarded-Proto' => 'https']);
+		same(false, $r['json']['request_is_https']);
+		same([false], sessionCookiesSecure($r['headers']));
 	});
 
 } finally {
