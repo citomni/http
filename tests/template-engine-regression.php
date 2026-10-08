@@ -358,16 +358,28 @@ TPL;
 	});
 	test('Existing helper names and URL output preserved', function () use ($layers) {
 		$e = engine(app: new App($layers)); $globals = callPrivate($e, 'buildGlobals');
-		$keys = ['app_name','base_url','public_root_url','language','charset','marketing_scripts','csrf_protection','honeypot_protection','form_action_switching','captcha_protection','env','txt','dt','dtNow','dtMonth','dtWeekday','url','asset','hasService','hasPackage','csrfField','currentPath','icon','hasIcon','auth','role'];
+		$keys = ['app_name','base_url','public_root_url','language','charset','marketing_scripts','csrf_protection','honeypot_protection','form_action_switching','captcha_protection','env','txt','dt','dtNow','dtMonth','dtWeekday','url','asset','hasService','hasPackage','csrfField','captchaField','captchaUrl','currentPath','icon','hasIcon','auth','role'];
 		same($keys, array_keys($globals)); same('https://example.test/base/search?q=a+b', $globals['url']('/search', ['q'=>'a b']));
 		same('https://example.test/base/assets/a.css?v=v1', $globals['asset']('/assets/a.css'));
 		same('https://example.test/base/a.css?a=1&v=v2', $globals['asset']('a.css?a=1','v2'));
 		same('https://cdn.test/a.css', $globals['asset']('https://cdn.test/a.css'));
-		same('', $globals['csrfField']()); same(false, $globals['hasIcon']('missing'));
+		same('', $globals['csrfField']()); same('', $globals['captchaField']()); same('', $globals['captchaUrl']()); same(false, $globals['hasIcon']('missing'));
 		raises(fn()=> $globals['icon']('missing'), 'Icon service not available');
 		raises(fn()=> $globals['txt']('key','file'), 'Text service not available');
 		raises(fn()=> $globals['auth']('check'), 'Auth service not available');
 		raises(fn()=> $globals['role']('rank'), 'Role service not available');
+	});
+	test('Captcha helpers share one challenge and respect the protection flag', function () use ($layers) {
+		$captcha = new class {
+			public bool $enabled = true; public int $issued = 0;
+			public function isEnabled(): bool { return $this->enabled; }
+			public function htmlField(): string { $this->issued++; return '<input type="hidden" name="captcha_id" value="00ff">'; }
+			public function imagePath(): string { return '/captcha.png?id=00ff'; }
+		};
+		$app = new App($layers); $app->services['captcha'] = $captcha; $globals = callPrivate(engine(app: $app), 'buildGlobals');
+		same('<input type="hidden" name="captcha_id" value="00ff">', $globals['captchaField']());
+		same('https://example.test/base/captcha.png?id=00ff', $globals['captchaUrl']());
+		$captcha->enabled = false; same('', $globals['captchaField']()); same('', $globals['captchaUrl']()); same(1, $captcha->issued);
 	});
 	test('Legacy local variable scope retained', fn() => same('yes', renderSource('{{ isset($this, $ref, $data, $vars, $file) ? "yes" : "no" }}')));
 	test('render() output equals renderToString()', function () use ($root) {

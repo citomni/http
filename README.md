@@ -171,33 +171,29 @@ return [
 	],
 
 	'session' => [
-		'name'                   => 'CITSESSID',
-		'save_path'              => CITOMNI_APP_PATH . '/var/state/php_sessions',
-		'gc_maxlifetime'         => 1440,
-		'use_strict_mode'        => true,
-		'use_only_cookies'       => true,
-		'lazy_write'             => true,
-		'sid_length'             => 48,
-		'sid_bits_per_character' => 6,
-		'cookie_secure'          => null,     // auto if https
-		'cookie_httponly'        => true,
-		'cookie_samesite'        => 'Lax',
-		'cookie_path'            => '/',
-		'cookie_domain'          => null,
-		'rotate_interval'        => 0,
-		'fingerprint'            => [
-			'bind_user_agent' => false,
-			'bind_ip_octets'  => 0,
-			'bind_ip_blocks'  => 0,
-		],
+		'name'             => 'CITSESSID',
+		'save_path'        => CITOMNI_APP_PATH . '/var/state/php_sessions',
+		// 'gc_maxlifetime' => 1440,   // seconds PHP keeps idle session data. citomni/authenticate raises it
+		                              // to its idle timeout; app cfg wins, so never set it lower than that.
+		'gc_probability'   => 1,        // with gc_divisor: GC chance per session start
+		'gc_divisor'       => 1000,
+		'use_strict_mode'  => true,
+		'use_only_cookies' => true,
+		'lazy_write'       => true,
+		// Session cookie overrides; null takes the attribute from 'cookie' below
+		'cookie_secure'    => null,
+		'cookie_httponly'  => true,     // pinned: Scripts must not read the session id
+		'cookie_samesite'  => null,
+		'cookie_path'      => null,
+		'cookie_domain'    => null,     // '' forces host-only
 	],
 
 	'cookie' => [
+		'secure'   => null,     // null: Inferred from base_url, CITOMNI_PUBLIC_ROOT_URL or the request
 		'httponly' => true,
 		'samesite' => 'Lax',
 		'path'     => '/',
-		// 'secure' => true,     // optional override
-		// 'domain' => 'example.com',
+		'domain'   => null,     // null: Host-only; 'example.com' shares cookies with subdomains
 	],
 
 	'view' => [
@@ -491,6 +487,7 @@ Closures:
 * `$hasService(string $id): bool` - service id in the map?
 * `$hasPackage(string $slug): bool` - vendor/package detected via services/routes?
 * `$csrfField(): string` - hidden CSRF `<input>` (empty string if disabled/not available).
+* `$captchaField(): string` - hidden `<input>` with this request's captcha challenge id; `$captchaUrl(): string` - absolute URL of its image. Both are empty strings when captcha protection is off or the service is missing. See [Captcha](#captcha).
 * `$currentPath(): string` - request path (lazy; resolves only if called).
 * `$role(string $fn, mixed ...$args)` - role checks/labels (if role gate is present)
   Examples: `$role('is','admin')`, `$role('any','manager','operator')`, `$role('label')`.
@@ -568,8 +565,12 @@ $this->app->maintenance->enable(['1.2.3.4']);
 
 **Session / Cookie**
 
-* Deterministic INI init (secure defaults), Samesite/secure logic
-* Flash storage (`flash()`, `pull()`, `reflash()`)
+* `Cookie` owns the default attributes of every cookie, the session cookie included: Host-only unless `cookie.domain` is set, HttpOnly, `SameSite=Lax`, and Secure inferred from `http.base_url`, `CITOMNI_PUBLIC_ROOT_URL` or the request. `attributes()` resolves overrides on top; invalid values throw.
+* `Session` owns storage: Save path, retention (`gc_maxlifetime`) and garbage collection are applied explicitly, and a setting PHP refuses throws. `session.cookie_*` overrides single attributes of the session cookie, whose lifetime is always 0.
+* `gc_maxlifetime` is storage retention, not a login lifetime. Debian and Ubuntu ship `gc_probability=0` and clean only their php.ini save paths from cron, so the baseline sets 1/1000 explicitly; set `gc_probability` to 0 only when a scheduled job cleans `session.save_path`.
+* `regenerate(true)` belongs at privilege changes. It deletes the old session at once, so a concurrent request with the old id gets a new, empty session. `session.rotate_interval` and `session.fingerprint` were removed; Session throws while either is enabled.
+* Reads never create a session: `get()`, `has()`, `remove()` and `destroy()` resume a session that the request's cookie (or an earlier start in the same request) names, and otherwise return without a cookie, a session file or cache headers. Writes (`set()`, `start()`, `regenerate()`) create it. Flash readers and CSRF verification follow the same rule, so a guest page that reads them stays session-free.
+* Flash (`$this->app->flash`): Messages, old input and field errors across one redirect; `pullAll()` reads and clears, `keep()` keeps them for one more read.
 
 **View**
 
@@ -659,6 +660,72 @@ public function submit(): void {
 
 ---
 
+## Captcha
+
+The `captcha` service runs a session-backed challenge for HTML forms: issue a code, show its image, verify the post once. Codes and images come from the `captchaImage` service in [citomni/image](https://github.com/citomni/image), so install that package and register its provider in `/config/providers.php` (`\CitOmni\Image\Boot\Registry::class`).
+
+**1. Route the image (opt-in).** This package registers no captcha route. Add one to `/config/citomni_http_routes.php`, at the path in `security.captcha.image_path`:
+
+```php
+'/captcha.png' => [
+	'controller' => \CitOmni\Http\Controller\CaptchaController::class,
+	'action'     => 'image',
+	'methods'    => ['GET'],
+],
+```
+
+**2. Put the challenge in the form.** `$captchaField()` issues the request's challenge and renders its id as a hidden field; `$captchaUrl()` is the image of the same challenge:
+
+```html
+{% if ($captcha_protection) %}
+	{{{ $captchaField() }}}
+	<img src="{{ $captchaUrl() }}" width="200" height="64" alt="Security code">
+	<label for="captcha">Code</label>
+	<input type="text" id="captcha" name="captcha" autocomplete="off" autocapitalize="characters" spellcheck="false" required>
+{% endif %}
+```
+
+**3. Verify the post:**
+
+```php
+if (!$this->app->captcha->verify()) {
+	// Wrong, expired or missing: render the form again; it gets a new challenge.
+}
+```
+
+Behavior:
+
+* Every challenge gets exactly one attempt. `verify()` removes it before comparing, right or wrong, so a solved image cannot be replayed.
+* Challenges expire after `security.captcha.ttl` seconds. Up to `max_pending` challenges are kept per session, so a form open in several tabs keeps working; issuing more drops the oldest.
+* A challenge's image is rendered with a stored seed, so reloading it shows the same picture instead of a second distortion to compare.
+* Answers are compared case-insensitively, ignoring whitespace, in constant time (`captchaImage->verify()`).
+* With `security.captcha_protection` off, `verify()` passes, `$captchaField()` and `$captchaUrl()` render nothing, and the image route answers 404.
+* The image route answers 404 without a body for missing, unknown or expired ids, and starts no session for a request without the session cookie.
+* Issuing starts the session. As with `$csrfField()`, render the form before output is flushed, or keep output buffering on.
+* Without citomni/image, issuing a challenge fails with `CaptchaConfigException`.
+
+Configuration baseline:
+
+```php
+'security' => [
+	'captcha_protection' => true,
+	'captcha' => [
+		'session_key'  => '_captcha',
+		'ttl'          => 1200,           // Keep below session.gc_maxlifetime.
+		'max_pending'  => 5,
+		'id_field'     => 'captcha_id',
+		'answer_field' => 'captcha',
+		'image_path'   => '/captcha.png',
+	],
+],
+```
+
+Outside HTML forms, use `current()` and `imagePath()` for the challenge and `verifyAnswer($id, $answer)` for the check.
+
+A text captcha slows down generic form bots. It does not stop targeted attacks with OCR or vision models, and it excludes users who cannot solve visual challenges. Rate-limit the image route (each image costs a few milliseconds of CPU), combine the captcha with the honeypot and server-side validation, and offer another way to reach you where accessibility matters. The Danish `forms_common` language file has a message for a wrong code (`err_incorrect_captcha`).
+
+---
+
 ## Providers (optional)
 
 Providers export their own config/services and are explicitly whitelisted:
@@ -731,7 +798,8 @@ Writes are **atomic** (`tmp` + `rename`), with best-effort OPcache invalidation.
 * [ ] **Maintenance**: Protect with allow-list; enable backup policy
 * [ ] **Webhooks**: Configure `webhooks.secret`, `nonce_dir`, and reasonable `ttl_seconds`
 * [ ] **Error output**: `display_errors=false` in prod; use ErrorHandler logging
-* [ ] **Sessions**: Consider `rotate_interval` for fixation resistance
+* [ ] **Sessions**: Rotate with `regenerate(true)` at login, logout and privilege changes; keep `gc_maxlifetime` at least as long as the longest idle login
+* [ ] **Cookie domain**: Leave `cookie.domain` null (host-only) unless subdomains must share the cookies
 
 ---
 

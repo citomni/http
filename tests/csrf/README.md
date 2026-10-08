@@ -6,9 +6,9 @@ Isolated checks for `CitOmni\Http\Service\Csrf`. No Composer, no database, no en
 php tests/csrf/run.php
 ```
 
-Expected: `23 passed, 0 failed`
+Expected: `24 passed, 0 failed`
 
-Every case starts from the shipped baseline (`Registry::CFG_HTTP`) and applies its own overrides, so a changed default shows up here. The real `Request` reads `$_SERVER` and `$_POST` as each case sets them; session and log are doubles. A `SessionStore` stands for one browser's session across its requests, and each request gets a fresh `Csrf`, as in production. Unless a case says otherwise, a request is an HTTPS POST to `https://example.test/form` with a same-origin `Origin` header.
+Every case starts from the shipped baseline (`Registry::CFG_HTTP`) and applies its own overrides, so a changed default shows up here. The real `Request` reads `$_SERVER` and `$_POST` as each case sets them; session and log are doubles. A `SessionStore` stands for one browser's session across its requests, and each request gets a fresh `Csrf`, as in production. Like `Session`, the double creates the session on `start()` and `set()`, never on `get()` or `remove()`. Unless a case says otherwise, a request is an HTTPS POST to `https://example.test/form` with a same-origin `Origin` header.
 
 ## Cases
 
@@ -20,13 +20,14 @@ Request scope:
 
 Token layer:
 
-- A same-origin POST passes with the token in the header or in the form field.
+- A same-origin POST passes with the token in the header or in the form field; issuing the token created the session.
 - Each `token()` is masked differently and verifies against the same session secret, which is never sent as is.
 - `requireValid()` throws `CsrfVerificationException` with the reason for which `verify()` returns false.
 - A token from another session fails as `token_mismatch`, a malformed one as `token_invalid`, and one sent to a session without a secret as `token_missing`.
 - The header token wins over the form field, and the form field is read only for POST. Custom header and field names replace the defaults.
 - An array-shaped form token (`_csrf[]=x`) fails as `token_invalid`, without a PHP warning.
 - With `mask_tokens` off, the token is the raw secret and compares case-insensitively; a masked token is refused.
+- Verification and `clear()` never create a session: A forged POST to a browser without a session fails as `token_missing`, with or without a token, and no session exists afterwards.
 - `rotate()` and `clear()` invalidate tokens issued earlier.
 - A corrupted session secret fails fast with `CsrfException` instead of counting as a client error.
 - `htmlField()` renders an escaped hidden input whose token verifies.
@@ -54,3 +55,4 @@ Logging and configuration:
 
 - Against the fetch metadata layer before it consulted `trusted_origins` (it refused every `cross-site` request), the trusted origins case fails.
 - Against the token layer before it checked the form field's type (it cast the array to "Array"), the array-shaped token case fails on the warning.
+- Against `Csrf` that started the session before reading the token, the case "Verification and clear() never create a session" fails.

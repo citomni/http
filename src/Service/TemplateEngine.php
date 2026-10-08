@@ -35,7 +35,8 @@ use CitOmni\Kernel\Service\BaseService;
  *   2) Path-scoped `cfg->view->vars` values.
  *   3) Request-local globals and helper closures.
  * - Exposes the established helper contract including `$url`, `$asset`, `$txt`, `$icon`,
- *   `$hasIcon`, `$dt`, `$auth`, `$role`, `$csrfField` and related helpers.
+ *   `$hasIcon`, `$dt`, `$auth`, `$role`, `$csrfField`, `$captchaField`, `$captchaUrl` and related
+ *   helpers.
  * - Dynamic scoped providers are evaluated for every applicable render; provider results are
  *   deliberately not memoized by this service.
  * - Compiles templates into immutable, content-addressed PHP generations under `var/cache`.
@@ -495,7 +496,7 @@ final class TemplateEngine extends BaseService {
 	 *   `language` and `charset`.
 	 * - Exposes `marketing_scripts`, security feature flags and environment metadata.
 	 * - Exposes lazy App-aware helpers for text, date/time, URLs, assets, services/packages, CSRF,
-	 *   current path, SVG icons, authentication and roles.
+	 *   captcha, current path, SVG icons, authentication and roles.
 	 * - Helper closures resolve services lazily through the current App and preserve existing
 	 *   fail-fast behavior when a required service is unavailable.
 	 *
@@ -505,6 +506,8 @@ final class TemplateEngine extends BaseService {
 	 *   `public_root_url` prefers the constant when defined.
 	 * - `$asset()` applies the configured asset version without discarding an existing query string.
 	 * - `$csrfField()` returns an empty string when the CSRF service is not registered.
+	 * - `$captchaField()` and `$captchaUrl()` return an empty string when the captcha service is not
+	 *   registered or captcha protection is off.
 	 * - Helper implementations intentionally remain closures bound to this service so they can
 	 *   access the current App without adding extra service abstractions.
 	 *
@@ -787,6 +790,48 @@ final class TemplateEngine extends BaseService {
 			'csrfField' => function (): string {
 				if ($this->app->hasService('csrf')) {
 					return $this->app->csrf->htmlField();
+				}
+				return '';
+			},
+
+
+			/**
+			 * $captchaField: Output a hidden <input> with this request's captcha challenge id.
+			 *
+			 * Typical usage in forms (with $captchaUrl() for the image):
+			 *   {% if ($captcha_protection) %}
+			 *   	{{{ $captchaField() }}}
+			 *   	<img src="{{ $captchaUrl() }}" width="200" height="64" alt="Security code">
+			 *   	<input type="text" name="captcha" autocomplete="off" required>
+			 *   {% endif %}
+			 *
+			 * Notes:
+			 * - Use TRIPLE braces when rendering ({{{ ... }}}).
+			 * - Issues the challenge on first use in a request; $captchaUrl() refers
+			 *   to the same one.
+			 * - Returns "" (empty string) if the captcha service is not registered or
+			 *   captcha protection is off.
+			 */
+			'captchaField' => function (): string {
+				if ($this->app->hasService('captcha') && $this->app->captcha->isEnabled()) {
+					return $this->app->captcha->htmlField();
+				}
+				return '';
+			},
+
+
+			/**
+			 * $captchaUrl: Absolute URL of this request's captcha challenge image.
+			 *
+			 * Notes:
+			 * - base_url plus security.captcha.image_path and the challenge id; the
+			 *   app routes that path to CaptchaController::image.
+			 * - Returns "" (empty string) if the captcha service is not registered or
+			 *   captcha protection is off.
+			 */
+			'captchaUrl' => function () use ($baseUrl): string {
+				if ($this->app->hasService('captcha') && $this->app->captcha->isEnabled()) {
+					return \rtrim($baseUrl, '/') . $this->app->captcha->imagePath();
 				}
 				return '';
 			},

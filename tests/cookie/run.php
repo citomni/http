@@ -15,19 +15,26 @@ declare(strict_types=1);
 
 namespace CitOmni\Http\Tests\Cookie;
 
+use CitOmni\Http\Boot\Registry;
 use CitOmni\Http\Service\Cookie;
+use CitOmni\Http\Service\Request;
 use CitOmni\Http\Tests\Support\App;
+use function CitOmni\Http\Tests\Support\mergeLastWins;
 
 /*
- * Isolated suite for CitOmni\Http\Service\Cookie: reading untrusted cookie input.
+ * Isolated suite for CitOmni\Http\Service\Cookie: Reading untrusted cookie input and
+ * resolving the default attributes.
  *
  * Usage:
  *   php tests/cookie/run.php
  *
  * Notes:
- * - Runs the real Cookie service against the kernel doubles, without Composer.
+ * - Runs the real Cookie and Request services against the kernel doubles, without Composer.
+ * - cfg.cookie is the shipped baseline (Registry::CFG_HTTP) plus per-case overrides.
  * - $_COOKIE is filled exactly as PHP's request parser fills it, e.g. the header
  *   "Cookie: _auth_rm[]=x" arrives as ['_auth_rm' => ['x']].
+ * - Request::isHttps() reads $_SERVER; cases set HTTPS there. The case with
+ *   CITOMNI_PUBLIC_ROOT_URL runs last, because a constant cannot be undefined.
  */
 
 if (\PHP_SAPI !== 'cli') {
@@ -44,7 +51,12 @@ if (\PHP_SAPI !== 'cli') {
 });
 
 require \dirname(__DIR__) . '/support/doubles.php';
+require \dirname(__DIR__, 2) . '/src/Boot/Registry.php';
+require \dirname(__DIR__, 2) . '/src/Service/Request.php';
 require \dirname(__DIR__, 2) . '/src/Service/Cookie.php';
+
+// Registry::CFG_HTTP evaluates CITOMNI_APP_PATH; any path works here.
+\define('CITOMNI_APP_PATH', \sys_get_temp_dir());
 
 $passed = 0;
 $failed = 0;
@@ -67,14 +79,49 @@ function same(mixed $expected, mixed $actual): void {
 	}
 }
 
-/** Fill $_COOKIE as the request parser would and build a fresh Cookie service. */
+/** Require $action to throw $class with a message that contains $fragment. */
+function throws(string $class, string $fragment, callable $action): void {
+	try {
+		$action();
+	} catch (\Throwable $error) {
+		if (!$error instanceof $class || !\str_contains($error->getMessage(), $fragment)) {
+			throw new \RuntimeException('Unexpected ' . $error::class . ': ' . $error->getMessage());
+		}
+		return;
+	}
+	throw new \RuntimeException("Expected {$class} ({$fragment})");
+}
+
+/**
+ * Build a Cookie service on the baseline cfg with overrides.
+ *
+ * @param array<string,mixed> $cookie  Overrides for cfg.cookie.
+ * @param string              $baseUrl http.base_url, or '' for none.
+ * @param array<string,mixed> $options Service options.
+ */
+function cookieWith(array $cookie = [], string $baseUrl = 'http://127.0.0.1', array $options = []): Cookie {
+	$http = Registry::CFG_HTTP['http'];
+	if ($baseUrl !== '') {
+		$http['base_url'] = $baseUrl;
+	}
+	$app = new App([
+		'http'   => $http,
+		'cookie' => mergeLastWins(Registry::CFG_HTTP['cookie'], $cookie),
+	]);
+	$app->set('request', new Request($app));
+	return new Cookie($app, $options);
+}
+
+/** Fill $_COOKIE as the request parser would and build a Cookie service with Secure off. */
 function cookieFor(array $parsedCookies): Cookie {
 	$_COOKIE = $parsedCookies;
-	return new Cookie(new App([
-		'http'   => ['base_url' => 'http://127.0.0.1'],
-		'cookie' => ['secure' => false, 'httponly' => true, 'samesite' => 'Lax', 'path' => '/'],
-	]));
+	return cookieWith(['secure' => false]);
 }
+
+unset($_SERVER['HTTPS'], $_SERVER['REQUEST_SCHEME'], $_SERVER['SERVER_PORT']);
+
+
+// -- Reading untrusted input -----------------------------------------------
 
 check('Array-shaped input is absent for get(), which returns the default', function (): void {
 	$cookie = cookieFor(['_auth_rm' => ['x']]);
@@ -99,6 +146,85 @@ check('An absent cookie yields the default and has() is false', function (): voi
 	same(null, $cookie->get('missing'));
 	same('fallback', $cookie->get('missing', 'fallback'));
 	same(false, $cookie->has('missing'));
+});
+
+
+// -- Default attributes ----------------------------------------------------
+
+check('The baseline defaults are host-only, HttpOnly, SameSite=Lax and path /', function (): void {
+	$defaults = cookieWith()->defaults();
+	\ksort($defaults);
+	same(['domain' => null, 'expires' => 0, 'httponly' => true, 'path' => '/', 'samesite' => 'Lax', 'secure' => false], $defaults);
+});
+
+check('An absolute base URL does not give the cookies a Domain', function (): void {
+	foreach ([null, ''] as $domain) {
+		same(null, cookieWith(['domain' => $domain], 'https://example.com')->defaults()['domain']);
+	}
+});
+
+check('cookie.domain is used as configured, lowercase and without a leading dot', function (): void {
+	same('example.com', cookieWith(['domain' => '.Example.COM'])->defaults()['domain']);
+	same(null, cookieWith(['domain' => '.'])->defaults()['domain']);
+});
+
+check('Paths get a leading slash and no trailing slash, also in attributes()', function (): void {
+	same('/app', cookieWith(['path' => '/app/'])->defaults()['path']);
+	same('/', cookieWith(['path' => null])->defaults()['path']);
+	$cookie = cookieWith();
+	same(['/app', '/', '/'], [$cookie->attributes(['path' => 'app'])['path'], $cookie->attributes(['path' => ''])['path'], $cookie->attributes(['path' => '//'])['path']]);
+	throws(\InvalidArgumentException::class, 'path must be a string or null', fn () => $cookie->attributes(['path' => ['/app']]));
+});
+
+check('Secure is inferred from an https base URL or an HTTPS request', function (): void {
+	same(true, cookieWith([], 'https://example.com')->defaults()['secure']);
+	same(false, cookieWith([], 'http://example.com')->defaults()['secure']);
+	$_SERVER['HTTPS'] = 'on';
+	try {
+		same(true, cookieWith([], 'http://example.com')->defaults()['secure']);
+	} finally {
+		unset($_SERVER['HTTPS']);
+	}
+});
+
+check('An explicit cookie.secure wins over the inference', function (): void {
+	same(false, cookieWith(['secure' => false], 'https://example.com')->defaults()['secure']);
+	same(true, cookieWith(['secure' => true], 'http://example.com')->defaults()['secure']);
+});
+
+check('Invalid cfg values throw instead of falling back', function (): void {
+	throws(\RuntimeException::class, 'cookie.secure must be true, false or null', fn () => cookieWith(['secure' => 'yes']));
+	throws(\InvalidArgumentException::class, 'SameSite must be', fn () => cookieWith(['samesite' => 'Laxx']));
+	throws(\InvalidArgumentException::class, "'httponly' must be a bool", fn () => cookieWith(['httponly' => 1]));
+	throws(\InvalidArgumentException::class, 'domain must be a string or null', fn () => cookieWith(['domain' => ['example.com']]));
+});
+
+check('SameSite=None requires Secure, also when service options set it', function (): void {
+	throws(\RuntimeException::class, 'SameSite=None requires Secure=true', fn () => cookieWith(['samesite' => 'None', 'secure' => false]));
+	throws(\RuntimeException::class, 'SameSite=None requires Secure=true', fn () => cookieWith(['secure' => false], 'http://127.0.0.1', ['samesite' => 'none']));
+	same('None', cookieWith(['samesite' => 'none', 'secure' => true])->defaults()['samesite']);
+});
+
+check('attributes() puts overrides on top of the defaults and validates the result', function (): void {
+	$cookie = cookieWith(['secure' => true]);
+	$resolved = $cookie->attributes(['samesite' => 'strict', 'domain' => '', 'path' => '/app']);
+	same(['Strict', null, '/app', true], [$resolved['samesite'], $resolved['domain'], $resolved['path'], $resolved['secure']]);
+	same('Lax', $cookie->defaults()['samesite']);
+	throws(\RuntimeException::class, 'SameSite=None requires Secure=true', fn () => $cookie->attributes(['samesite' => 'None', 'secure' => false]));
+	throws(\InvalidArgumentException::class, "'secure' must be a bool", fn () => $cookie->attributes(['secure' => 'true']));
+});
+
+check('An invalid SameSite option on set() or delete() throws before any header', function (): void {
+	$cookie = cookieWith();
+	throws(\InvalidArgumentException::class, 'SameSite must be', fn () => $cookie->set('c', 'v', ['samesite' => 'none ']));
+	throws(\InvalidArgumentException::class, 'SameSite must be', fn () => $cookie->delete('c', ['samesite' => 'Strictly']));
+});
+
+check('Secure is inferred from an https CITOMNI_PUBLIC_ROOT_URL defined before boot', function (): void {
+	// Kernel respects a constant that an entry point defines; it may be the only https signal.
+	\define('CITOMNI_PUBLIC_ROOT_URL', 'https://www.example.com');
+	same(true, cookieWith([], '')->defaults()['secure']);
+	same(true, cookieWith([], 'http://www.example.com')->defaults()['secure']);
 });
 
 \fwrite(\STDOUT, "{$passed} passed, {$failed} failed\n");

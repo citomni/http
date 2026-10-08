@@ -47,6 +47,11 @@ use CitOmni\Kernel\Service\BaseService;
  * - Messages can be either strings or arrays; arrays are accepted as-is.
  * - Field errors are stored as array<string, list<string>>.
  * - All interaction with session state goes through the Session service API.
+ * - Reads never create a session: In a request without one, every bag is empty and
+ *   pullAll(), peek(), take(), clear() and the other readers send no session cookie.
+ *   The first write (set(), add(), old(), fieldErrors(), keep()) starts the session.
+ *   Calls that change nothing, such as old([]) or forgetOld() of absent keys, write
+ *   nothing.
  * - No catch-all exception handling; failures bubble to global ErrorHandler.
  *
  * Validation notes:
@@ -119,7 +124,7 @@ final class Flash extends BaseService {
 	 *
 	 * Behavior:
 	 * - Does not start the session.
-	 * - Does not pre-create bags; they are created lazily on first use.
+	 * - Does not pre-create bags; a missing bag reads as empty.
 	 *
 	 * @return void
 	 */
@@ -151,8 +156,6 @@ final class Flash extends BaseService {
 	 * @throws \RuntimeException If message key cap is reached.
 	 */
 	public function set(string $key, string|array $message): void {
-		$this->ensureBags();
-
 		// Retrieve current buckets; enforce key cap on new bucket creation.
 		$msg = (array)$this->app->session->get(self::KEY_MSG);
 		if (!\array_key_exists($key, $msg) && \count($msg) >= self::MAX_MSG_KEYS) {
@@ -184,8 +187,6 @@ final class Flash extends BaseService {
 	 * @throws \RuntimeException On key cap or invalid bucket type.
 	 */
 	public function add(string $key, string|array $message): void {
-		$this->ensureBags();
-
 		$msg = (array)$this->app->session->get(self::KEY_MSG);
 		if (!\array_key_exists($key, $msg) && \count($msg) >= self::MAX_MSG_KEYS) {
 			throw new \RuntimeException('Flash message key cap reached (' . self::MAX_MSG_KEYS . ').');
@@ -256,7 +257,9 @@ final class Flash extends BaseService {
 	 * @throws \RuntimeException If old-input key cap would be exceeded.
 	 */
 	public function old(array $fields): void {
-		$this->ensureBags();
+		if ($fields === []) {
+			return;
+		}
 
 		$cur = (array)$this->app->session->get(self::KEY_OLD);
 		$newKeys = \array_diff(\array_keys($fields), \array_keys($cur));
@@ -298,9 +301,6 @@ final class Flash extends BaseService {
 	 * @throws \RuntimeException If field-error key cap would be exceeded.
 	 */
 	public function fieldErrors(array $errors): void {
-		$this->ensureBags();
-
-
 		// -- 1. Fast-exit on empty input --------------------------------
 		if ($errors === []) {
 			return;
@@ -348,7 +348,6 @@ final class Flash extends BaseService {
 	 * @return mixed
 	 */
 	public function oldValue(string $key, mixed $default = null): mixed {
-		$this->ensureBags();
 		$cur = (array)$this->app->session->get(self::KEY_OLD);
 		return $cur[$key] ?? $default;
 	}
@@ -361,7 +360,6 @@ final class Flash extends BaseService {
 	 * @return bool
 	 */
 	public function hasOld(string $key): bool {
-		$this->ensureBags();
 		$cur = (array)$this->app->session->get(self::KEY_OLD);
 		return \array_key_exists($key, $cur);
 	}
@@ -374,8 +372,6 @@ final class Flash extends BaseService {
 	 * @return string|array<mixed>|null Message payload, or null if absent.
 	 */
 	public function take(string $key): string|array|null {
-		$this->ensureBags();
-
 		$msg = (array)$this->app->session->get(self::KEY_MSG);
 		if (!\array_key_exists($key, $msg)) {
 			return null;
@@ -395,7 +391,6 @@ final class Flash extends BaseService {
 	 * @return string|array<mixed>|null
 	 */
 	public function peek(string $key): string|array|null {
-		$this->ensureBags();
 		$msg = (array)$this->app->session->get(self::KEY_MSG);
 		return $msg[$key] ?? null;
 	}
@@ -411,8 +406,6 @@ final class Flash extends BaseService {
 	 * }
 	 */
 	public function peekAll(): array {
-		$this->ensureBags();
-
 		return [
 			'msg' => (array)$this->app->session->get(self::KEY_MSG),
 			'old' => (array)$this->app->session->get(self::KEY_OLD),
@@ -433,10 +426,6 @@ final class Flash extends BaseService {
 	 * }
 	 */
 	public function pullAll(): array {
-
-		$this->ensureBags();
-
-
 		// -- 1. Load current flash state --------------------------------
 		$msg  = (array)$this->app->session->get(self::KEY_MSG);
 		$old  = (array)$this->app->session->get(self::KEY_OLD);
@@ -450,10 +439,8 @@ final class Flash extends BaseService {
 		];
 
 		// -- 2. Preserve once when keep() was requested -----------------
+		// The bags stay in the session as they are; only the flag is consumed.
 		if ($keep) {
-			$this->app->session->set(self::KEY_MSG, $msg);
-			$this->app->session->set(self::KEY_OLD, $old);
-			$this->app->session->set(self::KEY_ERR, $err);
 			$this->app->session->remove(self::KEY_KEEP);
 			return $out;
 		}
@@ -480,7 +467,6 @@ final class Flash extends BaseService {
 	 * @return void
 	 */
 	public function keep(bool $enable = true): void {
-		$this->ensureBags();
 		if ($enable) {
 			$this->app->session->set(self::KEY_KEEP, true);
 		} else {
@@ -495,7 +481,6 @@ final class Flash extends BaseService {
 	 * @return void
 	 */
 	public function clear(): void {
-		$this->ensureBags();
 		$this->app->session->remove(self::KEY_MSG);
 		$this->app->session->remove(self::KEY_OLD);
 		$this->app->session->remove(self::KEY_ERR);
@@ -510,8 +495,6 @@ final class Flash extends BaseService {
 	 * @return void
 	 */
 	public function forgetMsg(string $key): void {
-		$this->ensureBags();
-
 		$msg = (array)$this->app->session->get(self::KEY_MSG);
 		if (\array_key_exists($key, $msg)) {
 			unset($msg[$key]);
@@ -527,17 +510,18 @@ final class Flash extends BaseService {
 	 * @return void
 	 */
 	public function forgetOld(array $keys): void {
-		$this->ensureBags();
-
 		if ($keys === []) {
 			return;
 		}
 
 		$old = (array)$this->app->session->get(self::KEY_OLD);
+		$count = \count($old);
 		foreach ($keys as $k) {
 			unset($old[$k]);
 		}
-		$this->app->session->set(self::KEY_OLD, $old);
+		if (\count($old) !== $count) {
+			$this->app->session->set(self::KEY_OLD, $old);
+		}
 	}
 
 
@@ -548,31 +532,6 @@ final class Flash extends BaseService {
 	// ----------------------------------------------------------------
 	// Internal helpers
 	// ----------------------------------------------------------------
-
-	/**
-	 * Ensure the session is active and required bags exist.
-	 *
-	 * Behavior:
-	 * - Starts the session via Session service if not active.
-	 * - Creates empty arrays for _flash.msg, _flash.old, and _flash.err when missing.
-	 *
-	 * @return void
-	 */
-	private function ensureBags(): void {
-		if (!$this->app->session->isActive()) {
-			$this->app->session->start();
-		}
-		if (!$this->app->session->has(self::KEY_MSG)) {
-			$this->app->session->set(self::KEY_MSG, []);
-		}
-		if (!$this->app->session->has(self::KEY_OLD)) {
-			$this->app->session->set(self::KEY_OLD, []);
-		}
-		if (!$this->app->session->has(self::KEY_ERR)) {
-			$this->app->session->set(self::KEY_ERR, []);
-		}
-	}
-
 
 	/**
 	 * Normalize one field's error payload to a compact list of strings.

@@ -25,6 +25,8 @@ declare(strict_types=1);
  *   empty and associative arrays become nested nodes, lists stay arrays. Services
  *   test "instanceof Cfg" on list-valued keys, so the FQCN must be the kernel's.
  * - CitOmni\Kernel\Service\BaseService keeps the app and options, then calls init().
+ * - CitOmni\Kernel\Controller\BaseController keeps the app and route config, then
+ *   calls init().
  * - CitOmni\Http\Tests\Support\App holds cfg, routes and the services a suite
  *   registers. Like the kernel App it resolves services through __get(), throws on
  *   unknown ids and has no __isset().
@@ -69,6 +71,23 @@ namespace CitOmni\Kernel\Service {
 		public function __construct(object $app, array $options = []) {
 			$this->app = $app;
 			$this->options = $options;
+			if (\method_exists($this, 'init')) {
+				$this->init();
+			}
+		}
+	}
+}
+
+namespace CitOmni\Kernel\Controller {
+
+	/** Base controller double: keeps the app and route config, then calls init() when defined. */
+	abstract class BaseController {
+		protected object $app;
+		protected array $routeConfig;
+
+		public function __construct(object $app, array $routeConfig = []) {
+			$this->app = $app;
+			$this->routeConfig = $routeConfig;
 			if (\method_exists($this, 'init')) {
 				$this->init();
 			}

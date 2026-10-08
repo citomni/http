@@ -399,16 +399,10 @@ class Response extends BaseService {
 			"connect-src 'self'"
 		);
 
-		// HSTS only when HTTPS (prefer server-level, but fine here if needed)
-		if ($this->app->hasService('request') && $this->app->request->isHttps()) {
+		// HSTS only when this connection is HTTPS (prefer server-level, but fine here if needed).
+		// Transport, not site policy: Browsers ignore HSTS received over plain HTTP.
+		if ($this->app->request->isHttps()) {
 			$this->setHeader('Strict-Transport-Security', 'max-age=15552000; includeSubDomains; preload');
-		} else {
-			if (
-				(!empty($_SERVER['HTTPS']) && \strtolower((string)$_SERVER['HTTPS']) !== 'off') ||
-				(isset($_SERVER['SERVER_PORT']) && (int)$_SERVER['SERVER_PORT'] === 443)
-			) {
-				$this->setHeader('Strict-Transport-Security', 'max-age=15552000; includeSubDomains; preload');
-			}
 		}
 	}
 

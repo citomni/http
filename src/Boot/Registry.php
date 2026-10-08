@@ -53,6 +53,7 @@ final class Registry {
 		'tplEngine'		=> \CitOmni\Http\Service\TemplateEngine::class,
 		// 'security'		=> \CitOmni\Http\Service\Security::class,   // Replaced by the newer CSRF-service, but kept for now for back compat
 		'csrf'			=> \CitOmni\Http\Service\Csrf::class,
+		'captcha'		=> \CitOmni\Http\Service\Captcha::class,
 		'nonce'			=> \CitOmni\Http\Service\Nonce::class,
 		'maintenance'	=> \CitOmni\Http\Service\Maintenance::class,
 		'webhooksAuth'	=> \CitOmni\Http\Service\WebhooksAuth::class,
@@ -300,48 +301,73 @@ final class Registry {
 		 *------------------------------------------------------------------
 		 * SESSION
 		 *------------------------------------------------------------------
+		 *
+		 * Storage:
+		 * - gc_maxlifetime is how long PHP keeps idle session data (storage
+		 *   retention), not a login lifetime. citomni/authenticate raises it to
+		 *   its idle timeout.
+		 * - gc_probability/gc_divisor is the chance per session start that PHP
+		 *   collects garbage. It is set explicitly because Debian and Ubuntu ship
+		 *   gc_probability=0 and clean only their php.ini save paths from cron,
+		 *   never this save_path. Use 0 only when a scheduled job cleans save_path.
+		 *
+		 * Session cookie:
+		 * - The attributes come from Cookie::attributes() (cfg.cookie). A
+		 *   non-null cookie_* value overrides one attribute for the session
+		 *   cookie only. cookie_domain '' forces host-only even when cookie.domain
+		 *   is set.
+		 * - cookie_httponly stays true whatever cookie.httponly says: Scripts
+		 *   must not read the session id.
+		 * - The lifetime is always 0 (until the browser closes).
+		 *
+		 * Removed:
+		 * - rotate_interval and fingerprint. Session throws when either is still
+		 *   enabled in an application or provider config.
 		 */
-		
+
 		'session' => [
-			// Core
+			// Storage
 			'name'                    => 'CITSESSID',
 			'save_path'               => CITOMNI_APP_PATH . '/var/state/php_sessions',
-			'gc_maxlifetime'          => 1440,
+			'gc_maxlifetime'          => 1440,      // Seconds PHP keeps idle session data.
+			'gc_probability'          => 1,         // With gc_divisor: GC chance per session start (1/1000).
+			'gc_divisor'              => 1000,
 			'use_strict_mode'         => true,
 			'use_only_cookies'        => true,
 			'lazy_write'              => true,
-			'sid_length'              => 48,
-			'sid_bits_per_character'  => 6,
 
-			// Cookie flags
-			'cookie_secure'           => null,      // dev: null (auto); stage/prod: set true
-			'cookie_httponly'         => true,
-			'cookie_samesite'         => 'Lax',     // 'Lax'|'Strict'|'None' (None requires Secure)
-			'cookie_path'             => '/',
-			'cookie_domain'           => null,
-
-			// Optional hardening (all disabled by default for zero overhead)
-			'rotate_interval'         => 0,         // e.g. 1800 to rotate every 30 min
-			'fingerprint' => [
-				'bind_user_agent'       => false,   // true to bind UA hash
-				'bind_ip_octets'        => 0,       // IPv4: 0..4 leading octets
-				'bind_ip_blocks'        => 0,       // IPv6: 0..8 leading blocks
-			],
-		],		
+			// Session cookie overrides; null takes the attribute from cfg.cookie
+			'cookie_secure'           => null,      // null: As cookie.secure (inferred when that is null too)
+			'cookie_httponly'         => true,      // Pinned: Scripts must not read the session id.
+			'cookie_samesite'         => null,      // null: As cookie.samesite. 'Lax'|'Strict'|'None' (None requires Secure)
+			'cookie_path'             => null,      // null: As cookie.path
+			'cookie_domain'           => null,      // null: As cookie.domain; '' forces host-only
+		],
 
 
 		/*
 		 *------------------------------------------------------------------
 		 * COOKIE
 		 *------------------------------------------------------------------
+		 *
+		 * Default attributes of every cookie, the session cookie included (see
+		 * Cookie::attributes()).
+		 *
+		 * - secure null infers: True when http.base_url or CITOMNI_PUBLIC_ROOT_URL
+		 *   is https, or when the request is HTTPS (proxy-aware).
+		 * - domain null is host-only: No Domain attribute, so the browser returns
+		 *   the cookie only to the host that set it. A domain shares the cookie
+		 *   with every subdomain; set one only for that purpose. Earlier versions
+		 *   derived it from http.base_url.
+		 * - samesite accepts Lax, Strict or None; anything else throws.
 		 */
 
 		'cookie' => [
-			// 'secure'   => true|false, // omit to auto-compute
+			'secure'   => null,     // null: Inferred; true|false: Explicit
 			'httponly' => true,
 			'samesite' => 'Lax',
 			'path'     => '/',
-			// 'domain' => 'example.com',
+			'domain'   => null,     // null: Host-only. 'example.com' shares the cookies with its subdomains.
 		],
 
 
@@ -381,9 +407,20 @@ final class Registry {
 			
 			
 			// Anti-bots
-			'captcha_protection'	=> true, // true | false; The native captcha will help prevent bots from filling out forms.
+			'captcha_protection'	=> true, // true | false; Enforces the captcha service (security.captcha) where forms use it. Needs citomni/image.
 			'honeypot_protection'	=> true, // true | false; Enables honeypot protection to prevent automated bot submissions.	
 			'form_action_switching'	=> true, // true | false; Enables dynamic form action switching to prevent bot submissions.
+
+			// Captcha challenges (Service\Captcha). The image route is opt-in: the app
+			// routes image_path to CaptchaController::image in config/citomni_http_routes.php.
+			'captcha' => [
+				'session_key'	=> '_captcha',		// Session key holding the pending challenges.
+				'ttl'			=> 1200,			// Seconds a challenge stays valid; keep it below session.gc_maxlifetime.
+				'max_pending'	=> 5,				// Pending challenges per session (tabs, forms); issuing beyond this drops the oldest.
+				'id_field'		=> 'captcha_id',	// Hidden form field with the challenge id ($captchaField()).
+				'answer_field'	=> 'captcha',		// Form field with the user's answer.
+				'image_path'	=> '/captcha.png',	// App path routed to CaptchaController::image ($captchaUrl()).
+			],
 		],
 
 

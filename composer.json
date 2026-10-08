@@ -1,6 +1,6 @@
 {
 	"name": "citomni/http",
-	"description": "High-performance HTTP runtime for CitOmni apps: kernel boot glue, request/response, router, view, security (CSRF), maintenance mode, webhooks HMAC, and nonce ledger.",
+	"description": "High-performance HTTP runtime for CitOmni apps: kernel boot glue, request/response, router, view, security (CSRF, captcha), maintenance mode, webhooks HMAC, and nonce ledger.",
 	"type": "library",
 	"license": "MIT",
 	"homepage": "https://github.com/citomni/http",
@@ -37,6 +37,7 @@
 		"ext-json": "Faster JSON handling for Response/ErrorHandler",
 		"ext-fileinfo": "Accurate MIME detection for Response::download()",
 		"ext-opcache": "Better performance and cache invalidation",
+		"citomni/image": "Codes and images for the captcha service (security.captcha_protection)",
 		"citomni/infrastructure": "Optional services used when present (log, txt/mail/db)"
 	},
 	"support": {

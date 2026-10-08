@@ -46,9 +46,10 @@ use CitOmni\Kernel\Service\BaseService;
  *   It includes generic request context, and callers may pass extra context
  *   to verify()/requireValid() for adapter-specific audit details.
  *   The service never writes directly to files.
- * - The session is started automatically when needed. Callers do not need
- *   to ensure session state before calling token(), htmlField(), rotate(),
- *   clear(), or verification methods.
+ * - token(), htmlField() and rotate() store the token and so start the session when
+ *   there is none. Verification and clear() never start one: Without a session there
+ *   is no token, and verification fails with TokenMissing. Callers do not need to
+ *   ensure session state before calling any of them.
  *
  * Notes:
  * - This service replaces the legacy security service for CSRF concerns.
@@ -354,8 +355,8 @@ final class Csrf extends BaseService {
 	/**
 	 * Return the CSRF token for the current session.
 	 *
-	 * Creates the session token lazily on first call (starts the session if
-	 * not already active). When mask_tokens is enabled, each call returns a
+	 * Creates the session token lazily on first call (which starts the session
+	 * when there is none). When mask_tokens is enabled, each call returns a
 	 * different masked representation (new random mask). All masked variants
 	 * resolve to the same underlying session token on verify.
 	 *
@@ -456,12 +457,11 @@ final class Csrf extends BaseService {
 	 * Use when destroying a session entirely. After clear(), subsequent
 	 * token()/htmlField() calls will create a fresh token.
 	 *
-	 * Starts the session if not already active (required for remove to be meaningful).
+	 * Never starts a session: Without one there is no token to remove.
 	 *
 	 * @return void
 	 */
 	public function clear(): void {
-		$this->ensureSession();
 		$this->app->session->remove($this->sessionKey);
 	}
 
@@ -660,14 +660,13 @@ final class Csrf extends BaseService {
 	 * A form field that is not a string (PHP parses "_csrf[]=x" into an array)
 	 * fails as TokenInvalid.
 	 *
-	 * Starts the session if not already active (required for token comparison).
+	 * Never starts a session: A request without one has no session token and fails
+	 * as TokenMissing, so a forged request does not create a session either.
 	 *
 	 * @return ?CsrfFailureReason Null on pass, specific reason on fail.
 	 * @throws CsrfException If the session token exists but is malformed (invariant violation).
 	 */
 	private function checkToken(): ?CsrfFailureReason {
-		$this->ensureSession();
-
 		// -- 1. Load submitted token from header or POST --------------------
 		// Read submitted token: header first (all methods), then POST form field
 		// (POST only - PHP only populates $_POST for POST requests).
@@ -739,30 +738,6 @@ final class Csrf extends BaseService {
 
 
 	// ----------------------------------------------------------------
-	// Internal - Session management
-	// ----------------------------------------------------------------
-
-	/**
-	 * Start the session if not already active.
-	 *
-	 * Delegates to the session service - never calls session_start() directly.
-	 *
-	 * @return void
-	 */
-	private function ensureSession(): void {
-		if (!$this->app->session->isActive()) {
-			$this->app->session->start();
-		}
-	}
-
-
-
-
-
-
-
-
-	// ----------------------------------------------------------------
 	// Internal - Token management
 	// ----------------------------------------------------------------
 
@@ -775,8 +750,6 @@ final class Csrf extends BaseService {
 	 * @return string Lowercase hex-encoded raw token.
 	 */
 	private function ensureSessionToken(): string {
-		$this->ensureSession();
-
 		$hex = $this->app->session->get($this->sessionKey);
 
 		if (
@@ -795,10 +768,11 @@ final class Csrf extends BaseService {
 	/**
 	 * Generate a new random token, store in session, return lowercase hex.
 	 *
+	 * Storing the token starts the session when there is none.
+	 *
 	 * @return string Lowercase hex-encoded raw token.
 	 */
 	private function generateToken(): string {
-		$this->ensureSession();
 		$hex = \bin2hex(\random_bytes($this->tokenBytes));
 		$this->app->session->set($this->sessionKey, $hex);
 		return $hex;

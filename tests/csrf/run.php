@@ -103,19 +103,22 @@ function thrown(callable $fn): \Throwable {
 	throw new \RuntimeException('Expected an exception; none was thrown');
 }
 
-/** Session service double: one browser's server-side session, shared by its requests. */
+/**
+ * Session service double: One browser's server-side session, shared by its requests.
+ *
+ * Follows the Session contract: start() and set() create the session when there is
+ * none; get() and remove() never do. $exists records whether it was created.
+ */
 final class SessionStore {
 	public array $data = [];
-	public int $starts = 0;
-	private bool $active = false;
+	public bool $exists = false;
 
 	public function isActive(): bool {
-		return $this->active;
+		return $this->exists;
 	}
 
 	public function start(): void {
-		$this->active = true;
-		$this->starts++;
+		$this->exists = true;
 	}
 
 	public function get(string $key): mixed {
@@ -123,6 +126,7 @@ final class SessionStore {
 	}
 
 	public function set(string $key, mixed $value): void {
+		$this->exists = true;
 		$this->data[$key] = $value;
 	}
 
@@ -190,7 +194,7 @@ check('Safe methods pass without token, Origin or session', function (): void {
 		same(false, $csrf->isProtectedMethod(), $method);
 		same(true, $csrf->verify(), $method);
 		same(null, reason($csrf), $method);
-		same(0, $session->starts, $method);
+		same(false, $session->exists, $method);
 		same([], $log->entries, $method);
 	}
 });
@@ -201,7 +205,7 @@ check('Disabled protection passes unsafe requests without touching the session',
 	same(false, $csrf->isEnabled());
 	same(true, $csrf->verify());
 	same(null, reason($csrf));
-	same(0, $session->starts);
+	same(false, $session->exists);
 });
 
 check('protect_methods replaces the default list and matches case-insensitively', function (): void {
@@ -219,7 +223,7 @@ check('protect_methods replaces the default list and matches case-insensitively'
 check('A same-origin POST passes with the token in the header or in the form field', function (): void {
 	$session = new SessionStore();
 	$token = issueToken($session);
-	same(1, $session->starts);
+	same(true, $session->exists);
 	same(true, csrfFor($session, ['HTTP_X_CSRF_TOKEN' => $token])->verify());
 	same(true, csrfFor($session, [], ['_csrf' => $token])->verify());
 });
@@ -293,6 +297,16 @@ check('Unmasked tokens are the raw secret and compare case-insensitively', funct
 	same('token_invalid', reason(csrfFor($session, ['HTTP_X_CSRF_TOKEN' => \substr($token, 1)], [], $cfg)));
 	// A masked token does not pass as a raw one.
 	same('token_invalid', reason(csrfFor($session, ['HTTP_X_CSRF_TOKEN' => issueToken($session)], [], $cfg)));
+});
+
+check('Verification and clear() never create a session', function (): void {
+	$token = issueToken(new SessionStore());
+	$session = new SessionStore();
+	// A forged POST, with and without a token, to a browser that has no session.
+	same('token_missing', reason(csrfFor($session)));
+	same('token_missing', reason(csrfFor($session, ['HTTP_X_CSRF_TOKEN' => $token])));
+	csrfFor($session, ['REQUEST_METHOD' => 'GET'])->clear();
+	same(false, $session->exists);
 });
 
 check('rotate() and clear() invalidate tokens issued earlier', function (): void {
