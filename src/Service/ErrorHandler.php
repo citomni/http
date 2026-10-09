@@ -55,7 +55,8 @@ use CitOmni\Kernel\Service\BaseService;
  * - error_handler.render.detail.trace.max_depth (int, default 3)
  * - error_handler.render.detail.trace.ellipsis (string, default "...")
  * - error_handler.log.trigger (int bitmask, default E_ALL) - Which PHP errors to log (non-fatal path).
- * - error_handler.log.path (string) - Directory for JSONL logs.
+ * - error_handler.log.path (string) - Directory for JSONL logs. An empty or whitespace-only value
+ *   falls back to CITOMNI_APP_PATH . '/var/logs'.
  * - error_handler.log.max_bytes (int, default 2_000_000) - Soft pre-write rotation threshold per
  *   live file. rotate() re-checks the current size plus the pending record under lock; concurrent
  *   writers may still temporarily push the live file past the threshold before a later rotation.
@@ -234,7 +235,8 @@ final class ErrorHandler extends BaseService {
 	 * Behavior:
 	 * - Reads pre-merged $this->opt and assigns strongly-typed properties.
 	 * - Sanitizes the render mask to exclude fatal-class errors (shutdown owns those).
-	 * - Loads logging configuration (mask, directory, rotation limits).
+	 * - Loads logging configuration (mask, directory, rotation limits). An empty or
+	 *   whitespace-only log.path falls back to CITOMNI_APP_PATH . '/var/logs'.
 	 * - Resolves template paths and status defaults for each error bucket.
 	 * - Computes developer-detail gating from cfg + environment.
 	 * - Applies bounded trace limits (frames, arg length, array items, depth, ellipsis).
@@ -276,8 +278,12 @@ final class ErrorHandler extends BaseService {
 		// Logging: Mask and rotation knobs (defaults are broad and modest)
 		$this->logMask = (int)($this->opt['log']['trigger'] ?? E_ALL);
 
-		// Normalize log directory and rotation limits
-		$dir = (string)($this->opt['log']['path'] ?? (\CITOMNI_APP_PATH . '/var/logs'));
+		// Normalize log directory and rotation limits. An empty path would leave logDir
+		// empty and make every log write fail, so it falls back to the default directory.
+		$dir = \trim((string)($this->opt['log']['path'] ?? ''));
+		if ($dir === '') {
+			$dir = \CITOMNI_APP_PATH . '/var/logs';
+		}
 		$this->logDir   = \rtrim($dir, '/\\');
 		$this->maxBytes = (int)($this->opt['log']['max_bytes'] ?? 2_000_000);
 		$this->maxFiles = (int)($this->opt['log']['max_files'] ?? 10);
@@ -1119,6 +1125,8 @@ HTML;
 	 * - This method is safe to call from within error/exception/shutdown handlers.
 	 *
 	 * Concurrency notes:
+	 * - A failed mkdir() is a failure only if the log directory is still missing, so a
+	 *   writer that loses the race to create it keeps logging.
 	 * - Writers never rotate while holding the main-file lock (prevents deadlocks).
 	 * - Size checks use clearstatcache(...) to avoid stale results.
 	 * - JSON encoding uses JSON_PARTIAL_OUTPUT_ON_ERROR to avoid losing the event.
@@ -1137,8 +1145,9 @@ HTML;
 	private function writeJsonl(string $file, array $record): void {
 		
 		try {
-			// Make sure the log directory exists (best effort; do not escalate on failure)
-			if (!\is_dir($this->logDir) && !@\mkdir($this->logDir, 0775, true)) {
+			// Make sure the log directory exists (best effort; do not escalate on failure).
+			// mkdir() fails when a concurrent request created the directory first; is_dir() decides.
+			if (!\is_dir($this->logDir) && !@\mkdir($this->logDir, 0775, true) && !\is_dir($this->logDir)) {
 				throw new \RuntimeException('log dir create failed');
 			}
 

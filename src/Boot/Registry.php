@@ -250,6 +250,7 @@ final class Registry {
 
 				/*
 				 * Log directory (absolute). Files are JSONL with size-guarded rotation.
+				 * An empty or whitespace-only value falls back to CITOMNI_APP_PATH . '/var/logs'.
 				 * Rotation strategy: sidecar lock + copy+truncate; rotated files are timestamped.
 				 * Retention: see 'max_files' below (live file is never deleted by prune()).
 				 */

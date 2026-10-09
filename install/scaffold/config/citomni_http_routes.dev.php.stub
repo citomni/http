@@ -27,12 +27,12 @@ declare(strict_types=1);
  *
  * WHY RETURN [] BY DEFAULT?
  *   - The CitOmni HTTP core (vendor) may already ship helpful dev tools
- *     like /appinfo.html, diagnostics, etc.
+ *     like /_system/appinfo.html, diagnostics, etc.
  *   - If we shipped conflicting stubs here, we'd accidentally override
  *     the real implementations in vendor for dev environments.
  *
  * HOW TO USE IT IN YOUR APP:
- *   1) Copy one of the commented examples below.
+ *   1) Copy the commented example below.
  *   2) Paste it into the return array.
  *   3) Adjust controller/action/template to match your app.
  *
@@ -48,18 +48,15 @@ declare(strict_types=1);
  *     ],
  * ];
  *
- * EXAMPLE: custom 404 just for dev (helps debugging broken links)
- *
- * return [
- *     404 => [
- *         'controller'     => \App\Http\Controller\Dev\DebugErrorController::class,
- *         'action'         => 'notFoundDebug',
- *         'methods'        => ['GET'],
- *         'template_file'  => 'dev/error_404_debug.html',
- *         'template_layer' => 'app',
- *         'params'         => [404],
- *     ],
- * ];
+ * ERROR PAGES ARE NOT ROUTES:
+ *   - A numeric key such as 404 is never dispatched. The Router hands
+ *     404, 405 and 500 to ErrorHandler::httpError().
+ *   - To debug broken links, set error_handler.render.detail.level = 1
+ *     in citomni_http_cfg.dev.php (the dev scaffold does). A 404 page
+ *     then shows the path, method and reason. Every 404 is also logged
+ *     to http_router_404.jsonl in the error_handler.log.path directory.
+ *   - A dev-only error page goes in error_handler.templates.html in
+ *     citomni_http_cfg.dev.php.
  *
  * SECURITY NOTE:
  *   - Anything you add here should *not* be exposed publicly in prod/stage.

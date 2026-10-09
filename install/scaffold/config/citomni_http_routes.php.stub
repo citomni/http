@@ -26,10 +26,9 @@ declare(strict_types=1);
  *   The array returned by this file is merged into $this->app->routes at boot.
  *   The Router uses $this->app->routes to dispatch incoming HTTP requests.
  *
- * MERGE MODEL (deterministic "last wins" per route key):
+ * MERGE MODEL (deterministic "last wins"):
  *   1) Vendor baseline:
- *        \CitOmni\Http\Boot\Routes::MAP_HTTP
- *        (if defined)
+ *        \CitOmni\Http\Boot\Registry::ROUTES_HTTP
  *
  *   2) Provider routes:
  *        Each provider in /config/providers.php may define
@@ -45,21 +44,28 @@ declare(strict_types=1);
  *        ('dev' | 'stage' | 'prod')
  *
  * IMPORTANT:
- *   - "Last wins per key" means: if multiple layers define the same
- *     literal path (e.g. '/login') or the same error code (e.g. 404),
- *     the later layer overrides the earlier one for that key only.
+ *   - "Last wins" merges deeply. If several layers define the same
+ *     literal path (e.g. '/login'), the later layer overrides the fields
+ *     it sets. Fields it leaves out keep the earlier value; set them to
+ *     null to clear them. 'methods' is a list and is replaced as a whole.
+ *
+ *   - Regex routes merge per pattern under 'regex'. A pattern that no
+ *     earlier layer defines is appended, so it is tried after theirs.
+ *     A redefined pattern keeps its position, and its fields merge as
+ *     for a literal path.
  *
  *   - EMPTY ARRAYS ARE SKIPPED:
  *     If this file returns [], the app does NOT treat that as
  *     "wipe all routes". It simply means "no overrides from app base".
  *     Same for providers with ROUTES_HTTP = [] and for the {ENV} file.
+ *     This applies to whole layers only: 'regex' => [] inside a layer
+ *     replaces the regex routes of all earlier layers.
  *
  * RUNTIME ACCESS:
  *   - After merge, the final route table lives on the App instance:
  *
  *         $this->app->routes['/']
  *         $this->app->routes['regex']
- *         $this->app->routes['404']
  *
  * MATCHING RULES:
  *
@@ -80,9 +86,11 @@ declare(strict_types=1);
  *      - Checked in array order.
  *      - Built-in placeholders:
  *           {id}    => [0-9]+
- *           {email} => [a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+
+ *           {email} => [a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}
  *           {slug}  => [a-zA-Z0-9-_]+
  *           {code}  => [a-zA-Z0-9]+
+ *        Any other placeholder matches one path segment ([^/]+).
+ *      - Captured values are passed to the action as positional arguments.
  *
  *      Example:
  *        'regex' => [
@@ -95,10 +103,11 @@ declare(strict_types=1);
  *          ],
  *        ],
  *
- *   3) Error routes (optional)
- *      - Numeric keys like 404, 405, 500.
- *      - Router / ErrorHandler can render these on failure.
- *      - If you omit them, CitOmni will fall back to safe defaults.
+ * ERROR PAGES:
+ *   - Error pages are not routes. The Router hands 404, 405 and 500 to
+ *     ErrorHandler::httpError(), which logs and renders them.
+ *   - Customize the page with error_handler.templates.html (and
+ *     .html_failsafe) in citomni_http_cfg.php.
  *
  * METHODS / ALLOWED VERBS:
  *   - 'methods' => ['GET','POST',...]
@@ -110,7 +119,7 @@ declare(strict_types=1);
  *   - 'template_file'  => 'public/foo.html'
  *   - 'template_layer' => 'app'
  *   These are injected into the controller so it can forward them to
- *   TemplateEngine / View without hardcoding layout knowledge everywhere.
+ *   TemplateEngine without hardcoding layout knowledge everywhere.
  *
  * DEV-ONLY ROUTES:
  *   - Put debug/admin-only stuff into /config/citomni_http_routes.dev.php
@@ -137,7 +146,6 @@ return [
 		'methods'        => ['GET'], // HEAD auto-added; OPTIONS handled automatically
 		'template_file'  => 'public/index.html',
 		'template_layer' => 'app',
-		// 'params'      => [], // optional, passed positionally to the action
 	],
 	*/
 
@@ -154,6 +162,8 @@ return [
 	// -----------------------------------------------------------------
 	// Regex / placeholder routes (evaluated in array order)
 	// Placeholders supported only here. Built-ins: {id}, {email}, {slug}, {code}
+	// Keep at least one pattern when you enable this key: an empty
+	// 'regex' => [] replaces the regex routes of vendor and providers.
 	// -----------------------------------------------------------------
 
 	/*
@@ -163,7 +173,7 @@ return [
 		// 	'action'         => 'show',
 		// 	'methods'        => ['GET'],
 		// 	'template_file'  => 'public/user.html',
-		// 	'template_layer' => 'app/http',
+		// 	'template_layer' => 'app',
 		// ],
 
 		// '/email/{email}' => [
@@ -177,57 +187,6 @@ return [
 		// 	'action'     => 'view',
 		// 	'methods'    => ['GET'],
 		// ],
-	],
-	*/
-
-
-	// -----------------------------------------------------------------
-	// Error routes (optional). If omitted, a sane default is used.
-	// Router will fall back to a plain-text error if your error route fails,
-	// because infinite error loops are funny exactly once.
-	// -----------------------------------------------------------------
-
-	/*
-	403 => [
-		'controller'     => \CitOmni\Http\Controller\PublicController::class,
-		'action'         => 'errorPage',
-		'methods'        => ['GET'],
-		'template_file'  => 'errors/error_default.html',
-		'template_layer' => 'citomni/http',
-		'params'         => [403],
-	],
-	*/
-
-	/*
-	404 => [
-		'controller'     => \CitOmni\Http\Controller\PublicController::class,
-		'action'         => 'errorPage',
-		'methods'        => ['GET'],
-		'template_file'  => 'errors/error_default.html',
-		'template_layer' => 'citomni/http',
-		'params'         => [404],
-	],
-	*/
-
-	/*
-	405 => [
-		'controller'     => \CitOmni\Http\Controller\PublicController::class,
-		'action'         => 'errorPage',
-		'methods'        => ['GET'],
-		'template_file'  => 'errors/error_default.html',
-		'template_layer' => 'citomni/http',
-		'params'         => [405],
-	],
-	*/
-
-	/*
-	500 => [
-		'controller'     => \CitOmni\Http\Controller\PublicController::class,
-		'action'         => 'errorPage',
-		'methods'        => ['GET'],
-		'template_file'  => 'errors/error_default.html',
-		'template_layer' => 'citomni/http',
-		'params'         => [500],
 	],
 	*/
 
