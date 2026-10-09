@@ -22,8 +22,8 @@ use CitOmni\Http\Tests\Support\App;
 use function CitOmni\Http\Tests\Support\mergeLastWins;
 
 /*
- * Isolated suite for CitOmni\Http\Service\Cookie: Reading untrusted cookie input and
- * resolving the default attributes.
+ * Isolated suite for CitOmni\Http\Service\Cookie: Reading untrusted cookie input,
+ * resolving the default attributes, and the same-request view after set().
  *
  * Usage:
  *   php tests/cookie/run.php
@@ -35,6 +35,9 @@ use function CitOmni\Http\Tests\Support\mergeLastWins;
  *   "Cookie: _auth_rm[]=x" arrives as ['_auth_rm' => ['x']].
  * - Request::isHttps() reads $_SERVER; cases set HTTPS there. The case with
  *   CITOMNI_PUBLIC_ROOT_URL runs last, because a constant cannot be undefined.
+ * - In the CLI, setcookie() succeeds until output passes through PHP's output layer.
+ *   The suite reports through STDOUT, which bypasses that layer, so set() still works
+ *   after earlier cases have reported.
  */
 
 if (\PHP_SAPI !== 'cli') {
@@ -118,6 +121,25 @@ function cookieFor(array $parsedCookies): Cookie {
 	return cookieWith(['secure' => false]);
 }
 
+/**
+ * Replace the value a request brought for a host-only cookie and read it back through get().
+ *
+ * @param string $host HTTP_HOST of the request, as the browser sends it.
+ * @return string|null The value get() returns in the same request.
+ */
+function readBackOn(string $host): ?string {
+	$_SERVER['HTTP_HOST'] = $host;
+	$_COOKIE = ['c' => 'old'];
+	try {
+		$cookie = cookieWith(['secure' => false]);
+		same(true, $cookie->set('c', 'new'));
+		return $cookie->get('c');
+	} finally {
+		unset($_SERVER['HTTP_HOST']);
+		$_COOKIE = [];
+	}
+}
+
 unset($_SERVER['HTTPS'], $_SERVER['REQUEST_SCHEME'], $_SERVER['SERVER_PORT']);
 
 
@@ -146,6 +168,17 @@ check('An absent cookie yields the default and has() is false', function (): voi
 	same(null, $cookie->get('missing'));
 	same('fallback', $cookie->get('missing', 'fallback'));
 	same(false, $cookie->has('missing'));
+});
+
+
+// -- Same-request view after set() -----------------------------------------
+
+check('On the IPv6 host [::1], get() returns the value set() wrote in the same request', function (): void {
+	same('new', readBackOn('[::1]'));
+});
+
+check('On the IPv6 host [2001:db8::1]:8443, get() returns the value set() wrote in the same request', function (): void {
+	same('new', readBackOn('[2001:db8::1]:8443'));
 });
 
 

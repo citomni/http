@@ -697,7 +697,9 @@ class Cookie extends BaseService {
 	 * within the same request).
 	 *
 	 * Behavior:
-	 * - Normalizes the request host (strip IPv6 brackets/port, lowercase) and path.
+	 * - Normalizes the request host and path. A bracketed IPv6 literal loses its brackets
+	 *   and the port after them ("[::1]:8080" -> "::1"); a name or IPv4 address loses its
+	 *   port ("example.com:8080" -> "example.com"). The host is lowercased.
 	 * - Domain rules:
 	 *   - If the request host is an IP or "localhost": browsers typically reject
 	 *     Domain-scoped cookies; require host-only (cookie domain MUST be null).
@@ -721,18 +723,17 @@ class Cookie extends BaseService {
 
 		// 1) Normalize the request host for domain matching
 		//    - Accept HTTP_HOST (preferred) or SERVER_NAME as fallback
-		//    - Handle IPv6 literals (strip brackets) and remove any port suffix
+		//    - A bracketed IPv6 literal carries its port after the closing bracket, and the
+		//      colons inside the brackets belong to the address: "[::1]:8080" -> "::1".
+		//      Without a closing bracket the host is malformed and stays empty.
+		//    - Otherwise a single colon separates the port: "example.com:8080" -> "example.com".
+		//      More colons mean a raw IPv6 literal (e.g. from SERVER_NAME) without a port.
 		$host = (string)($_SERVER['HTTP_HOST'] ?? $_SERVER['SERVER_NAME'] ?? '');
 		if ($host !== '' && $host[0] === '[') {
-			// IPv6 literal like "[::1]:8080" -> "::1"
 			$rb = \strpos($host, ']');
-			if ($rb !== false) {
-				$host = \substr($host, 1, $rb - 1);
-			}
-		}
-		$colon = \strpos($host, ':');
-		if ($colon !== false) {
-			$host = \substr($host, 0, $colon);
+			$host = ($rb !== false) ? \substr($host, 1, $rb - 1) : '';
+		} elseif (\substr_count($host, ':') === 1) {
+			$host = \substr($host, 0, \strpos($host, ':'));
 		}
 		$host = \strtolower($host);
 

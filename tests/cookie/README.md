@@ -6,7 +6,7 @@ Isolated checks for `CitOmni\Http\Service\Cookie`. No Composer, no database, no 
 php tests/cookie/run.php
 ```
 
-Expected: `15 passed, 0 failed`
+Expected: `17 passed, 0 failed`
 
 The real `Cookie` and `Request` services run against the kernel doubles. `cfg.cookie` is the shipped baseline (`Registry::CFG_HTTP`) plus per-case overrides.
 
@@ -18,6 +18,11 @@ Reading untrusted input:
 - The same input is absent for `has()`.
 - String values, including the empty string, are returned unchanged.
 - An absent cookie yields the default, and `has()` is false.
+
+Same-request view after `set()`:
+
+- On the IPv6 host `[::1]`, `get()` returns the value `set()` wrote in the same request, not the value the request brought.
+- The same holds on `[2001:db8::1]:8443`: The port follows the closing bracket, and the colons inside the brackets belong to the address.
 
 Default attributes:
 
@@ -33,6 +38,8 @@ Default attributes:
 
 ## Regression proof
 
-Against `Cookie` before the host-only default and the strict validation, 7 cases fail, among them "An absolute base URL does not give the cookies a Domain" (`'example.com'`), "Invalid cfg values throw instead of falling back", the path case (`'/app/'`) and the `attributes()` case.
+Against `Cookie` before the host-only default and the strict validation, 8 cases fail, among them "An absolute base URL does not give the cookies a Domain" (`'example.com'`), "Invalid cfg values throw instead of falling back", the path case (`'/app/'`), the `attributes()` case and the `[::1]` case, since that version parsed the host the same way.
 
 Against `Cookie` before the typeguard (`get()` cast with `(string)`, `has()` used `array_key_exists()`), the first two cases fail.
+
+Against `Cookie` before the IPv6 host fix, the `[::1]` case fails (`Expected 'new'; got 'old'`): After removing the brackets, the port was cut at the first colon, which is part of the address, and the empty host matched no cookie, so `set()` left the request's value in `$_COOKIE`. The `[2001:db8::1]:8443` case passed before as well, only because the host was cut to `2001`, which counts as a name, and a host-only cookie is visible on any name. It guards the parsing of a port after the brackets.
