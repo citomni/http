@@ -39,14 +39,16 @@ use CitOmni\Kernel\Service\BaseService;
  * - maintenance.flag.default_retry_after (int)   - fallback Retry-After seconds (>= 0). Example: 600
  * - maintenance.flag.allowed_ips (array<string>) - optional fallback allow-list when flag lacks one.
  * - maintenance.backup.enabled (bool)            - enable lightweight backup rotation (default true).
- * - maintenance.backup.keep (int)                - number of backups to keep (default 3).
- * - maintenance.backup.dir (string)              - directory for backups (default: app /var/backups/flags).
+ * - maintenance.backup.keep (int)                - number of backups to keep (default 3); 0 writes no backup.
+ * - maintenance.backup.dir (string)              - directory for backups (default: app /var/backups/flags); a non-empty string.
  * - maintenance.log.filename (string)            - audit log filename (default: 'maintenance.json').
  *
  * Error handling:
  * - Fail fast by design. Invalid directories or permissions during writes raise \RuntimeException
  *   and bubble to the global error handler.
  * - Toggle methods (enable/disable) may throw \RuntimeException on I/O failures (directory creation, write, rename).
+ * - Toggle methods read maintenance.backup.* before they write anything: a key removed by a cfg layer
+ *   raises \OutOfBoundsException, a dir that is not a non-empty string \UnexpectedValueException.
  * - guard() emits a 503 response and exits the process when the client is not allowed; it does not throw.
  *
  * Typical usage:
@@ -91,6 +93,14 @@ class Maintenance extends BaseService {
 
 	// Write-time override for retry_after (does NOT affect enforcement/guard()).
 	protected ?int $writeRetryAfter = null;
+
+
+	/**
+	 * What follows "<flag file name>." in a backup name: local Ymd_His, microseconds and
+	 * the 12-hex-digit nonce of the write. Backups written before the nonce end after six
+	 * digits cut from (string)microtime(true). pruneBackups() deletes no other names.
+	 */
+	private const BACKUP_SUFFIX_PATTERN = '\d{8}_\d{6}_\d{6}(?:_[0-9a-f]{12})?\.bak';
 
 
 	/**
@@ -528,16 +538,25 @@ class Maintenance extends BaseService {
 	/**
 	 * Write the flag atomically and rotate backups (if enabled).
 	 *
+	 * Behavior:
+	 * - Resolves the backup policy first, so invalid maintenance.backup.* cfg fails before
+	 *   any directory or file is created.
+	 * - Backs up the replaced flag as <flag file name>.<Ymd_His>_<microseconds>_<nonce>.bak.
+	 *   Date, time and microseconds come from one clock reading, so the names of one second
+	 *   sort by time. The nonce is the temporary file's and keeps concurrent writes apart.
+	 *
 	 * @param bool     $enabled
 	 * @param string[] $allowedIps Normalized allowlist
 	 * @param int      $retryAfter Seconds, >= 0
 	 * @return void
 	 */
 	protected function writeFlagFile(bool $enabled, array $allowedIps, int $retryAfter): void {
+		$policy   = $this->resolveBackupPolicy();
 		$flagPath = $this->getFlagPath();
 		$flagDir  = \dirname($flagPath);
 		$baseName = \basename($flagPath);
-		$tmpPath  = $flagPath . '.' . \bin2hex(\random_bytes(6)) . '.tmp';
+		$nonce    = \bin2hex(\random_bytes(6));
+		$tmpPath  = $flagPath . '.' . $nonce . '.tmp';
 
 		// mkdir() fails when a concurrent request created the directory first; is_dir() decides.
 		if (!\is_dir($flagDir) && !@\mkdir($flagDir, 0755, true) && !\is_dir($flagDir)) {
@@ -556,7 +575,6 @@ class Maintenance extends BaseService {
 		$newSrc = $this->buildFlagPhp($newArr);
 
 		// Backup policy
-		$policy   = $this->resolveBackupPolicy();
 		$doBackup = $policy['enabled'] && $policy['keep'] !== 0 && \is_file($flagPath) && \is_readable($flagPath);
 
 		// If backing up, write a rotating copy first
@@ -569,9 +587,10 @@ class Maintenance extends BaseService {
 			if (!\is_writable($backupDir)) {
 				throw new \RuntimeException('Backup dir not writable: ' . $backupDir);
 			}
-			$stamp  = \date('Ymd_His') . '_' . \substr(\str_replace('.', '', (string)\microtime(true)), -6);
+			// microtime() returns "0.12345600 1760090000": fixed-width microseconds and their second.
+			[$usec, $sec] = \explode(' ', \microtime());
 			$prefix = $baseName . '.';
-			$backup = $backupDir . '/' . $prefix . $stamp . '.bak';
+			$backup = \rtrim($backupDir, "/\\") . '/' . $prefix . \date('Ymd_His', (int)$sec) . '_' . \substr($usec, 2, 6) . '_' . $nonce . '.bak';
 			$oldSrc = \file_get_contents($flagPath);
 			if ($oldSrc === false) {
 				throw new \RuntimeException('Failed to read existing flag for backup: ' . $flagPath);
@@ -642,23 +661,34 @@ class Maintenance extends BaseService {
 
 
 	/**
-	 * Resolve backup policy from cfg.
+	 * Resolve the backup policy from maintenance.backup.*.
 	 *
-	 * @return array{enabled:bool,keep:int,dir:string}
+	 * Behavior:
+	 * - Reads enabled, keep and dir directly; Registry::CFG_HTTP ships all three.
+	 * - enabled is cast to bool; keep is cast to int and clamped to >= 0.
+	 * - dir must be a non-empty string and is returned as configured. File names are
+	 *   appended after trimming trailing separators, so a root such as "/" or "C:\"
+	 *   stays a root.
+	 *
+	 * Notes:
+	 * - enabled false or keep 0 writes no backup; existing backups are left in place.
+	 * - dir is validated also while backups are off.
+	 * - Cfg exposes keys through __get() and __isset(), not as properties, so
+	 *   property_exists() cannot detect them.
+	 *
+	 * @return array{enabled: bool, keep: int, dir: string}  The effective backup policy.
+	 * @throws \OutOfBoundsException      When a cfg layer removed a key, e.g. by replacing
+	 *                                    maintenance.backup with an empty array.
+	 * @throws \UnexpectedValueException  When dir is not a non-empty string.
 	 */
 	protected function resolveBackupPolicy(): array {
-		$bk = $this->app->cfg->maintenance->backup ?? null;
+		$backup  = $this->app->cfg->maintenance->backup;
+		$enabled = (bool)$backup->enabled;
+		$keep    = \max(0, (int)$backup->keep);
+		$dir     = $backup->dir;
 
-		$enabled = true;
-		$keep    = 3;
-		$dir     = CITOMNI_APP_PATH . '/var/backups/flags';
-
-		if (\is_object($bk)) {
-			if (\property_exists($bk, 'enabled')) $enabled = (bool)$bk->enabled;
-			if (\property_exists($bk, 'keep'))    $keep    = \max(0, (int)$bk->keep);
-			if (\property_exists($bk, 'dir') && \is_string($bk->dir) && $bk->dir !== '') {
-				$dir = \rtrim($bk->dir, "/\\");
-			}
+		if (!\is_string($dir) || $dir === '') {
+			throw new \UnexpectedValueException('Config maintenance.backup.dir must be a non-empty string.');
 		}
 
 		return ['enabled' => $enabled, 'keep' => $keep, 'dir' => $dir];
@@ -668,34 +698,36 @@ class Maintenance extends BaseService {
 	/**
 	 * Delete old backups beyond the retention count.
 	 *
+	 * Behavior:
+	 * - Considers only the files writeFlagFile() names: $prefix followed by
+	 *   BACKUP_SUFFIX_PATTERN, the form from before the nonce included. Other files in
+	 *   $dir are never deleted, also when they start with $prefix.
+	 * - Keeps the $keep newest by mtime, and within one second by name.
+	 *
 	 * @param string $dir
 	 * @param string $prefix
 	 * @param int    $keep
 	 * @return void
 	 */
 	protected function pruneBackups(string $dir, string $prefix, int $keep): void {
-		if ($keep <= 0) {
+		if ($keep <= 0 || !\is_dir($dir)) {
 			return;
 		}
-		$dir = \rtrim($dir, "/\\");
-		if ($dir === '' || !\is_dir($dir)) {
-			return;
-		}
-		
+
 		$entries = @\scandir($dir);
 		if ($entries === false) {
 			return;
 		}
 
+		$pattern = '/^' . \preg_quote($prefix, '/') . self::BACKUP_SUFFIX_PATTERN . '$/D';
+		$base    = \rtrim($dir, "/\\") . '/';
+
 		$candidates = [];
 		foreach ($entries as $name) {
-			if ($name === '.' || $name === '..') {
+			if (\preg_match($pattern, $name) !== 1) {
 				continue;
 			}
-			if (!\str_starts_with($name, $prefix)) {
-				continue;
-			}
-			$path = $dir . '/' . $name;
+			$path = $base . $name;
 			if (!\is_file($path)) {
 				continue;
 			}
