@@ -1407,6 +1407,22 @@ return [
 
 **Important exception:** The maintenance guard bypasses paths starting with `/_system/` so protected remote-recovery operations remain reachable. That prefix also includes public diagnostic routes. The bypass is **not HMAC authentication**: each system endpoint must enforce its own security policy.
 
+### Flag backups
+
+When `enable()` or `disable()` replaces an existing flag file, it first copies that file byte for byte into `maintenance.backup.dir`, provided `enabled` is true and `keep` is above 0. A backup is named after the flag file:
+
+```text
+<flag file name>.<Ymd_His>_<microseconds>_<nonce>.bak
+maintenance.php.20261010_143000_123456_0a1b2c3d4e5f.bak
+```
+
+Date and time are in the app's timezone, the six-digit microseconds come from the same clock reading, and the 12 hex digits are a random nonce that keeps concurrent writes apart. After each backup, all but the `keep` newest backups are deleted.
+
+- `enabled => false`, or a `keep` of 0 or less, writes no backup. Existing backups are left in place.
+- `dir` must be a non-empty string and is used as configured. A trailing separator is fine, and a filesystem root stays a root.
+- Pruning deletes only names in the form above, plus the `<Ymd_His>_<6 digits>.bak` form written by earlier versions. Other files in the directory are never deleted, even when they start with the flag file name.
+- The backup policy is read before anything is written, also while backups are disabled. A `dir` that is not a non-empty string throws `UnexpectedValueException`, and a removed key, for example when a configuration layer replaces `backup` with `[]`, throws `OutOfBoundsException`. In both cases the flag and its directories are left unchanged.
+
 ---
 
 ## Error handling and diagnostics
