@@ -18,6 +18,7 @@ declare(strict_types=1);
  *
  * Typical usage:
  *   php tests/template-engine/run.php
+ *   CITOMNI_TEST_PARALLEL=1 php tests/template-engine/run.php    (also the parallel cases)
  *   php tests/template-engine/run.php /path/to/TemplateEngine.php --baseline=/path/to/old.php
  *
  * Notes:
@@ -25,6 +26,8 @@ declare(strict_types=1);
  *   src/Service/TemplateEngine.php against tests/fixtures/TemplateEngine.literal-fixed.php.txt.
  * - The differential cases compare the engine with the baseline. A baseline file that does
  *   not exist stops the suite with exit code 2 before anything is created.
+ * - The parallel cases run only with CITOMNI_TEST_PARALLEL=1. worker.php is their worker
+ *   process, not a suite.
  */
 require dirname(__DIR__) . '/bootstrap.php';
 
@@ -464,6 +467,81 @@ TPL;
 TPL;
 		foreach ([true,false] as $allow) { same(callPrivate(new $baseline(new App($layers,['allow_php_tags'=>$allow])),'compileSyntax',$source),callPrivate(engine(['allow_php_tags'=>$allow]),'compileSyntax',$source)); }
 	});
+
+	// Concurrent compilation and publication in worker processes (worker.php). Each phase starts
+	// its workers, then creates the gate file they wait for, so they render at the same moment.
+	// Workers load the engine under test and share an app root of their own below $root.
+	$parallelPhases = [
+		'cold' => ['Parallel cold cache: 16 workers compile and render one template at once', 16, true],
+		'warm' => ['Parallel warm cache: 32 workers render the published generation', 32, true],
+		'cache-disabled' => ['Parallel disabled cache: 8 workers recompile on every render', 8, false],
+	];
+	if (getenv('CITOMNI_TEST_PARALLEL') !== '1') {
+		$skipped += count($parallelPhases) + 1;
+		echo "SKIP Parallel cases: set CITOMNI_TEST_PARALLEL=1 to run multi-process checks\n";
+	} else {
+		$parallelRoot = $root . '/parallel';
+		foreach (['templates', 'provider', 'var/cache'] as $dir) { mkdir($parallelRoot . '/' . $dir, 0775, true); }
+		writeTemplate($parallelRoot, 'parallel.html', '{% extends "parallel-layout.html@test/provider" %}{% block body %}{% include "parallel-partial.html@test/provider" %} [{{ $value }}]{% endblock %}');
+		writeTemplate($parallelRoot, 'parallel-layout.html', '<html><main>{% yield body %}</main></html>', 'provider');
+		writeTemplate($parallelRoot, 'parallel-partial.html', 'partial $1\\\\', 'provider');
+		// Same php.ini as this process, as tests/run.php starts the suites, plus OPcache without
+		// timestamp checks or update protection: a worker caches each generation it includes at
+		// once and never rereads it, as an immutable generation allows.
+		$iniArgs = match (true) {
+			php_ini_loaded_file() !== false   => ['-c', php_ini_loaded_file()],
+			php_ini_scanned_files() !== false => [],
+			default                           => ['-n'],
+		};
+		$workerCommand = [
+			PHP_BINARY, ...$iniArgs,
+			'-d', 'opcache.enable_cli=1', '-d', 'opcache.validate_timestamps=0', '-d', 'opcache.file_update_protection=0',
+			__DIR__ . '/worker.php', $parallelRoot, (new ReflectionClass($class))->getFileName(),
+		];
+		foreach ($parallelPhases as $phase => [$name, $count, $cache]) {
+			test($name, function () use ($workerCommand, $parallelRoot, $phase, $count, $cache) {
+				$gate = $parallelRoot . '/gate-' . $phase;
+				$workers = [];
+				for ($id = 0; $id < $count; $id++) {
+					$process = proc_open([...$workerCommand, $gate, (string)$id, $cache ? '1' : '0'], [
+						0 => ['pipe', 'r'],
+						1 => ['pipe', 'w'],
+						2 => ['file', 'php://stderr', 'w'],
+					], $pipes);
+					if (!is_resource($process)) {
+						throw new RuntimeException('Cannot start worker ' . $id);
+					}
+					fclose($pipes[0]);
+					$workers[$id] = [$process, $pipes[1]];
+				}
+				file_put_contents($gate, 'go');
+				$failures = [];
+				foreach ($workers as $id => [$process, $stdout]) {
+					$output = trim((string)stream_get_contents($stdout));
+					fclose($stdout);
+					$exit = proc_close($process);
+					if ($exit !== 0 || $output !== 'OK') {
+						$failures[] = 'worker ' . $id . ' exited ' . $exit . ' with ' . var_export($output, true);
+					}
+				}
+				if ($failures !== []) {
+					throw new RuntimeException(implode('; ', $failures));
+				}
+			});
+		}
+		test('Parallel writes leave one generation, one manifest, one lock and no temporary files', function () use ($parallelRoot) {
+			$cache = $parallelRoot . '/var/cache';
+			$generations = glob($cache . '/tpl_v2_*.php');
+			$manifests = glob($cache . '/tpl_v2_*.meta.json');
+			same(1, count($generations));
+			same(1, count($manifests));
+			same(1, count(glob($cache . '/tpl_v2_*.lock')));
+			same([], glob($cache . '/*.tmp'));
+			$manifest = json_decode(file_get_contents($manifests[0]), true, 512, JSON_THROW_ON_ERROR);
+			same(true, str_contains(basename($generations[0]), $manifest['generation']));
+			same(3, count($manifest['dependencies']));
+		});
+	}
 } finally {
 	removeTree($root);
 }
