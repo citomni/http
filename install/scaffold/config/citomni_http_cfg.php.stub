@@ -134,8 +134,15 @@ return [
 	 */
 	/*
 	'view' => [
+	
 		// Cache
 		'cache_enabled'        => true,
+	
+	
+		// asset_version is the cache-buster that $asset() appends as ?v=...
+		// Bump it whenever a file under public/assets/ changes, so returning visitors fetch the new file instead of their cached copy.
+		'asset_version' => '2026-10-10',
+
 
 		// Marketing scripts (inserted into <head>)
 		'marketing_scripts'    => '<!-- Your script -->',
