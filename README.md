@@ -12,7 +12,7 @@ Zero "magic", PSR-4 all the way, PHP 8.2+, tiny boot, predictable overrides.
 * **Deep, read-only config** -> `$this->app->cfg->http->base_url`
 * **Service maps (no scanning)** -> `$this->app->{id}` resolves instantly (cacheable)
 * **Prod-friendly** -> optional compiled caches in `/var/cache/*.php` (atomic writes)
-* **HTTP ErrorHandler** (optional, auto-installed if present in package)
+* **HTTP ErrorHandler** installed at boot -> JSONL logs with rotation, no blank pages
 * **Maintenance 503** with `Retry-After` and allow-list
 * **Security foundations** -> CSRF token helper, cookie/session CSP/Samesite defaults
 * **Webhook HMAC** (`WebhooksAuth`) with TTL, clock skew tolerance, nonce/replay protection
@@ -95,11 +95,14 @@ require __DIR__ . '/../vendor/autoload.php';
 /app-root
   /bin
   /config
-    providers.php                # optional list of provider FQCNs
+    providers.php                # optional list of provider Registry FQCNs
+    citomni_cfg.php              # optional app config shared by HTTP and CLI
     citomni_http_cfg.php         # app baseline config (HTTP)
     citomni_http_cfg.stage.php   # optional per-env overlay
     citomni_http_cfg.prod.php    # optional per-env overlay
+    citomni_http_routes.php      # app routes (see Routes)
     services.php                 # optional service map overrides/additions
+    services_http.php            # optional HTTP-only service map (wins over services.php)
   /public
     index.php
   /src
@@ -114,13 +117,13 @@ require __DIR__ . '/../vendor/autoload.php';
 
 ## Configuration (last wins)
 
-Vendor HTTP baseline lives in `\CitOmni\Http\Boot\Config::CFG`.
+Vendor HTTP baseline lives in `\CitOmni\Http\Boot\Registry::CFG_HTTP`.
 At runtime, the app builds config as:
 
 1. **Vendor HTTP baseline**
-2. **Provider CFGs** (if any; listed in `/config/providers.php`)
-3. **App base cfg** `/config/citomni_http_cfg.php`
-4. **App env overlay** `/config/citomni_http_cfg.{env}.php` (optional)
+2. **Provider cfg** (listed in `/config/providers.php`): `CFG_COMMON`, then `CFG_HTTP`, per provider in list order
+3. **App base cfg** `/config/citomni_cfg.php`, then `/config/citomni_http_cfg.php` (both optional)
+4. **App env overlay** `/config/citomni_cfg.{env}.php`, then `/config/citomni_http_cfg.{env}.php` (both optional)
 
 **Merge rules:**
 
@@ -133,7 +136,7 @@ At runtime, the app builds config as:
 ```php
 $this->app->cfg->locale->timezone;
 $this->app->cfg->http->base_url;
-$this->app->cfg->routes['/']; // raw array (routes are exposed as raw arrays)
+$this->app->routes['/']; // routes are a plain array on the App, not cfg (see Routes)
 ```
 
 ### Example `/config/citomni_http_cfg.php`
@@ -162,12 +165,20 @@ return [
 	],
 
 	'error_handler' => [
-		'log_file'       => CITOMNI_APP_PATH . '/var/logs/system_error_log.json',
-		'recipient'      => 'errors@example.com',
-		'sender'         => 'noreply@example.com',
-		'max_log_size'   => 10_485_760,
-		'template'       => __DIR__ . '/../vendor/citomni/http/templates/errors/failsafe_error.php',
-		'display_errors' => (defined('CITOMNI_ENVIRONMENT') && CITOMNI_ENVIRONMENT === 'dev'),
+		'render' => [
+			'trigger' => 0,                // non-fatal PHP errors to render; fatals always render
+			'detail'  => ['level' => 0],   // 1 = developer details, effective only in dev
+		],
+		'log' => [
+			'path'      => CITOMNI_APP_PATH . '/var/logs', // '' falls back to this directory
+			'max_bytes' => 2_000_000,      // rotate before a write passes this size
+			'max_files' => 10,             // rotated files kept per log
+		],
+		// Own error page (see Custom error pages). Leave the key out otherwise:
+		// an empty 'templates' => [] would drop the vendor templates.
+		// 'templates' => [
+		// 	'html' => CITOMNI_APP_PATH . '/templates/errors/error.php',
+		// ],
 	],
 
 	'session' => [
@@ -242,18 +253,7 @@ return [
 		// 'algo'                   => 'sha512',
 	],
 
-	// Routes: you can inline them here or require from a separate file
-	'routes' => [
-		'/' => [
-			'controller'     => \CitOmni\Http\Controller\PublicController::class,
-			'action'         => 'index',
-			'methods'        => ['GET'],
-			'template_file'  => 'public/index.html',
-			'template_layer' => 'citomni/http',
-		],
-		// 403/404/405/500 defaults exist in vendor baseline; override as needed.
-		'regex' => [],
-	],
+	// Routes are not cfg: they live in /config/citomni_http_routes.php (see Routes).
 ];
 ```
 
@@ -313,35 +313,29 @@ If you publish under a sub-path (e.g. `https://example.com/app`), make sure your
 
 ## Routes
 
-Keep routes inline under `cfg['routes']` or load them from a separate PHP file.
+Routes are not cfg. App routes live in `/config/citomni_http_routes.php`, with an optional `/config/citomni_http_routes.{env}.php` overlay. The kernel merges them (last wins) on top of the vendor baseline `\CitOmni\Http\Boot\Registry::ROUTES_HTTP` and the providers' `ROUTES_HTTP`, and exposes the result as `$this->app->routes`. The scaffolded routes file documents the merge and matching rules.
 
 **Placeholders available:**
 
 * `{id}` -> `[0-9]+`
-* `{email}` -> `[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+`
+* `{email}` -> `[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}`
 * `{slug}` -> `[a-zA-Z0-9-_]+`
 * `{code}` -> `[a-zA-Z0-9]+`
   Unknown placeholders fall back to `[^/]+`.
 
 #### Custom error pages
 
-Override 403/404/405/500 in `cfg['routes']`:
+Error pages are not routes. The Router hands 404, 405 and 500 to `ErrorHandler::httpError()`, which logs the error and renders the page. To change the HTML page, point `error_handler.templates.html` (and optionally `templates.html_failsafe`) at your own plain PHP template:
 
 ```php
-404 => [
-	'controller'     => \CitOmni\Http\Controller\PublicController::class,
-	'action'         => 'errorPage',
-	'methods'        => ['GET'],
-	'template_file'  => 'errors/404.html',
-	'template_layer' => 'app', // or 'citomni/http' for vendor template
-	'params'         => [404],
+'error_handler' => [
+	'templates' => [
+		'html' => CITOMNI_APP_PATH . '/templates/errors/error.php',
+	],
 ],
 ```
 
-Template variables provided to `errorPage`:
-
-* `status_code` (int)
-* `errors` (array|null, only filled for 500 when ErrorHandler has entries)
+The template receives a `$data` array: `language`, `status`, `status_text`, `error_id`, `title`, `message`, `details` (only in dev with `render.detail.level` 1, otherwise null), `request_id` and `year`. Clients that send an `Accept` header with `application/json` or `+json`, or `X-Requested-With: XMLHttpRequest`, get JSON instead.
 
 ---
 
@@ -506,33 +500,41 @@ Closures:
 Baseline map shipped by this package:
 
 ```php
-\CitOmni\Http\Boot\Services::MAP
+\CitOmni\Http\Boot\Registry::MAP_HTTP
 // [
+	'errorHandler' => \CitOmni\Http\Service\ErrorHandler::class,
 	'request'      => \CitOmni\Http\Service\Request::class,
 	'response'     => \CitOmni\Http\Service\Response::class,
 	'router'       => \CitOmni\Http\Service\Router::class,
 	'session'      => \CitOmni\Http\Service\Session::class,
+	'flash'        => \CitOmni\Http\Service\Flash::class,
+	'datetime'     => \CitOmni\Http\Service\Datetime::class,
 	'cookie'       => \CitOmni\Http\Service\Cookie::class,
-	'view'         => \CitOmni\Http\Service\View::class,
-	'security'     => \CitOmni\Http\Service\Security::class,
+	'tplEngine'    => \CitOmni\Http\Service\TemplateEngine::class,
+	'csrf'         => \CitOmni\Http\Service\Csrf::class,
+	'captcha'      => \CitOmni\Http\Service\Captcha::class,
 	'nonce'        => \CitOmni\Http\Service\Nonce::class,
 	'maintenance'  => \CitOmni\Http\Service\Maintenance::class,
 	'webhooksAuth' => \CitOmni\Http\Service\WebhooksAuth::class,
+	'slugger'      => \CitOmni\Http\Service\Slugger::class,
+	'tags'         => \CitOmni\Http\Service\Tags::class,
+	'upload'       => \CitOmni\Http\Service\Upload::class,
+	'icon'         => \CitOmni\Http\Service\Icon::class,
 // ]
 ```
 
-Extend/override in `/config/services.php`:
+Extend/override in `/config/services.php` (HTTP and CLI) or `/config/services_http.php` (HTTP only). Precedence: `services_http.php` > `services.php` > providers (`MAP_COMMON`, then `MAP_HTTP`) > vendor baseline.
 
 ```php
 <?php
 return [
 	// Simple override:
-	'router' => \CitOmni\Http\Service\Router::class,
+	'router' => \App\Http\Service\Router::class,
 
 	// With options (constructor is __construct(App $app, array $options = []))
-	'view' => [
-		'class'   => \CitOmni\Http\Service\View::class,
-		'options' => ['asset_version' => '2025-09-29'],
+	'myService' => [
+		'class'   => \App\Http\Service\MyService::class,
+		'options' => ['timeout' => 5],
 	],
 ];
 ```
@@ -545,7 +547,7 @@ $this->app->request->json();
 $this->app->maintenance->enable(['1.2.3.4']);
 ```
 
-> Note: `log`, `mailer`, and `connection` are provided by **citomni/infrastructure** and are not part of the HTTP baseline. This package only references them when present.
+> Note: `log` and `txt` come from **citomni/infrastructure**, `auth` and `role` from **citomni/authenticate**, and `captchaImage` from **citomni/image**. They are not part of the HTTP baseline; this package checks for them with `hasService()` before use.
 
 ---
 
@@ -728,15 +730,15 @@ A text captcha slows down generic form bots. It does not stop targeted attacks w
 
 ## Providers (optional)
 
-Providers export their own config/services and are explicitly whitelisted:
+Providers export their own config, services and routes through a `Boot\Registry` class and are explicitly whitelisted:
 
 **`/config/providers.php`**
 
 ```php
 <?php
 return [
-	\Vendor\Foo\Boot\Services::class, // contributes MAP_HTTP + CFG_HTTP
-	\Vendor\Bar\Boot\Services::class,
+	\Vendor\Foo\Boot\Registry::class, // may define CFG_COMMON, CFG_HTTP, MAP_COMMON, MAP_HTTP, ROUTES_HTTP
+	\Vendor\Bar\Boot\Registry::class,
 ];
 ```
 
@@ -746,11 +748,13 @@ Providers merge **between** vendor baseline and app overrides (**last wins**).
 
 ## Error handling
 
-If present, Kernel installs `\CitOmni\Http\Exception\ErrorHandler` using **config** under `cfg['error_handler']` (not runtime args). It supports:
+The Kernel installs the `errorHandler` service (`\CitOmni\Http\Service\ErrorHandler`) right after boot. It logs and answers every uncaught exception, fatal error and router 404/405/5xx with an HTML or JSON page, and is configured under `error_handler`:
 
-* JSON-lines log file (with rotation by size)
-* Friendly details in **dev**; safe minimal output in **prod**
-* Optional mail notification via `error_log()` (recipient/sender)
+* `render.trigger`: non-fatal PHP error levels that also render a page (baseline `0`; fatals always render)
+* `render.detail.level`: `1` adds developer details to the page, only when `CITOMNI_ENVIRONMENT` is `dev`
+* `log.trigger`, `log.path`, `log.max_bytes`, `log.max_files`: JSONL logs, one file per category (e.g. `http_err_exception.jsonl`, `http_router_404.jsonl`), with size-based rotation. An empty `log.path` falls back to `CITOMNI_APP_PATH . '/var/logs'`.
+* `templates.html`, `templates.html_failsafe`: plain PHP templates for HTML pages (see [Custom error pages](#custom-error-pages))
+* `status_defaults`: fallback statuses for exceptions, shutdown fatals and PHP errors
 
 ---
 
@@ -797,7 +801,7 @@ Writes are **atomic** (`tmp` + `rename`), with best-effort OPcache invalidation.
 * [ ] **CSRF**: Enable and verify tokens on state-changing routes
 * [ ] **Maintenance**: Protect with allow-list; enable backup policy
 * [ ] **Webhooks**: Configure `webhooks.secret`, `nonce_dir`, and reasonable `ttl_seconds`
-* [ ] **Error output**: `display_errors=false` in prod; use ErrorHandler logging
+* [ ] **Error output**: Keep `error_handler.render.trigger` and `render.detail.level` at the baseline `0` outside dev; the ErrorHandler sets `display_errors=0` itself
 * [ ] **Sessions**: Rotate with `regenerate(true)` at login, logout and privilege changes; keep `gc_maxlifetime` at least as long as the longest idle login
 * [ ] **Cookie domain**: Leave `cookie.domain` null (host-only) unless subdomains must share the cookies
 

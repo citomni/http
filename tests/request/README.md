@@ -51,5 +51,5 @@ Real requests:
 
 ## Notes
 
-- `contentLength()` and `exceedsPostMaxSize()` are covered by `tests/post-max-size-regression.php`.
+- `contentLength()` and `exceedsPostMaxSize()` are covered by the post-max-size suite (`tests/post-max-size/run.php`).
 - `server.php` is the router, not a suite; `tests/run.php` only collects `run.php` and `database.php`. Every request reaches it from 127.0.0.1, so it takes the peer address from `?peer=`.

@@ -539,7 +539,8 @@ class Maintenance extends BaseService {
 		$baseName = \basename($flagPath);
 		$tmpPath  = $flagPath . '.' . \bin2hex(\random_bytes(6)) . '.tmp';
 
-		if (!\is_dir($flagDir) && !\mkdir($flagDir, 0755, true)) {
+		// mkdir() fails when a concurrent request created the directory first; is_dir() decides.
+		if (!\is_dir($flagDir) && !@\mkdir($flagDir, 0755, true) && !\is_dir($flagDir)) {
 			throw new \RuntimeException('Unable to create flag dir: ' . $flagDir);
 		}
 		if (!\is_writable($flagDir)) {
@@ -561,7 +562,8 @@ class Maintenance extends BaseService {
 		// If backing up, write a rotating copy first
 		if ($doBackup) {
 			$backupDir = $policy['dir'];
-			if (!\is_dir($backupDir) && !\mkdir($backupDir, 0755, true)) {
+			// mkdir() fails when a concurrent request created the directory first; is_dir() decides.
+			if (!\is_dir($backupDir) && !@\mkdir($backupDir, 0755, true) && !\is_dir($backupDir)) {
 				throw new \RuntimeException('Unable to create backup dir: ' . $backupDir);
 			}
 			if (!\is_writable($backupDir)) {

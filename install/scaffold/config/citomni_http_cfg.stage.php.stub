@@ -41,11 +41,12 @@ declare(strict_types=1);
  *     Keep overlays minimal and intentional; do not mirror the full baseline.
  *   - Prefer explicit values over auto-detection for security- and routing-critical
  *     settings (e.g., base_url, proxy trust).
- *   - /appinfo.html is available in dev and stage and shows the *merged* runtime
- *     configuration. Use it to confirm effective values before deploy.
+ *   - /_system/appinfo.html answers only in dev (404 elsewhere). Its "Projected
+ *     config (stage)" panel is the *merged* stage configuration, built fresh from
+ *     these files. Use it to confirm effective values before deploy.
  *
  * Quick tips — how to find and copy the exact config for an override:
- *   1) Open /appinfo.html (dev/stage) to view the merged config and routes.
+ *   1) In dev, open /_system/appinfo.html and find "Projected config (stage)".
  *   2) Find the key you need (e.g., "cookie.secure" or "error_handler.log.path").
  *   3) Copy the rendered array structure and paste it here, preserving PHP syntax
  *      and using CITOMNI_APP_PATH for portable paths.

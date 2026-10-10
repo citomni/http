@@ -40,26 +40,33 @@ use CitOmni\Kernel\Service\BaseService;
  *   2) Router never renders itself; re-entrancy and nested failures are handled inside the ErrorHandler.
  *
  * Collaborators:
- * - $this->app->cfg     (read): Provides the merged routes array and toggles.
+ * - $this->app->routes  (read): The merged route table (see Route declarations).
+ * - $this->app->cfg     (read): The http.router_case_insensitive toggle.
  * - Controllers (FQCN): Instantiated as new $controller($this->app, $options).
  * - PHP SAPI globals    (read): $_SERVER for method and URI.
  *
- * Route declarations (configuration shape):
+ * Route declarations (route table shape):
+ * - Routes are not cfg. The kernel merges them (last wins) from the vendor baseline
+ *   \CitOmni\Http\Boot\Registry::ROUTES_HTTP, the providers' ROUTES_HTTP,
+ *   /config/citomni_http_routes.php and /config/citomni_http_routes.{ENV}.php,
+ *   and exposes the result as $this->app->routes.
  * - Exact routes:
- *   $cfg['routes']['/'] = [
+ *   '/' => [
  *   	'controller'     => \App\Http\Controller\HomeController::class,
  *   	'action'         => 'index',
  *   	'methods'        => ['GET'],        // optional; defaults to GET/HEAD/OPTIONS
  *   	'template_file'  => 'home.html',    // optional
- *   	'template_layer' => 'app/http'      // optional
- *   ];
+ *   	'template_layer' => 'app',          // optional
+ *   ],
  *
  * - Regex routes (with placeholders):
- *   $cfg['routes']['regex']['/user/{id}'] = [
- *   	'controller' => \App\Http\Controller\UserController::class,
- *   	'action'     => 'show',
- *   	'methods'    => ['GET']
- *   ];
+ *   'regex' => [
+ *   	'/user/{id}' => [
+ *   		'controller' => \App\Http\Controller\UserController::class,
+ *   		'action'     => 'show',
+ *   		'methods'    => ['GET'],
+ *   	],
+ *   ],
  *
  * Placeholder rules (built-ins; unknown placeholders match a single segment):
  * - {id}    => [0-9]+
@@ -95,23 +102,25 @@ use CitOmni\Kernel\Service\BaseService;
  *   $app->router->run(); // resolves path, matches route, dispatches controller
  *
  * Examples:
- *   // Exact route to a static page
- *   $cfg['routes']['/about'] = [
- *   	'controller' => \App\Http\Controller\PageController::class,
- *   	'action'     => 'about',
- *   	'methods'    => ['GET'],
- *		'template_file' => 'public/about.html',
- *  	'template_layer' => 'citomni/http'
- *   ];
+ *   // Exact route to a static page (in /config/citomni_http_routes.php)
+ *   '/about' => [
+ *   	'controller'     => \App\Http\Controller\PageController::class,
+ *   	'action'         => 'about',
+ *   	'methods'        => ['GET'],
+ *   	'template_file'  => 'public/about.html',
+ *   	'template_layer' => 'app',
+ *   ],
  *
  *   // Regex route with a slug and explicit method set
- *   $cfg['routes']['regex']['/blog/{slug}'] = [
- *   	'controller' => \App\Http\Controller\BlogController::class,
- *   	'action'     => 'show',
- *   	'methods'    => ['GET']
- *		'template_file' => 'public/blogpost.html',
- *  	'template_layer' => 'citomni/blog'
- *   ];
+ *   'regex' => [
+ *   	'/blog/{slug}' => [
+ *   		'controller'     => \App\Http\Controller\BlogController::class,
+ *   		'action'         => 'show',
+ *   		'methods'        => ['GET'],
+ *   		'template_file'  => 'public/blogpost.html',
+ *   		'template_layer' => 'app',
+ *   	],
+ *   ],
  *
  * Failure:
  *   // Method not allowed
@@ -119,7 +128,7 @@ use CitOmni\Kernel\Service\BaseService;
  *   // Result: 405 with "Allow: GET, HEAD, OPTIONS" and error dispatch.
  *
  * Notes:
- * - Ensure routes live under the merged config key 'routes' (last-wins layering).
+ * - Routes are read from $this->app->routes, never from cfg (see Route declarations).
  * - Controllers are constructed with ($app, ['template_file' => ..., 'template_layer' => ...]).
  * - ASCII-only guard is defense-in-depth; non-ASCII paths get a 404.
  */

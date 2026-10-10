@@ -40,11 +40,11 @@ declare(strict_types=1);
  *     Keep overlays minimal and intentional; do not mirror the full baseline.
  *   - Dev overlays may be more permissive for diagnostics, but should remain
  *     bounded and deterministic (no unbounded traces, no surprise side effects).
- *   - /appinfo.html is available in dev and shows the *merged* runtime config
- *     and route table. Use it to verify and to copy exact override syntax.
+ *   - /_system/appinfo.html answers only in dev and shows the *merged* runtime
+ *     config and route table. Use it to verify and to copy exact override syntax.
  *
  * Quick tips — how to find and copy the exact config for an override:
- *   1) Open /appinfo.html (dev). It renders the complete merged config and routes.
+ *   1) Open /_system/appinfo.html. It renders the complete merged config and routes.
  *   2) Locate the key you need (e.g., "view.cache_enabled" or "mail.smtp.host").
  *   3) Copy the array structure as rendered and paste it here (preserve PHP syntax;
  *      prefer CITOMNI_APP_PATH for portable paths).

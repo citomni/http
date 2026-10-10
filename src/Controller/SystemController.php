@@ -183,7 +183,7 @@ final class SystemController extends BaseController {
 		$canonicalBase = \defined('CITOMNI_PUBLIC_ROOT_URL')
 			? (string)\CITOMNI_PUBLIC_ROOT_URL
 			: (string)($this->app->cfg->http->base_url ?? '');
-		$canonical = \rtrim($canonicalBase, '/') . '/appinfo.html';
+		$canonical = \rtrim($canonicalBase, '/') . '/_system/appinfo.html';
 
 		$this->app->tplEngine->render($this->routeConfig['template_file'] . '@' . $this->routeConfig['template_layer'], [
 			'noindex'          => 1,

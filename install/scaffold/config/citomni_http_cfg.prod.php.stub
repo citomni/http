@@ -40,12 +40,13 @@ declare(strict_types=1);
  *     Do not replicate the full baseline; keep overlays minimal and intentional.
  *   - Production overlays should be deterministic and auditable: prefer explicit
  *     values over auto-detection for anything security- or routing-sensitive.
- *   - /appinfo.html is the authoritative, human-friendly view of the *merged*
- *     runtime configuration (available only in dev and stage). Use it to verify
- *     what will actually be in effect before deploying changes.
+ *   - /_system/appinfo.html is the human-friendly view of the *merged*
+ *     configuration. It answers only in dev (404 elsewhere); its "Projected
+ *     config (prod)" panel is the prod configuration, built fresh from these
+ *     files. Use it to verify what will be in effect before deploying changes.
  *
  * Quick tips — how to find and copy the exact config for an override:
- *   1) Open /appinfo.html (dev/stage). It renders the complete merged config and routes.
+ *   1) In dev, open /_system/appinfo.html and find "Projected config (prod)".
  *   2) Locate the key you want to change (e.g. "error_handler.log.path" or "http.base_url").
  *   3) Copy the displayed array structure and paste it into this file, preserving
  *      PHP array syntax and paths (use CITOMNI_APP_PATH for portable paths).

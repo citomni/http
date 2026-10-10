@@ -14,19 +14,21 @@ declare(strict_types=1);
  */
 
 /**
- * Standalone regression suite for POST size detection and early HTTP 413 responses.
+ * Regression suite for POST size detection and early HTTP 413 responses.
  *
  * Typical usage:
- *   php tests/post-max-size-regression.php
+ *   php tests/post-max-size/run.php
  *
  * Notes:
+ * - tests/run.php collects this suite like the others.
+ * - The same file is the router of the built-in server and the --ini-probe worker.
  * - Runs the supplied Request, ErrorHandler and HTTP Kernel unchanged.
  * - Uses test doubles for the unsupplied core container/runtime and dispatch services.
  * - Uses PHP's built-in HTTP server to exercise real POST parsing and response headers.
  * - Does not require Composer, cURL, php-cgi or an installed application.
  */
 namespace {
-	require __DIR__ . '/bootstrap.php';
+	require \dirname(__DIR__) . '/bootstrap.php';
 	class_alias(\CitOmni\Http\Tests\Cfg::class, 'CitOmni\\Kernel\\Cfg');
 }
 
@@ -54,7 +56,7 @@ namespace CitOmni\Kernel {
 				'error_handler' => [
 					'log' => ['path' => \CITOMNI_APP_PATH . '/logs'],
 					'render' => ['trigger' => E_ALL, 'detail' => ['level' => 1]],
-					'templates' => ['html' => __DIR__ . '/../templates/errors/error.php'],
+					'templates' => ['html' => \dirname(__DIR__, 2) . '/templates/errors/error.php'],
 				],
 			]);
 		}
@@ -96,9 +98,9 @@ namespace CitOmni\Kernel {
 namespace {
 	use CitOmni\Http\Service\Request;
 
-	require __DIR__ . '/../src/Service/Request.php';
-	require __DIR__ . '/../src/Service/ErrorHandler.php';
-	require __DIR__ . '/../src/Kernel.php';
+	require \dirname(__DIR__, 2) . '/src/Service/Request.php';
+	require \dirname(__DIR__, 2) . '/src/Service/ErrorHandler.php';
+	require \dirname(__DIR__, 2) . '/src/Kernel.php';
 
 	// The tested guard runs after boot; intl setup itself is outside this suite's scope.
 	if (!class_exists(Locale::class)) {
@@ -410,6 +412,7 @@ namespace {
 		}
 		\CitOmni\Http\Tests\removeTree($root);
 	}
-	echo 'RESULT ' . $passed . ' passed; ' . $failed . ' failed.' . PHP_EOL;
+	// Summary line in the format tests/run.php parses.
+	echo $passed . ' passed, ' . $failed . ' failed' . PHP_EOL;
 	exit($failed === 0 ? 0 : 1);
 }
