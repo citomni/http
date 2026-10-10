@@ -1,14 +1,32 @@
 <?php
 declare(strict_types=1);
+/*
+ * This file is part of the CitOmni framework.
+ * Low overhead, high performance, ready for anything.
+ *
+ * For more information, visit https://github.com/citomni
+ *
+ * Copyright (c) 2012-present Lars Grove Mortensen
+ * SPDX-License-Identifier: MIT
+ *
+ * For full copyright, trademark, and license information,
+ * please see the LICENSE file distributed with this source code.
+ */
 
 /**
- * Standalone regression suite using the real supplied engine and filesystem fixtures.
+ * Regression suite using the real supplied engine and filesystem fixtures.
  *
  * Typical usage:
- *   php tests/template-engine-regression.php
- *   php tests/template-engine-regression.php /path/to/TemplateEngine.php --baseline=/path/to/old.php
+ *   php tests/template-engine/run.php
+ *   php tests/template-engine/run.php /path/to/TemplateEngine.php --baseline=/path/to/old.php
+ *
+ * Notes:
+ * - tests/run.php collects this suite like the others and runs it without arguments:
+ *   src/Service/TemplateEngine.php against tests/fixtures/TemplateEngine.literal-fixed.php.txt.
+ * - The differential cases compare the engine with the baseline. A baseline file that does
+ *   not exist stops the suite with exit code 2 before anything is created.
  */
-require __DIR__ . '/bootstrap.php';
+require dirname(__DIR__) . '/bootstrap.php';
 
 use CitOmni\Http\Tests\App;
 use CitOmni\Http\Tests\CountingProvider;
@@ -18,19 +36,21 @@ use function CitOmni\Http\Tests\writeTemplate;
 use function CitOmni\Http\Tests\callPrivate;
 use function CitOmni\Http\Tests\loadBaseline;
 
-$engineFile = $argv[1] ?? __DIR__ . '/../src/Service/TemplateEngine.php';
-if (str_starts_with($engineFile, '--')) { $engineFile = __DIR__ . '/../src/Service/TemplateEngine.php'; }
+$engineFile = $argv[1] ?? dirname(__DIR__, 2) . '/src/Service/TemplateEngine.php';
+if (str_starts_with($engineFile, '--')) { $engineFile = dirname(__DIR__, 2) . '/src/Service/TemplateEngine.php'; }
+$baselinePath = dirname(__DIR__) . '/fixtures/TemplateEngine.literal-fixed.php.txt';
+foreach ($argv as $argument) {
+	if (str_starts_with($argument, '--baseline=')) { $baselinePath = substr($argument, 11); }
+}
+// Every differential case needs the baseline, so a missing file stops the suite instead of leaving them out.
+if (!is_file($baselinePath)) { fwrite(STDERR, 'Baseline not found: ' . $baselinePath . PHP_EOL); exit(2); }
 $root = makeRoot();
 define('CITOMNI_APP_PATH', $root);
 define('CITOMNI_PUBLIC_ROOT_URL', 'https://public.example.test');
 define('CITOMNI_ENVIRONMENT', 'dev');
 require $engineFile;
 $class = CitOmni\Http\Service\TemplateEngine::class;
-$baselinePath = __DIR__ . '/fixtures/TemplateEngine.literal-fixed.php.txt';
-foreach ($argv as $argument) {
-	if (str_starts_with($argument, '--baseline=')) { $baselinePath = substr($argument, 11); }
-}
-$baseline = is_file($baselinePath) ? loadBaseline($baselinePath, $root) : null;
+$baseline = loadBaseline($baselinePath, $root);
 $layers = ['app' => $root . '/templates', 'test/provider' => $root . '/provider'];
 $passed = 0;
 $failed = 0;
@@ -112,7 +132,7 @@ try {
 	];
 	foreach ($syntaxCases as $name => [$source, $data, $expected]) {
 		test($name, fn() => same($expected, renderSource($source, $data)));
-		if ($baseline !== null) { test('Differential ' . $name, fn() => differential($source, $data)); }
+		test('Differential ' . $name, fn() => differential($source, $data));
 	}
 	test('Inline PHP disabled does not remove ordinary echoes', fn() => same('visible', renderSource('{? echo "hidden"; ?}{?= "hidden" ?}{{ "visible" }}', [], ['allow_php_tags' => false])));
 	test('Inline PHP flag is not a sandbox for native PHP', fn() => same('native', renderSource('<?php echo "native"; ?>', [], ['allow_php_tags' => false])));
@@ -431,24 +451,22 @@ TPL;
 		$second=callPrivate($e,'compile','same-bytes.html@app'); same($first,$second); same('body',$e->renderToString('same-bytes.html@app'));
 	});
 
-	if ($baseline !== null) {
-		test('Differential nested comment fuzz, 2000 deterministic inputs', function () use ($baseline, $layers) {
-			$a=engine(); $b=new $baseline(new App($layers)); mt_srand(845);
-			for ($i=0; $i<2000; $i++) { $s=''; for ($j=0;$j<mt_rand(1,80);$j++) { $s .= ['{#','#}','x','{','}','#',"\n"][mt_rand(0,6)]; } same(callPrivate($b,'removeTemplateComments',$s), callPrivate($a,'removeTemplateComments',$s)); }
-		});
-		test('Differential syntax compilation, complete grammar sample', function () use ($baseline, $layers) {
-			$source = <<<'TPL'
+	test('Differential nested comment fuzz, 2000 deterministic inputs', function () use ($baseline, $layers) {
+		$a=engine(); $b=new $baseline(new App($layers)); mt_srand(845);
+		for ($i=0; $i<2000; $i++) { $s=''; for ($j=0;$j<mt_rand(1,80);$j++) { $s .= ['{#','#}','x','{','}','#',"\n"][mt_rand(0,6)]; } same(callPrivate($b,'removeTemplateComments',$s), callPrivate($a,'removeTemplateComments',$s)); }
+	});
+	test('Differential syntax compilation, complete grammar sample', function () use ($baseline, $layers) {
+		$source = <<<'TPL'
 {?= '$1' ?}{? $a = '\\'; ?}{{{ '$2' }}}{{ $a ?? '$0' }}{% set $b = '\1' %}
 {% if ($b) %}x{% elseif !$a %}y{% else %}z{% endif %}
 {% foreach ([1,2] as $i) %}{% continue 2; %}{% break; %}{% endforeach %}
 {% block x %}body{% endblock %}{% yield x %}{% extends "base@app" %}
 TPL;
-			foreach ([true,false] as $allow) { same(callPrivate(new $baseline(new App($layers,['allow_php_tags'=>$allow])),'compileSyntax',$source),callPrivate(engine(['allow_php_tags'=>$allow]),'compileSyntax',$source)); }
-		});
-	}
-
-	echo "SUMMARY $passed passed; $failed failed; $skipped skipped\n";
+		foreach ([true,false] as $allow) { same(callPrivate(new $baseline(new App($layers,['allow_php_tags'=>$allow])),'compileSyntax',$source),callPrivate(engine(['allow_php_tags'=>$allow]),'compileSyntax',$source)); }
+	});
 } finally {
 	removeTree($root);
 }
+// Summary line in the format tests/run.php parses.
+echo $passed . ' passed, ' . $failed . ' failed' . ($skipped > 0 ? ', ' . $skipped . ' skipped' : '') . PHP_EOL;
 exit($failed === 0 ? 0 : 1);

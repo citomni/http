@@ -1831,24 +1831,25 @@ tests/captcha/run.php
 tests/cookie/run.php
 tests/csrf/run.php
 tests/error-handler/run.php
+tests/maintenance/run.php
 tests/nonce/run.php
 tests/post-max-size/run.php
 tests/request/run.php
 tests/router/run.php
 tests/session/run.php
+tests/template-engine/run.php
 tests/url/run.php
 tests/webhooks-auth/run.php
 ```
 
-There are also focused TemplateEngine scripts:
+Two TemplateEngine scripts are run by hand, not by the runner:
 
 ```bash
-php tests/template-engine-regression.php
 php tests/template-engine-concurrency.php
 php tests/template-engine-benchmark.php
 ```
 
-The regression script validates compiler behavior and rendered output. The concurrency script covers simultaneous compilation and needs appropriate process execution support; the benchmark is a diagnostic comparison, not a universal production performance target.
+The concurrency script covers simultaneous compilation and needs appropriate process execution support; the benchmark is a diagnostic comparison, not a universal production performance target. The template-engine suite can also compare two engine versions; see `tests/template-engine/README.md`.
 
 The suite includes HTTP server-backed tests and filesystem/locking checks. Run it in a PHP **8.5+** environment with the dependencies and extensions required by the selected tests. Test prerequisites, supported environments, and individual cases are explained in their corresponding `tests/*/README.md` files.
 
