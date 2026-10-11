@@ -12,7 +12,7 @@
 # THREAT MODEL
 #   - Prevent disclosure of source (/src), config (/config), vendor code, caches,
 #     and tooling even if a later rewrite rule is changed.
-#   - Avoid serving ANY file from app-root except explicit allowlists (e.g. ACME).
+#   - Route well-known URIs through PHP; never serve their files from app-root.
 #   - Keep UX clean: 404 for internal dirs, 403 for dotfiles.
 #
 # DEPENDENCIES
@@ -24,7 +24,7 @@
 #   - Deny dotfiles and common secrets via Files/FilesMatch (no rewrite needed).
 #   - Hard-block requests to internal dirs (404) before any routing.
 #   - Route all non-/public/ requests into ./public/ (relative; subdir-safe).
-#   - Optional ACME support via local guard for .well-known/.
+#   - Dynamic .well-known/ routes are handled by the application front controller.
 #
 # NOTES
 #   - Place additional .htaccess "Require all denied" files inside /config, /src,
@@ -43,8 +43,8 @@ Options -Indexes -MultiViews
 # -----------------------------------------------------------------------------
 # 1) Never expose hidden files or common secrets (independent of mod_rewrite)
 # -----------------------------------------------------------------------------
-# Block dotfiles (.env, .git, .ht*, etc.)
-<FilesMatch "^\.">
+# Block dotfiles; permit the .well-known namespace to reach the rewrite rules.
+<FilesMatch "^\.(?!well-known$)">
 	Require all denied
 </FilesMatch>
 
@@ -66,13 +66,15 @@ Options -Indexes -MultiViews
 	#      we explicitly 404 these sensitive namespaces.	
 	RewriteRule ^(?i:(config|src|vendor|var|bin|tests|templates|language|tools|docs|\.git|\.github))(?=/|$) - [R=404,L]
 
+	# RFC 8615 well-known URIs are application routes, never static files.
+	# Providers register supported paths; the router rejects unknown paths.
+	RewriteRule ^\.well-known/ public/index.php [L]
+
 	# (2b) Forbid direct access to dotfiles via rewrite as an extra belt and suspenders
 	RewriteRule "(^|/)\." - [F]
 
-	# (2c) Guards: if already targeting ./public/ or (optionally) .well-known/, stop here
+	# (2c) Guard: if already targeting ./public/, stop here
 	RewriteRule ^public/ - [L]
-	# Uncomment if you keep ACME challenges here:
-	# RewriteRule ^\.well-known/ - [L]
 
 	# (2d) Route everything else into ./public/ (relative substitution; subdir-safe)
 	#      WHY: The FROM_APP_ROOT flag lets /public/.htaccess skip its own HTTPS/WWW redirects if enabled.
