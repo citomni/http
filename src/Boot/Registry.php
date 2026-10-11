@@ -378,6 +378,16 @@ final class Registry {
 		 *------------------------------------------------------------------
 		 */
 		'security' => [
+
+			// Global Fetch Metadata policy: Kernel::run() rejects disallowed request contexts
+			// (403) before maintenance and routing. Decisions: Policy\FetchMetadataPolicy.
+			// Independent of security.csrf.fetch_metadata, which only runs inside CSRF verification.
+			'fetch_metadata' => [
+				'enabled'         => false, // Off for existing apps; enable per app.
+				'allow_same_site' => false, // true trusts sibling subdomains (Sec-Fetch-Site: same-site).
+				'allow_missing'   => true,  // Requests without (or with an unknown) Sec-Fetch-Site: old browsers, server-to-server calls such as signed webhooks.
+				'exempt'          => [],    // Named rules: 'name' => ['path' => '/x', 'match' => 'exact'|'prefix', 'methods' => ['GET', 'HEAD']]; false removes an inherited rule.
+			],
 		
 			'csrf' => [
 				'enabled'                      => true,                              // Enable or disable CSRF protection globally.

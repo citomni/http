@@ -15,7 +15,9 @@ declare(strict_types=1);
 
 namespace CitOmni\Http;
 
+use CitOmni\Http\Policy\FetchMetadataPolicy;
 use CitOmni\Kernel\App;
+use CitOmni\Kernel\Cfg;
 use CitOmni\Kernel\Mode;
 use CitOmni\Kernel\Runtime;
 
@@ -41,9 +43,10 @@ use CitOmni\Kernel\Runtime;
  *   1) Start a single, top-level output buffer as early as possible to prevent partial output. This allows
  *      the ErrorHandler to fully replace the response on failures (status line + headers + body).
  *   2) Reject POST bodies exceeding PHP's post_max_size with HTTP 413 before dispatch.
- *   3) Enforce maintenance via $app->maintenance->guard() (flag-first, deterministic behavior).
- *   4) Route and dispatch via $app->router->run() (404/405/5xx are delegated to ErrorHandler::httpError()).
- *   5) Optionally emit a DEV-friendly performance footer when ?_perf is present.
+ *   3) Enforce optional Fetch Metadata resource isolation (403).
+ *   4) Enforce maintenance via $app->maintenance->guard() (flag-first, deterministic behavior).
+ *   5) Route and dispatch via $app->router->run() (404/405/5xx are delegated to ErrorHandler::httpError()).
+ *   6) Optionally emit a DEV-friendly performance footer when ?_perf is present.
  *
  * Request lifecycle (order of operations):
  *   - Output buffer start
@@ -52,6 +55,7 @@ use CitOmni\Kernel\Runtime;
  *       -> Runtime::configure() -> intl requirement assertion
  *       -> public root URL -> trusted proxies
  *   - POST size guard (413)
+ *   - optional Fetch Metadata guard (403)
  *   - maintenance guard
  *   - router run
  *   - optional perf footer
@@ -148,7 +152,7 @@ final class Kernel {
 	
 
 	/**
-	 * Run the HTTP application: boot -> POST size guard -> maintenance -> router -> optional perf footer.
+	 * Run the HTTP application: boot -> POST size -> Fetch Metadata -> maintenance -> router -> optional perf footer.
 	 *
 	 * Notes:
 	 * - Maintenance is enforced via $app->maintenance->guard() with no arguments to keep
@@ -185,6 +189,9 @@ final class Kernel {
 				'post_max_size' => $app->request->postMaxSize(),
 			]);
 		}
+
+		// Reject disallowed browser contexts before maintenance or controller work.
+		self::guardFetchMetadata($app);
 
 		// Deliberately call guard() with no arguments.
 		// Rationale: The maintenance policy (enabled, allowlist, retry_after) is defined by the flag file
@@ -290,6 +297,63 @@ final class Kernel {
 		}
 	
 		return $app;
+	}
+
+
+	/**
+	 * Enforce the optional Fetch Metadata policy (security.fetch_metadata) before dispatch.
+	 *
+	 * Behavior:
+	 * - Off unless security.fetch_metadata.enabled is true (vendor baseline: false).
+	 * - When on, every response gets "Vary: Sec-Fetch-Site, Sec-Fetch-Mode, Sec-Fetch-Dest",
+	 *   appended to any existing Vary values.
+	 * - "same-origin" and "none" continue at once. Every other request is decided by
+	 *   Policy\FetchMetadataPolicy. A refusal is a 403 through ErrorHandler::httpError()
+	 *   (request log, reason fetch_metadata_rejected), and dispatch never resumes.
+	 *
+	 * Notes:
+	 * - A missing security.fetch_metadata node counts as off. run() also serves the signed
+	 *   /_system/reset-cache webhook that rebuilds a compiled config, so a compiled config
+	 *   from before this baseline existed must not make every request fail. The keys inside
+	 *   the node come from the same baseline and are read directly.
+	 * - Starts no session, reads no request body and logs only refusals.
+	 *
+	 * @param  App  $app  Booted HTTP application.
+	 * @return void
+	 * @throws \RuntimeException  When security.fetch_metadata is not a map or enabled is not a boolean.
+	 */
+	private static function guardFetchMetadata(App $app): void {
+		$cfg = $app->cfg->security->fetch_metadata ?? null;
+		if ($cfg === null) {
+			return;
+		}
+		if (!$cfg instanceof Cfg || !\is_bool($cfg->enabled)) {
+			throw new \RuntimeException('security.fetch_metadata must be a map with a boolean "enabled".');
+		}
+		if (!$cfg->enabled) {
+			return;
+		}
+
+		// The decision depends on these request headers, also when the request is allowed.
+		\header('Vary: Sec-Fetch-Site, Sec-Fetch-Mode, Sec-Fetch-Dest', false);
+		$site = \strtolower((string)$app->request->header('Sec-Fetch-Site', ''));
+		if ($site === 'same-origin' || $site === 'none') {
+			return;
+		}
+		if ((new FetchMetadataPolicy($app))->allows($site)) {
+			return;
+		}
+
+		$app->errorHandler->httpError(403, [
+			'source'  => 'request',
+			'reason'  => 'fetch_metadata_rejected',
+			'title'   => 'Forbidden',
+			'message' => 'The request context is not allowed for this resource.',
+		]);
+
+		// httpError() normally ends the request. A handler that returns (re-entrancy or a
+		// custom handler) must still never resume dispatch.
+		exit;
 	}
 
 

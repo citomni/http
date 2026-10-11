@@ -48,7 +48,7 @@ if (\PHP_SAPI !== 'cli-server') {
 
 \define('CITOMNI_APP_PATH', $_SERVER['DOCUMENT_ROOT']);
 require \dirname(__DIR__) . '/support/doubles.php';
-foreach (['Boot/Registry', 'Service/Router'] as $file) {
+foreach (['Boot/Registry', 'Util/RoutePath', 'Service/Router'] as $file) {
 	require \dirname(__DIR__, 2) . '/src/' . $file . '.php';
 }
 

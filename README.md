@@ -13,7 +13,7 @@ Services are registered by stable IDs and resolved lazily through the CitOmni `A
 ## Highlights
 
 - **PHP 8.5+** with Composer and `citomni/kernel`.
-- **One HTTP lifecycle** through `\CitOmni\Http\Kernel::run()` with early error handling, POST-size protection, maintenance enforcement, and routing.
+- **One HTTP lifecycle** through `\CitOmni\Http\Kernel::run()` with early error handling, POST-size protection, optional Fetch Metadata isolation, maintenance enforcement, and routing.
 - **Deterministic configuration, service, and route maps** composed from vendor defaults, providers, application files, and environment overlays.
 - **Explicit exact and placeholder routes** with method negotiation, automatic `HEAD`/`OPTIONS`, and consistent 404/405/500 handling.
 - **App-aware request and response services** for input, JSON, headers, proxy-aware client information, redirects, API responses, and downloads.
@@ -42,9 +42,10 @@ In a typical request it:
 3. Installs the HTTP error handler and applies runtime locale, charset, and timezone policy.
 4. Resolves the application's public URL and configured trusted proxies.
 5. Rejects POST requests whose declared body length exceeds PHP's `post_max_size`.
-6. Enforces the maintenance flag.
-7. Matches the request against the explicit route table and invokes its controller action.
-8. Lets the action render a template or produce a response.
+6. Enforces the optional global Fetch Metadata policy.
+7. Enforces the maintenance flag.
+8. Matches the request against the explicit route table and invokes its controller action.
+9. Lets the action render a template or produce a response.
 
 The kernel does not turn every application into a large HTTP framework. Controllers remain thin adapters, and shared business behavior belongs in Operations, Repositories, or other appropriate CitOmni layers.
 
@@ -77,7 +78,7 @@ The vendor HTTP service map currently registers these IDs:
 
 These are **18** vendor baseline service IDs. Applications and providers can override registrations through the service-map merge. A different registered implementation may therefore occupy an ID in a particular application.
 
-The package also supplies `Kernel`, its vendor `Boot\Registry`, public and system controllers, a pure `Util\Url` helper, installation scaffolds, templates, translations, and package-specific exceptions.
+The package also supplies `Kernel`, its vendor `Boot\Registry`, public and system controllers, the `Policy\FetchMetadataPolicy` decision class, pure `Util\Url` and `Util\RoutePath` helpers, installation scaffolds, templates, translations, and package-specific exceptions.
 
 ---
 
@@ -313,7 +314,7 @@ The `{{ ... }}` expression is **CitOmni TemplateEngine syntax** and is HTML-esca
 $app = \CitOmni\Http\Kernel::boot(__DIR__);
 ```
 
-`run()` performs the complete HTTP request lifecycle and is the normal front-controller entry point. `boot()` returns an HTTP-mode `App` without running maintenance and route dispatch, useful for controlled integrations or test setup.
+`run()` performs the complete HTTP request lifecycle and is the normal front-controller entry point. `boot()` returns an HTTP-mode `App` without running the POST-size guard, Fetch Metadata guard, maintenance or route dispatch, useful for controlled integrations or test setup.
 
 Both accept an application root, its `config/` directory, or its `public/` directory as entry path. The `$opts` argument currently exists but is reserved and unused; do not depend on it for hidden boot overrides.
 
@@ -331,6 +332,7 @@ Kernel::run()
     resolve public root URL
     configure Request trusted proxies
   Request::exceedsPostMaxSize() -> 413 when exceeded
+  Fetch Metadata policy      -> 403 when disallowed (optional)
   Maintenance::guard()       -> 503 when blocked
   Router::run()              -> controller or HTTP error
   optional _perf diagnostics
@@ -852,6 +854,122 @@ Setting `view.cache_enabled` to `false` disables **warm reuse**, not compilation
 `view.trim_whitespace`, `view.remove_html_comments`, and `view.allow_php_tags` control optional markup behavior. `view.asset_version` is used by `$asset()`, and `view.marketing_scripts` is a trusted raw snippet rather than automatically sanitized text.
 
 For `dev` and `stage` diagnostics, `?_viewvars` on a request using `render()` can expose the render variables as an escaped HTML comment. The diagnostic is suppressed in `prod`. Limit access to such pages because rendered variables can include application data.
+
+---
+
+## Global Fetch Metadata policy
+
+`Kernel::run()` can reject requests from contexts the app does not expect, before
+maintenance, routing and controller construction. The decision uses the browser's Fetch
+Metadata request headers (`Sec-Fetch-Site`, `Sec-Fetch-Mode`, `Sec-Fetch-Dest`). It covers
+every request that reaches the kernel, including GET. Files the web server serves
+directly, and integrations that only call `Kernel::boot()`, are outside it.
+
+The vendor baseline is off. Enable it per app in `/config/citomni_http_cfg.php`:
+
+```php
+return [
+	'security' => [
+		'fetch_metadata' => [
+			'enabled'         => true,
+			'allow_same_site' => false,
+			'allow_missing'   => true,
+		],
+	],
+];
+```
+
+| Request | Decision |
+|---|---|
+| `Sec-Fetch-Site: same-origin` or `none` | Continue. |
+| `same-site` | Continue when `allow_same_site` is true; otherwise as `cross-site`. |
+| No or an unknown `Sec-Fetch-Site` | Continue when `allow_missing` is true; otherwise only an exemption admits it. |
+| `cross-site` GET/HEAD with `Sec-Fetch-Mode: navigate` and `Sec-Fetch-Dest: document` | Continue: links and other top-level navigations from other sites. |
+| A matching exemption (path and method) | Continue to routing. |
+| Anything else | 403 through the ErrorHandler; request log reason `fetch_metadata_rejected`. |
+
+Header values are compared case-insensitively, as in the CSRF layer. Kernel handles the
+switch, the `same-origin`/`none` fast path and the 403. Every other decision is made by
+`Policy\FetchMetadataPolicy`, which is only instantiated for requests that need it.
+
+- `allow_same_site` is false by default: sibling subdomains (a stage host, for example)
+  are not trusted unless the app says so.
+- `allow_missing` is true by default: older browsers and server-to-server callers send
+  no Fetch Metadata, and those requests get no protection from this policy. With
+  `allow_missing => false`, server-to-server callers such as DevKit's signed `/_system`
+  webhooks need an exemption.
+- Clients outside browsers can send any header. The policy protects users' browsers
+  against other sites, not the app against arbitrary clients; authentication,
+  authorization and CSRF verification remain necessary.
+
+### Exemptions
+
+Providers and the app add named rules. Named maps merge, so every package can add its own
+without replacing the others:
+
+```php
+return [
+	'security' => [
+		'fetch_metadata' => [
+			'exempt' => [
+				'payment_return' => [
+					'path'    => '/payments/return',
+					'match'   => 'exact',
+					'methods' => ['POST'],
+				],
+				'public_widget' => [
+					'path'    => '/widgets/public',
+					'match'   => 'prefix',
+					'methods' => ['GET', 'HEAD'],
+				],
+			],
+		],
+	],
+];
+```
+
+- A rule has `path`, `match` (`exact` or `prefix`) and `methods`; other keys (a note, for
+  example) are ignored. `false` removes an inherited rule by name. A list instead of a
+  named map is refused.
+- `exact` matches the path, ignoring a trailing slash as Router does. `prefix` matches the
+  path and every path below it, never a sibling: `/widgets/public` does not cover
+  `/widgets/public-evil`. A prefix of `/` covers every path for its methods.
+- Methods are uppercase names. Only the listed methods pass; HEAD and OPTIONS are not added.
+- Paths are decoded app paths as routes are written: no query, fragment, `%`, backslash,
+  space, `//` or dot segments. Matching uses `Util\RoutePath`, the resolution Router uses
+  (mount path, one decoding pass, trailing slash, `http.router_case_insensitive`), so a
+  rule and the route that serves the request always see the same path.
+- Rules are validated whenever the exemptions are consulted. An invalid rule is a
+  `\RuntimeException`, also when another rule would match.
+- An exemption only bypasses this policy. Routing, method negotiation, authentication and
+  CSRF verification still apply. Keep exempt paths for endpoints that are meant to be
+  reached from other sites; callbacks still need their own verification.
+
+### Caching, CSRF and deployment
+
+- When the policy is on, every response carries
+  `Vary: Sec-Fetch-Site, Sec-Fetch-Mode, Sec-Fetch-Dest`, appended to existing values. Do
+  not replace `Vary` later on cacheable responses, and expire shared-cache entries from
+  before the policy was switched on.
+- `security.csrf.fetch_metadata` is a separate check inside explicit CSRF verification.
+  `security.csrf.trusted_origins` does not apply here: a trusted cross-site partner needs
+  an exemption. Exemptions skip no CSRF verification. The CSRF origin layer treats
+  `Origin: null` as absent and then falls back to the Referer on HTTPS.
+- Keep GET and HEAD free of state changes: cross-site top-level navigations are allowed.
+- A compiled config from before this version has no `security.fetch_metadata` node, and
+  the policy then counts as off. That keeps the `/_system/reset-cache` webhook, which
+  rebuilds the config, working during a deploy. After deploying, rebuild the config
+  (`php bin/citomni cache:warm`, or the webhook) and check that a cross-site request is
+  refused:
+
+  ```bash
+  curl -s -o /dev/null -w '%{http_code}\n' -H 'Sec-Fetch-Site: cross-site' \
+    -H 'Sec-Fetch-Mode: no-cors' -H 'Sec-Fetch-Dest: image' https://www.example.com/
+  # 403
+  ```
+
+- `Policy\FetchMetadataPolicy` and `Util\RoutePath` are new classes: refresh an
+  authoritative Composer classmap, and follow the app's OPcache policy.
 
 ---
 
@@ -1672,6 +1790,7 @@ The baseline comes from `\CitOmni\Http\Boot\Registry::CFG_HTTP`. The table is an
 | `error_handler` | `render`, `log`, `templates`, `status_defaults` | Response detail, JSONL logs, fallback pages |
 | `session` | `name`, `save_path`, GC keys, native session flags, `cookie_*` | Session storage and cookie overrides |
 | `cookie` | `secure`, `httponly`, `samesite`, `path`, `domain` | Shared cookie policy |
+| `security.fetch_metadata` | `enabled`, `allow_same_site`, `allow_missing`, `exempt` | Optional global pre-dispatch resource isolation |
 | `security.csrf` | `enabled`, `field_name`, `header_name`, `session_key`, token and checking options | Explicit controller-side CSRF |
 | `security.captcha` | `session_key`, `ttl`, `max_pending`, `id_field`, `answer_field`, `image_path` | Challenge lifecycle |
 | `security` | `captcha_protection`, `honeypot_protection`, `form_action_switching` | Feature flags; not automatic router middleware |
@@ -1831,6 +1950,7 @@ tests/captcha/run.php
 tests/cookie/run.php
 tests/csrf/run.php
 tests/error-handler/run.php
+tests/fetch-metadata/run.php
 tests/maintenance/run.php
 tests/nonce/run.php
 tests/post-max-size/run.php
@@ -1891,6 +2011,8 @@ src/
 │   ├── WebhooksAuthConfigException.php
 │   ├── WebhooksAuthException.php
 │   └── WebhooksAuthVerificationException.php
+├── Policy/
+│   └── FetchMetadataPolicy.php
 ├── Service/
 │   ├── Captcha.php
 │   ├── Cookie.php
@@ -1911,6 +2033,7 @@ src/
 │   ├── Upload.php
 │   └── WebhooksAuth.php
 ├── Util/
+│   ├── RoutePath.php
 │   └── Url.php
 └── Kernel.php
 

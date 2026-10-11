@@ -15,6 +15,7 @@ declare(strict_types=1);
 
 namespace CitOmni\Http\Service;
 
+use CitOmni\Http\Util\RoutePath;
 use CitOmni\Kernel\Service\BaseService;
 
 
@@ -22,7 +23,8 @@ use CitOmni\Kernel\Service\BaseService;
  * Router: Deterministic HTTP routing with subdir-safe path resolution and method policy.
  *
  * Responsibilities:
- * - Resolve the HTTP method and a normalized, subdir-safe request path.
+ * - Resolve the HTTP method and a normalized, subdir-safe request path through
+ *   \CitOmni\Http\Util\RoutePath (shared with Policy\FetchMetadataPolicy).
  *   1) Prefer CITOMNI_PUBLIC_ROOT_URL to compute a base prefix.
  *   2) Fallback to SCRIPT_NAME derivation; strip trailing "/public".
  *   3) Decode percent-escapes after trimming; enforce ASCII-only path.
@@ -156,50 +158,14 @@ class Router extends BaseService {
 		// 1) Resolve method & path (subdir-safe)
 		$method = \strtoupper($_SERVER['REQUEST_METHOD'] ?? 'GET');
 
-		// Extract path portion (before '?'), default to '/'
-		$uri = \strtok($_SERVER['REQUEST_URI'] ?? '/', '?') ?: '/';
-
-		// --- Determine base prefix (without trailing slash) ---
-		// 1.1) Prefer CITOMNI_PUBLIC_ROOT_URL (consistent across setups)
-		$basePrefix = '';
-		if (\defined('CITOMNI_PUBLIC_ROOT_URL')) {
-			$parsed = \parse_url(\CITOMNI_PUBLIC_ROOT_URL);
-			$basePrefix = isset($parsed['path']) ? \rtrim((string)$parsed['path'], '/') : '';
-		}
-
-		// 1.2) Fallback: derive from SCRIPT_NAME, but strip trailing "/public"
-		if ($basePrefix === '') {
-			$scriptName = (string)($_SERVER['SCRIPT_NAME'] ?? ($_SERVER['PHP_SELF'] ?? '/index.php'));
-			$basePrefix = \rtrim(\str_replace('\\', '/', \dirname($scriptName)), '/');
-			if ($basePrefix !== '' && \substr($basePrefix, -7) === '/public') {
-				$basePrefix = \substr($basePrefix, 0, -7);
-				$basePrefix = ($basePrefix === '') ? '' : \rtrim($basePrefix, '/');
-			}
-		}
-
-		// 1.3) Apply base prefix to the request URI
-		// if ($basePrefix !== '' && \strncmp($uri, $basePrefix, \strlen($basePrefix)) === 0) {
-			// $uri = \substr($uri, \strlen($basePrefix));
-		// }
-
-		
-		// Check if lowercase is allowed (set true|false in cfg)
+		// Share the exact path interpretation with pre-dispatch security checks.
 		$caseInsensitive = (bool)($this->app->cfg->http->router_case_insensitive ?? false);
-
-		
-		// 1.3) Apply base prefix to the request URI (ci-aware)
-		if ($basePrefix !== '') {
-			$bpLen = \strlen($basePrefix);
-			$match = \strncmp($uri, $basePrefix, $bpLen) === 0 || ($caseInsensitive && \strncasecmp($uri, $basePrefix, $bpLen) === 0);
-			if ($match) {
-				$uri = \substr($uri, $bpLen);
-			}
-		}
-		
-
-		// Decode percent-escapes after subdir trimming
-		$uri = \rawurldecode($uri);
-
+		$uri = RoutePath::resolve(
+			(string)($_SERVER['REQUEST_URI'] ?? '/'),
+			\defined('CITOMNI_PUBLIC_ROOT_URL') ? \CITOMNI_PUBLIC_ROOT_URL : '',
+			(string)($_SERVER['SCRIPT_NAME'] ?? ($_SERVER['PHP_SELF'] ?? '/index.php')),
+			$caseInsensitive
+		);
 
 		// 1a) ASCII-only guard (defense-in-depth)
 		if (\preg_match('/[^\x00-\x7F]/', $uri)) {
@@ -209,27 +175,6 @@ class Router extends BaseService {
 				'reason' => 'invalid_uri_non_ascii',
 			]);
 			return;
-		}
-
-		// 1b) Normalize trailing slash (treat '/path/' as '/path')
-		$uri = \rtrim($uri, '/') ?: '/';
-
-		// 2) Load routes (absent -> empty)
-		// $routes = \array_key_exists('routes', $this->app->cfg->toArray())
-			// ? (array)$this->app->cfg->toArray()['routes']
-			// : [];
-		// $routes = $this->app->cfg->routes ?? [];
-		// if (!\is_array($routes)) {
-			// $routes = []; // Defensively (if anybody sabotaged cfg)
-		// }		
-		// $routes = $this->app->cfg->routes ?? null;
-		// if (!\is_array($routes)) {
-			// throw new \RuntimeException('Config node "routes" must be an array.');
-		// }
-		
-		// 1c) Optional case-insensitive routing (local dev friendliness on Windows)		
-		if ($caseInsensitive) {
-			$uri = \strtolower($uri);
 		}
 
 		// 2) Load routes (must be array)
