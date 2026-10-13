@@ -574,7 +574,8 @@ final class TemplateEngine extends BaseService {
 			 *
 			 * Notes:
 			 * - $file is typically the logical language file (without ".php").
-			 * - $layer is optional; pass e.g. "citomni/authenticate" to read provider language.
+			 * - $layer is optional; omitted or null reads the app layer ("app"). Pass e.g.
+			 *   "citomni/authenticate" to read provider language.
 			 * - If key is missing, $default is returned.
 			 *
 			 * Throws:
@@ -586,7 +587,8 @@ final class TemplateEngine extends BaseService {
 						"Text service not available. Install 'citomni/infrastructure' and register 'txt' in /config/providers.php."
 					);
 				}
-				return $this->app->txt->get($key, $file, $layer, $default, $vars);
+				// Txt::get() takes a non-nullable layer, so null becomes its 'app' default here.
+				return $this->app->txt->get($key, $file, $layer ?? 'app', $default, $vars);
 			},
 
 

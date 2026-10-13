@@ -392,6 +392,18 @@ TPL;
 		raises(fn()=> $globals['auth']('check'), 'Auth service not available');
 		raises(fn()=> $globals['role']('rank'), 'Role service not available');
 	});
+	test('Text helper reads the app layer when the layer is omitted or null', function () use ($layers) {
+		// Same signature as CitOmni\Infrastructure\Service\Txt::get(): a non-nullable layer with an 'app' default.
+		$txt = new class {
+			public array $calls = [];
+			public function get(string $key, string $file, string $layer = 'app', string $default = '', array $vars = []): string { $this->calls[] = [$key, $file, $layer, $default, $vars]; return $default; }
+		};
+		$app = new App($layers); $app->services['txt'] = $txt; $globals = callPrivate(engine(app: $app), 'buildGlobals');
+		same('', $globals['txt']('key', 'file'));
+		same('Hello guest', $globals['txt']('greeting', 'homepage', null, 'Hello guest'));
+		same('Hi', $globals['txt']('welcome', 'homepage', 'citomni/authenticate', 'Hi', ['NAME' => 'Ann']));
+		same([['key', 'file', 'app', '', []], ['greeting', 'homepage', 'app', 'Hello guest', []], ['welcome', 'homepage', 'citomni/authenticate', 'Hi', ['NAME' => 'Ann']]], $txt->calls);
+	});
 	test('Captcha helpers share one challenge and respect the protection flag', function () use ($layers) {
 		$captcha = new class {
 			public bool $enabled = true; public int $issued = 0;

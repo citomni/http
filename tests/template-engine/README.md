@@ -6,11 +6,11 @@ Regression checks for `CitOmni\Http\Service\TemplateEngine`: syntax, inheritance
 php tests/template-engine/run.php
 ```
 
-Expected: `127 passed, 0 failed, 4 skipped`
+Expected: `128 passed, 0 failed, 4 skipped`
 
-With `CITOMNI_TEST_PARALLEL=1` the four parallel cases run too. Expected: `131 passed, 0 failed`
+With `CITOMNI_TEST_PARALLEL=1` the four parallel cases run too. Expected: `132 passed, 0 failed`
 
-Where PHP cannot create symlinks, for example on Windows without the symlink privilege, the two symlink cases are skipped as well: `125 passed, 0 failed, 6 skipped`, or `129 passed, 0 failed, 2 skipped` with `CITOMNI_TEST_PARALLEL=1`.
+Where PHP cannot create symlinks, for example on Windows without the symlink privilege, the two symlink cases are skipped as well: `126 passed, 0 failed, 6 skipped`, or `130 passed, 0 failed, 2 skipped` with `CITOMNI_TEST_PARALLEL=1`.
 
 The suite runs the real TemplateEngine against the doubles in `tests/bootstrap.php`. Templates, provider templates and the cache live in a temporary `CITOMNI_APP_PATH`, which the suite removes afterwards.
 
@@ -26,7 +26,7 @@ The suite runs the real TemplateEngine against the doubles in `tests/bootstrap.p
 - Symlinks: a link out of the layer is rejected, and a retargeted link is noticed on a warm render.
 - `trim_whitespace` and `remove_html_comments` leave PHP strings, line comments, heredoc and nowdoc, quoted attributes and the content of `pre`, `code`, `textarea`, `script` and `style` alone, also when a sensitive tag spans PHP or is never closed. Ordinary HTML comments are removed; conditional and unclosed ones stay.
 - View variables: controller data wins over `view.vars`, dynamic providers (static method, instance and service) run on every render, also when controller data overrides their variable, and path-scoped `include` and `exclude` rules are evaluated per render.
-- Helpers: the names and order of the template globals and the output of `url()` and `asset()`. Without their services, `csrfField()`, `captchaField()` and `captchaUrl()` return `''` and `hasIcon()` false, while `icon()`, `txt()`, `auth()` and `role()` throw. The captcha helpers share one challenge and follow the protection flag.
+- Helpers: the names and order of the template globals and the output of `url()` and `asset()`. Without their services, `csrfField()`, `captchaField()` and `captchaUrl()` return `''` and `hasIcon()` false, while `icon()`, `txt()`, `auth()` and `role()` throw. `txt()` passes the app layer to `Txt::get()` when the layer is omitted or null, and a package slug unchanged. The captcha helpers share one challenge and follow the protection flag.
 - The legacy local variables, `render()` output equal to `renderToString()`, the output buffer after a template exception, the `_viewvars` debug comment with hostile and cyclic payloads, and a filesystem root as layer root.
 - Differential, against the baseline: every syntax case, 2000 deterministic inputs to `removeTemplateComments()`, and `compileSyntax()` on a grammar sample with `allow_php_tags` on and off.
 - With `CITOMNI_TEST_PARALLEL=1`, workers that start at the same moment render `parallel.html@app`, which extends a layout and includes a partial from the provider layer, twelve times each with values of their own, and every render must return that worker's own output: 16 workers on an empty cache, then 32 on the published generation, then 8 with the cache disabled, where every render compiles again and rewrites the manifest under the writer lock. Afterwards the cache holds one compiled generation, one manifest that names it and the three templates, one lock and no temporary files.
