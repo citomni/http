@@ -189,12 +189,6 @@ return [
 			'policy' => 'managed',
 		],
 		[
-			'target' => 'templates/public/helloworld.html',
-			'source' => 'install/scaffold/templates/public/helloworld.html.stub',
-			'type' => 'starter-template',
-			'policy' => 'create-only',
-		],
-		[
 			'target' => 'templates/public/maintenance.php.tpl',
 			'source' => 'install/scaffold/templates/public/maintenance.php.tpl.stub',
 			'type' => 'starter-template',

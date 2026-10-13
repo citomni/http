@@ -149,14 +149,6 @@ return [
 	],
 	*/
 
-	// '/helloworld.html' => [
-		// 'controller' => \App\Http\Controller\AppController::class,
-		// 'action' => 'helloworld',
-		// 'methods' => ['GET'],
-		// 'template_file' => 'public/helloworld.html',
-		// 'template_layer' => 'app'
-	// ],
-
 
 
 	// -----------------------------------------------------------------
