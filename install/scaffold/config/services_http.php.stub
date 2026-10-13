@@ -34,9 +34,13 @@ declare(strict_types=1);
  * Effective HTTP precedence (services, left wins via PHP array union +):
  *   1) App HTTP services: /config/services_http.php
  *   2) App common services: /config/services.php
- *   3) Provider HTTP services: MAP_HTTP from registries listed in /config/providers.php
- *   4) Provider common services: MAP_COMMON from registries listed in /config/providers.php
- *   5) Vendor HTTP baseline: MAP_HTTP from citomni/http
+ *   3) Provider #N MAP_HTTP
+ *   4) Provider #N MAP_COMMON
+ *   5) Earlier provider service maps, same mode/common pattern
+ *   6) Vendor HTTP baseline: MAP_HTTP from citomni/http
+ *
+ *   Providers are read in /config/providers.php order. Within one provider,
+ *   MAP_HTTP wins over MAP_COMMON; a later provider wins over earlier ones.
  *
  * Policy:
  *   - Keep this file minimal.
@@ -58,7 +62,7 @@ return [
 	| Example: HTTP-only app service
 	|--------------------------------------------------------------------------
 	*/
-	// 'myHttpService' => \App\Http\Service\MyHttpService::class,
+	// 'myHttpService' => \App\Service\MyHttpService::class,
 
 	/*
 	|--------------------------------------------------------------------------
@@ -66,7 +70,7 @@ return [
 	|--------------------------------------------------------------------------
 	*/
 	// 'myHttpServiceWithOptions' => [
-	// 	'class' => \App\Http\Service\MyHttpService::class,
+	// 	'class' => \App\Service\MyHttpService::class,
 	// 	'options' => [
 	// 		'example' => true,
 	// 	],

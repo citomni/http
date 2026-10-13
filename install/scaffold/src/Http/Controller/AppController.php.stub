@@ -24,16 +24,11 @@ use CitOmni\Kernel\Controller\BaseController;
  * Templates + layer are provided via route config. No "magic", no global state.
  */
 class AppController extends BaseController {
-	
-	
 
-/*
- *------------------------------------------------------------------
- * BASIC START-UP
- *------------------------------------------------------------------
- * The common fundamentals that are required for all public pages. 
- * 
- */
+	// ----------------------------------------------------------------
+	// Basic start-up
+	// ----------------------------------------------------------------
+	// The common fundamentals that are required for all public pages.
 
 	/**
 	 * Lightweight initialization for public routes.
@@ -48,15 +43,9 @@ class AppController extends BaseController {
 
 
 
-
-
-/*
- *------------------------------------------------------------------
- * PUBLIC PAGES
- *------------------------------------------------------------------
- * 
- */
-
+	// ----------------------------------------------------------------
+	// Public pages
+	// ----------------------------------------------------------------
 
 	public function index(): void {
 
