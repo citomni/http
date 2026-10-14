@@ -403,13 +403,17 @@ final class ErrorHandler extends BaseService {
 	 * - Generates a new error id and writes a structured JSONL record
 	 * - Redacts obvious secrets in the provided $context (tokens, cookies, etc.)
 	 * - Logs context source 'request' to http_request.jsonl; otherwise preserves router status logs
-	 * - Always renders a client response (HTML or JSON via content negotiation)
-	 * - Re-entrancy-safe: A concurrent handler run is ignored
+	 * - Renders a client response (HTML or JSON via content negotiation) and terminates the request
+	 * - While another handler run is in progress, terminates at once without logging or rendering;
+	 *   the response is what that run has emitted or buffered so far
 	 *
 	 * Notes:
 	 * - Intended for terminal HTTP outcomes; application exceptions go through handleException().
 	 * - Logging is fail-soft; errors during logging are routed to PHP's error_log.
 	 * - The response includes X-Request-Id and a stable error_id for support correlation.
+	 * - After this method has rendered, the handler run stays in progress, because exit() skips
+	 *   the finally block. A call from a shutdown function or destructor therefore also
+	 *   terminates without logging or rendering.
 	 *
 	 * Typical usage:
 	 *   Call when an HTTP adapter decides on a terminal HTTP outcome and execution must stop.
@@ -437,13 +441,14 @@ final class ErrorHandler extends BaseService {
 	 *
 	 * @param int   $status  HTTP status (404, 405, 500, ...).
 	 * @param array $context Optional metadata; source 'request' selects request-level logging.
-	 * @return void
+	 * @return never
 	 */
-	public function httpError(int $status, array $context = []): void {
+	public function httpError(int $status, array $context = []): never {
 		
-		// Prevent recursive entry if we are already inside a handler.
+		// Prevent recursive entry if we are already inside a handler. That run owns the
+		// response; returning would let the caller continue past an outcome it treats as terminal.
 		if (self::$inHandler) {
-			return;
+			exit(0);
 		}
 		self::$inHandler = true;
 
@@ -769,9 +774,9 @@ final class ErrorHandler extends BaseService {
 	 * @param string              $errorId Correlation id shown to the client
 	 * @param array<string,mixed> $payload Optional keys: 'title','message','details','type'
 	 *
-	 * @return void
+	 * @return never
 	 */
-	private function renderResponse(int $status, string $errorId, array $payload): void {
+	private function renderResponse(int $status, string $errorId, array $payload): never {
 		
 		// Decide negotiation and whether we can still replace the response
 		$wantsJson  = $this->wantsJson();

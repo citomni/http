@@ -24,7 +24,7 @@ use function CitOmni\Http\Tests\Support\tempDir;
 
 /*
  * Isolated suite for CitOmni\Http\Service\ErrorHandler: the directory its JSONL
- * logs are written to.
+ * logs are written to, and that httpError() does not return.
  *
  * Usage:
  *   php tests/error-handler/run.php
@@ -32,9 +32,12 @@ use function CitOmni\Http\Tests\Support\tempDir;
  * Notes:
  * - Runs the real ErrorHandler against the kernel doubles, in a temporary
  *   CITOMNI_APP_PATH, so the default log directory is <root>/var/logs.
- * - Each case logs one E_USER_WARNING through handlePhpError() and reads the record
- *   back. The baseline render trigger is 0, so nothing is rendered and nothing exits.
- *   install() is never called, so the suite's own error handler stays in place.
+ * - Each log-directory case logs one E_USER_WARNING through handlePhpError() and
+ *   reads the record back. The baseline render trigger is 0, so nothing is rendered
+ *   and nothing exits. install() is never called, so the suite's own error handler
+ *   stays in place.
+ * - httpError() ends the process, so the re-entry case runs this file again as a
+ *   worker: php run.php --reentry <log dir>.
  * - PHP's error_log goes to a file in the temporary root. A missing record fails with
  *   the last line written there, which is the reason writeJsonl() gave up.
  * - The temporary root is the working directory while the cases run, so a relative
@@ -217,6 +220,31 @@ function lastErrorLogLine(): string {
 	return ' (error_log: ' . \end($lines) . ')';
 }
 
+/**
+ * Worker for the re-entry case: Call httpError(404) with a shutdown function that calls
+ * httpError(403) and then prints "continued". The 404 call renders and exits, and exit()
+ * skips its finally block, so the shutdown function runs while the handler run is still
+ * in progress. Stdout is the 404 response alone when the second call does not return.
+ */
+function reentryWorker(string $dir): never {
+	if (!\is_dir($dir)) {
+		throw new \RuntimeException('Usage: run.php --reentry <log dir>');
+	}
+	\define('CITOMNI_APP_PATH', $dir);
+	$_SERVER['HTTP_ACCEPT'] = 'application/json';
+
+	$handler = handlerFor(['log' => ['path' => $dir]]);
+	\register_shutdown_function(static function () use ($handler): void {
+		$handler->httpError(403, ['reason' => 'nested']);
+		\fwrite(\STDOUT, 'continued');
+	});
+	$handler->httpError(404, ['reason' => 'outer']);
+}
+
+if (($argv[1] ?? '') === '--reentry') {
+	reentryWorker((string)($argv[2] ?? ''));
+}
+
 $root = tempDir('error_handler');
 \define('CITOMNI_APP_PATH', $root);
 \ini_set('error_log', $root . '/php-error.log');
@@ -281,6 +309,39 @@ try {
 		} finally {
 			\stream_wrapper_unregister('mkdirrace');
 		}
+	});
+
+	// -- 3. Termination ---------------------------------------------------------
+
+	check('httpError() called while a handler run is in progress does not return', function (): void {
+		$dir = CITOMNI_APP_PATH . '/reentry-logs';
+		\mkdir($dir);
+
+		// Same php.ini as this process: the loaded file, the default lookup, or none at all.
+		$iniArgs = match (true) {
+			\php_ini_loaded_file() !== false   => ['-c', \php_ini_loaded_file()],
+			\php_ini_scanned_files() !== false => [],
+			default                            => ['-n'],
+		};
+		$process = \proc_open([\PHP_BINARY, ...$iniArgs, __FILE__, '--reentry', $dir], [
+			0 => ['pipe', 'r'],
+			1 => ['pipe', 'w'],
+			2 => ['pipe', 'w'],
+		], $pipes);
+		if (!\is_resource($process)) {
+			throw new \RuntimeException('Cannot start the re-entry worker.');
+		}
+		\fclose($pipes[0]);
+		$stdout = (string)\stream_get_contents($pipes[1]);
+		$stderr = (string)\stream_get_contents($pipes[2]);
+		\fclose($pipes[1]);
+		\fclose($pipes[2]);
+
+		same(0, \proc_close($process), 'worker exit code');
+		same('', $stderr, 'worker stderr');
+		same(false, \str_contains($stdout, 'continued'), 'nested httpError() returned to its caller');
+		same(404, \json_decode($stdout, true, 512, \JSON_THROW_ON_ERROR)['status'] ?? null, 'response status');
+		same(false, \is_file($dir . '/http_router_other.jsonl'), 'nested call logged');
 	});
 
 } finally {

@@ -1,14 +1,14 @@
 # ErrorHandler suite
 
-Isolated checks for the directory `CitOmni\Http\Service\ErrorHandler` writes its JSONL logs to. No Composer, no database, no environment variables.
+Isolated checks for the directory `CitOmni\Http\Service\ErrorHandler` writes its JSONL logs to, and that `httpError()` does not return. No Composer, no database, no environment variables.
 
 ```
 php tests/error-handler/run.php
 ```
 
-Expected: `6 passed, 0 failed`
+Expected: `7 passed, 0 failed`
 
-The suite runs in a temporary `CITOMNI_APP_PATH`, so the default log directory is `var/logs` below it, and removes it afterwards. Each case logs one `E_USER_WARNING` through `handlePhpError()` and reads the record back from `http_err_phperror.jsonl`. The baseline render trigger is 0, so nothing is rendered and the process does not exit.
+The suite runs in a temporary `CITOMNI_APP_PATH`, so the default log directory is `var/logs` below it, and removes it afterwards. Each log-directory case logs one `E_USER_WARNING` through `handlePhpError()` and reads the record back from `http_err_phperror.jsonl`. The baseline render trigger is 0, so nothing is rendered and the process does not exit.
 
 ## Cases
 
@@ -18,11 +18,13 @@ The suite runs in a temporary `CITOMNI_APP_PATH`, so the default log directory i
 - An empty `log.path` service option wins over an explicit cfg path and falls back to `var/logs`; the cfg directory is not created.
 - Surrounding whitespace, a newline included, is trimmed from an explicit `log.path`.
 - A log directory that another request creates between `is_dir()` and `mkdir()` is used: `mkdir()` fails, and the record is still written.
+- `httpError()` called from a shutdown function after an earlier `httpError()` has rendered does not return to its caller: The process exits 0, stdout is the first call's 404 response alone, and the second call writes no log record.
 
 ## Regression proof
 
 - Against `hydrate()` before the empty-path fallback, the empty, whitespace-only, service-option and trimming cases fail: `2 passed, 4 failed`. The empty and service-option cases fail with the error_log line `[CitOmni] writeJsonl failed: log dir create failed`; in the other two the record went to a relative directory below the working directory.
 - Against `writeJsonl()` before it checked `is_dir()` again after a failed `mkdir()`, the race case fails with `log dir create failed`: `5 passed, 1 failed`.
+- Against `httpError()` before it exited on re-entry, the re-entry case fails with `nested httpError() returned to its caller`: `6 passed, 1 failed`.
 
 ## Notes
 
@@ -31,3 +33,4 @@ The suite runs in a temporary `CITOMNI_APP_PATH`, so the default log directory i
 - The temporary root is the working directory while the cases run, so the relative directories of the regression proof stay inside it.
 - The race case uses a stream wrapper (`mkdirrace://logs`) as log directory. Its `url_stat()` reports the directory missing until `mkdir()` is called, and `mkdir()` then fails although the directory exists, so the interleaving with the other request is the same on every run. Files below it are kept in memory.
 - The kernel doubles in `tests/support/doubles.php` have no `CitOmni\Kernel\Arr`. The suite aliases a stand-in that delegates to `mergeLastWins()`.
+- `httpError()` ends the process, so the re-entry case starts `run.php --reentry <log dir>` as a worker with the same php.ini. The worker's first `httpError()` exits, and `exit()` skips its `finally` block, so the shutdown function's call finds the handler run still in progress. The response is JSON (`Accept: application/json`), so no template is involved.
