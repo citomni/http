@@ -26,8 +26,9 @@ use function CitOmni\Http\Tests\Support\mergeLastWins;
  * buffer first. Then runs one case. Logs go to <docroot>/logs.
  *
  * Query parameters:
- * - case: download, stream-csv, stream-html, php-warning, output-handler, exception or
- *   status-419.
+ * - case: download, stream-csv, stream-html, php-warning, output-handler, exception,
+ *   exception-chain or status-419.
+ * - depth: for exception-chain, the number of previous exceptions, 0 when missing.
  * - env: CITOMNI_ENVIRONMENT, prod when missing. Developer detail is on in dev.
  * - lang: cfg locale.language, en when missing.
  * - root: CITOMNI_PUBLIC_ROOT_URL, undefined when missing.
@@ -57,6 +58,14 @@ final class ArrDouble {
 
 require \dirname(__DIR__, 2) . '/src/Boot/Registry.php';
 require \dirname(__DIR__, 2) . '/src/Service/ErrorHandler.php';
+
+/** Exception with a string code, as a PDOException carries its SQLSTATE. */
+final class StringCodeException extends \RuntimeException {
+	public function __construct(string $message, string $code, ?\Throwable $previous = null) {
+		parent::__construct($message, 0, $previous);
+		$this->code = $code;
+	}
+}
 
 \ob_start();
 
@@ -114,6 +123,18 @@ switch ((string)($_GET['case'] ?? '')) {
 	case 'exception':
 		echo '<p>half a page</p>';
 		throw new \RuntimeException('Controller failed');
+
+	// An exception whose code looks like a status, wrapping <depth> previous exceptions:
+	// "previous 1" is its direct cause and has the string code 23000, "previous 2" has code 2,
+	// and so on.
+	case 'exception-chain':
+		$previous = null;
+		for ($i = (int)($_GET['depth'] ?? 0); $i >= 1; $i--) {
+			$previous = ($i === 1)
+				? new StringCodeException("previous {$i}", '23000', $previous)
+				: new \LogicException("previous {$i}", $i, $previous);
+		}
+		throw new \RuntimeException('Order could not be saved', 404, $previous);
 
 	case 'status-419':
 		$handler->httpError(419);

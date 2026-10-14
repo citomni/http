@@ -727,6 +727,31 @@ try {
 		}
 	});
 
+	check('An out-of-memory fatal is logged and answered when its record rotates a log among 1000 other files', function (): void {
+		// After the rotation, retention reads the directory while the handler runs on its reserve.
+		foreach ([['16M', 615], ['16M', 4000], ['64M', 615], ['64M', 4000]] as [$limit, $bytes]) {
+			$dir  = caseDir("oom-rotate-{$limit}-{$bytes}");
+			$logs = $dir . '/logs';
+			\mkdir($logs);
+			// Past the baseline log.max_bytes of 2_000_000, so the shutdown record rotates the log.
+			\file_put_contents($logs . '/http_err_shutdown.jsonl', \str_repeat('{"seed":true,"pad":"' . \str_repeat('s', 179) . "\"}\n", 9_901));
+			for ($i = 1; $i <= 10; $i++) {
+				\touch(\sprintf('%s/http_err_shutdown.202601%02dT120000.000000Z.jsonl', $logs, $i));
+			}
+			for ($i = 0; $i < 1_000; $i++) {
+				\touch(\sprintf('%s/app_%04d.20260101T120000.000000Z.jsonl', $logs, $i));
+			}
+			$r = runWorker('oom', $dir, (string)$bytes, ['memory_limit' => $limit, 'max_memory_limit' => $limit]);
+			$where = " (memory_limit={$limit}, {$bytes}-byte strings)";
+			$records = records($logs . '/http_err_shutdown.jsonl');
+			same(1, \count($records), 'records in the live file' . $where . ': ' . \trim($r['stderr']));
+			same(\E_ERROR, $records[0]['errno'] ?? null, 'errno' . $where);
+			expect(\str_contains($r['stdout'], 'error_id=' . ($records[0]['error_id'] ?? '?')), 'no page with the record\'s error_id' . $where . ': ' . \var_export(\substr($r['stdout'], 0, 200), true));
+			same(10, \count(rotations($logs, 'http_err_shutdown')), 'rotations after pruning' . $where);
+			same(1_000, \count(\preg_grep('/^app_\d{4}\./', \scandir($logs))), 'files of other logs' . $where);
+		}
+	});
+
 	check('A fatal error inside the page template is answered with the built-in page', function (): void {
 		$dir = caseDir('template-fatal');
 		\file_put_contents($dir . '/fatal.php', "<?php\neval('function citomni_eh_template_dup(): void {} function citomni_eh_template_dup(): void {}');\n");
@@ -934,6 +959,33 @@ try {
 			same('exception', $json['type'] ?? null, 'response type');
 			same(serverRecords('http_err_exception.jsonl')[0]['error_id'] ?? null, $json['error_id'] ?? null, 'error_id');
 			same([], serverRecords('http_err_shutdown.jsonl'), 'shutdown records');
+		});
+
+		check('An exception record carries the code, the throw site and at most five previous exceptions, direct cause first', function (): void {
+			serve('case=exception-chain', API);
+			$rec = serverRecords('http_err_exception.jsonl')[0] ?? [];
+			same([404, 'Order could not be saved', []], [$rec['code'] ?? null, $rec['message'] ?? null, $rec['previous'] ?? null], 'code, message and previous of an exception without a cause');
+			expect(\str_ends_with((string)($rec['file'] ?? ''), 'server.php') && (int)($rec['line'] ?? 0) > 0, 'throw site: ' . \var_export([$rec['file'] ?? null, $rec['line'] ?? null], true));
+
+			serve('case=exception-chain&depth=7', API);
+			$previous = serverRecords('http_err_exception.jsonl')[0]['previous'] ?? [];
+			same(['previous 1', 'previous 2', 'previous 3', 'previous 4', 'previous 5'], \array_column($previous, 'message'), 'messages of the logged causes');
+			same(['23000', 2, 3, 4, 5], \array_column($previous, 'code'), 'codes of the logged causes');
+			same([__NAMESPACE__ . '\StringCodeException', 'LogicException'], [$previous[0]['class'] ?? null, $previous[1]['class'] ?? null], 'classes of the first causes');
+			expect(\str_ends_with((string)($previous[0]['file'] ?? ''), 'server.php') && (int)($previous[0]['line'] ?? 0) > 0, 'throw site of the direct cause');
+		});
+
+		check('An exception\'s code never becomes the status, and only dev responses show its causes', function (): void {
+			$api = serve('case=exception-chain&depth=2', API);
+			same(500, $api['status'], 'status');
+			$json = \json_decode($api['body'], true, 512, \JSON_THROW_ON_ERROR);
+			same([500, 'An unexpected error occurred.', false], [$json['status'] ?? null, $json['message'] ?? null, \array_key_exists('details', $json)], 'production JSON status, message and details');
+			$page = serve('case=exception-chain&depth=2', BROWSER);
+			foreach (['Order could not be saved', 'previous 1', 'previous 2'] as $text) {
+				expect(!\str_contains($api['body'], $text) && !\str_contains($page['body'], $text), "a production response shows '{$text}'");
+			}
+			$dev = \json_decode(serve('case=exception-chain&depth=2&env=dev', API)['body'], true, 512, \JSON_THROW_ON_ERROR);
+			same(['previous 1', 'previous 2'], \array_column($dev['details']['previous'] ?? [], 'message'), 'causes in the dev response');
 		});
 
 		check('The default template falls back to English for a language without texts, without diagnostics', function (): void {

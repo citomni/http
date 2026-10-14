@@ -1577,6 +1577,8 @@ http_request.jsonl
 
 A request identifier is available through the `X-Request-Id` response header and associated diagnostic records. The handler limits exception traces and sanitizes sensitive context so ordinary error messages do not expose full secret-bearing request data.
 
+An exception record carries the class, code, message and throw site, the bounded trace, and up to five previous exceptions, direct cause first, each with class, code, message, file and line. The exception code is only logged; the response status comes from `error_handler.status_defaults.exception`.
+
 There are two independent masks:
 
 | Key | Baseline | Meaning |

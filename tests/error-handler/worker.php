@@ -46,8 +46,13 @@ if (\PHP_SAPI !== 'cli') {
 	throw new \RuntimeException('CLI only.');
 }
 
-// Fail fast during setup. install() replaces this handler.
+// Fail fast during setup. install() replaces this handler; the parallel case keeps it. Like the
+// ErrorHandler, it leaves diagnostics silenced with @ to PHP: writeJsonl() relies on @ for its
+// expected filesystem failures, such as losing the race to create the log directory.
 \set_error_handler(static function (int $errno, string $errstr, string $errfile, int $errline): bool {
+	if ((\error_reporting() & $errno) === 0) {
+		return false;
+	}
 	throw new \ErrorException($errstr, 0, $errno, $errfile, $errline);
 });
 

@@ -53,6 +53,9 @@ final class ErrorHandler extends BaseService {
 	/** Bytes install() reserves and handleShutdown() releases first, so an out-of-memory fatal leaves room to log and render. */
 	private const RESERVED_MEMORY_BYTES = 65536;
 
+	/** Maximum number of previous exceptions an exception record lists. */
+	private const MAX_PREVIOUS = 5;
+
 	/** Frozen options: cfg.error_handler merged with ctor $options (last-wins). */
 	private array $opt = [];
 
@@ -356,14 +359,15 @@ final class ErrorHandler extends BaseService {
 	 * install() registers it as PHP's exception handler.
 	 *
 	 * Behavior:
-	 * - Writes one exception record to http_err_exception.jsonl: Class, message and a trace
-	 *   bounded by the trace limits.
-	 * - Renders status_defaults.exception. The exception message, and the record as details,
-	 *   reach the client only with developer detail.
+	 * - Writes one exception record to http_err_exception.jsonl: Class, code, message, throw
+	 *   site, a trace bounded by the trace limits, and the previous exceptions.
+	 * - Renders status_defaults.exception, whatever the exception's code. The exception message,
+	 *   and the record as details, reach the client only with developer detail.
 	 * - Returns without logging or rendering while another handler run is in progress.
 	 *
 	 * @param  \Throwable  $e  The uncaught exception.
 	 * @return void
+	 * @see \CitOmni\Http\Service\ErrorHandler::previousChain()  Which previous exceptions are logged, and how.
 	 */
 	public function handleException(\Throwable $e): void {
 		
@@ -380,9 +384,13 @@ final class ErrorHandler extends BaseService {
 
 			// Assemble a bounded, JSON-serializable record for logging.
 			$rec = $this->baseRecord('exception', $errorId, $status) + [
-				'class'   => $e::class,
-				'message' => $e->getMessage(),
-				'trace'   => $this->traceArray($e->getTrace(), $e->getFile(), $e->getLine()),
+				'class'    => $e::class,
+				'code'     => $e->getCode(),  // Logged as is, string codes included; never the status
+				'message'  => $e->getMessage(),
+				'file'     => $e->getFile(),
+				'line'     => $e->getLine(),
+				'trace'    => $this->traceArray($e->getTrace(), $e->getFile(), $e->getLine()),
+				'previous' => $this->previousChain($e),
 			];
 
 			// Fire-and-forget JSONL write: One line, rotated by size elsewhere.
@@ -1180,6 +1188,10 @@ HTML;
 	 * - Keeps the $max newest by the timestamp in their names and deletes the rest; a failed
 	 *   deletion is ignored.
 	 *
+	 * Notes:
+	 * - Reads the directory one entry at a time and holds only this log's rotations, so its
+	 *   memory does not grow with the other files in the directory.
+	 *
 	 * @param  string  $file  Live JSONL file.
 	 * @param  int     $max   Number of rotations to keep; 0 or less deletes nothing.
 	 * @return void
@@ -1197,14 +1209,23 @@ HTML;
 		$base = ($dot === false) ? $name : \substr($name, 0, $dot);
 		$ext  = ($dot === false) ? '' : \substr($name, $dot);
 
-		// A directory listing instead of glob(): The directory path may contain glob syntax.
-		$entries = @\scandir($dir, \SCANDIR_SORT_NONE);
-		if ($entries === false) {
+		$pattern = '~\A' . \preg_quote($base, '~') . '\.\d{8}T\d{6}(?:\.\d{6})?Z(?:-[0-9a-f]{4})?' . \preg_quote($ext, '~') . '\z~';
+
+		// Entry by entry: A full listing costs memory for every file in the directory, and
+		// handleShutdown() may be running on the memory reserve. Not glob(): The directory
+		// path may contain glob syntax.
+		$dh = @\opendir($dir);
+		if ($dh === false) {
 			return;
 		}
+		$rotations = [];
+		while (($entry = \readdir($dh)) !== false) {
+			if (\preg_match($pattern, $entry) === 1) {
+				$rotations[] = $entry;
+			}
+		}
+		\closedir($dh);
 
-		$pattern   = '~\A' . \preg_quote($base, '~') . '\.\d{8}T\d{6}(?:\.\d{6})?Z(?:-[0-9a-f]{4})?' . \preg_quote($ext, '~') . '\z~';
-		$rotations = \preg_grep($pattern, $entries);
 		if (\count($rotations) <= $max) {
 			return;
 		}
@@ -1281,6 +1302,32 @@ HTML;
 				'request_id' => $this->requestId,  // Set in install(); used for cross-system correlation
 			],
 		];
+	}
+
+
+	/**
+	 * Summarize the previous-exception chain for an exception record.
+	 *
+	 * Behavior:
+	 * - Follows getPrevious() from the exception's direct cause toward the root cause, and stops
+	 *   after MAX_PREVIOUS entries.
+	 * - Each entry has the class, code, message, file and line; no trace.
+	 *
+	 * @param  \Throwable  $e  The uncaught exception.
+	 * @return list<array{class: string, code: mixed, message: string, file: string, line: int}>  Empty when it has no previous exception.
+	 */
+	private function previousChain(\Throwable $e): array {
+		$chain = [];
+		for ($prev = $e->getPrevious(); $prev !== null && \count($chain) < self::MAX_PREVIOUS; $prev = $prev->getPrevious()) {
+			$chain[] = [
+				'class'   => $prev::class,
+				'code'    => $prev->getCode(),
+				'message' => $prev->getMessage(),
+				'file'    => $prev->getFile(),
+				'line'    => $prev->getLine(),
+			];
+		}
+		return $chain;
 	}
 
 
