@@ -521,19 +521,23 @@ final class Registry {
 			// Scoped per-request view vars
 			// -------------------------------------------------
 			//
-			// 'vars' is a list of declarative rules that say:
+			// 'vars' is a map of declarative rules, keyed by variable name, that say:
 			//   "Inject this variable into the template scope
 			//    IF AND ONLY IF the current request path matches."
 			//
 			// Each entry describes:
-			//   - the variable name (becomes $<name> in templates),
+			//   - the variable name: the entry's key (becomes $<name> in templates),
 			//   - how/where to get its value,
 			//   - which request paths it applies to.
 			//
+			// Because the map is keyed by name, providers and the app each add their own
+			// entries, and a later layer replaces an entry by using the same name (cfg
+			// merge, last wins). There is no 'var' field. Entries in a list would get
+			// numeric keys, which never become template variables, and a list replaces
+			// the whole map before it on merge.
+			//
 			// Shape per entry:
-			// [
-			//     'var'     => 'header',        // required
-			//                                   // becomes $header in the template scope
+			// 'header' => [                     // the key becomes $header in the template scope
 			//
 			//     'type'    => 'dynamic',       // required, either "dynamic" or "static"
 			//
@@ -544,7 +548,7 @@ final class Registry {
 			//     'exclude' => ['~^/admin/~'],  // optional
 			//                                   // list of forbidden path patterns
 			//
-			//     'source'  => [
+			//     'source'  => [                // required
 			//         // For type "dynamic":
 			//         //   - how to compute the value at request time.
 			//         //
@@ -612,9 +616,8 @@ final class Registry {
 			//   and those vars only exist on pages where they are relevant.
 			//
 			// Example usage:
-			// [
-			//     // Dynamic header model for most public pages
-			//     'var'     => 'header',
+			// // Dynamic header model for most public pages
+			// 'header' => [
 			//     'type'    => 'dynamic',
 			//     'include' => ['*'],
 			//     'exclude' => ['~^/admin/~'],
@@ -624,9 +627,8 @@ final class Registry {
 			//     ],
 			// ],
 			//
-			// [
-			//     // Static admin sidebar, only on /admin/*
-			//     'var'     => 'admin_nav',
+			// // Static admin sidebar, only on /admin/*
+			// 'admin_nav' => [
 			//     'type'    => 'static',
 			//     'include' => ['~^/admin/~'],
 			//     'exclude' => [],
@@ -648,7 +650,7 @@ final class Registry {
 			// ],
 			//
 			'vars' => [
-				// (your rules go here)
+				// (your entries go here, keyed by variable name)
 			],
 
 		],
