@@ -31,27 +31,32 @@ $requestId	= (string)($data['request_id'] ?? '');
 $details	= $data['details'] ?? null; // array|null
 $is4xx		= ($status >= 400 && $status < 500);
 $is5xx		= ($status >= 500);
+$isDev		= \defined('CITOMNI_ENVIRONMENT') && \CITOMNI_ENVIRONMENT === 'dev';
 $badgeClass	= $is5xx ? 'badge--danger' : ($is4xx ? 'badge--warning' : 'badge--neutral');
 
 
-// $txt = (require __DIR__ . "/../../language/{$data['language']}/errors.php")[$status] ?? null;
-$txt = (require __DIR__ . "/../../language/{$data['language']}/errors.php") ?? null;
+// Texts in the configured language; English when this package has no errors.php for it.
+$languageFile = __DIR__ . '/../../language/' . (string)($data['language'] ?? '') . '/errors.php';
+if (!\is_file($languageFile)) {
+	$languageFile = __DIR__ . '/../../language/en/errors.php';
+}
+$txt = require $languageFile;
 
 
-$meta_title		= (string) $txt[$status]['meta_title'] ?? 'Error';
-$badge_variant	= (string) $txt[$status]['badge_variant'] ?? 'badge--danger';
-$title			= (string) $txt[$status]['title'] ?? 'Oops, something went wrong';
-$subtitle		= (string) $txt[$status]['subtitle'] ?? 'We encountered an unexpected error.';
-$lead_text		= (string) $txt[$status]['lead_text'] ?? 'Please try again later.';
-$help_text		= (string) $txt[$status]['help_text'] ?? 'If the problem persists, please contact our support team and provide the error ID above. This will help us quickly find and fix the issue for the benefit of all users.';
+$meta_title		= (string)($txt[$status]['meta_title'] ?? 'Error');
+$badge_variant	= (string)($txt[$status]['badge_variant'] ?? 'badge--danger');
+$title			= (string)($txt[$status]['title'] ?? 'Oops, something went wrong');
+$subtitle		= (string)($txt[$status]['subtitle'] ?? 'We encountered an unexpected error.');
+$lead_text		= (string)($txt[$status]['lead_text'] ?? 'Please try again later.');
+$help_text		= (string)($txt[$status]['help_text'] ?? 'If the problem persists, please contact our support team and provide the error ID above. This will help us quickly find and fix the issue for the benefit of all users.');
 
-$timestamp_txt			= (string) $txt['page_txt']['timestamp'] ?? 'Timestamp';
-$error_id_txt			= (string) $txt['page_txt']['error_id'] ?? 'Error ID';
-$message_txt			= (string) $txt['page_txt']['message'] ?? 'Message';
-$primary_label_txt		= (string) $txt['page_txt']['primary_label'] ?? 'Home';
-$secondary_label_txt	= (string) $txt['page_txt']['secondary_label'] ?? 'Go Back';
-$tertiary_label_txt		= (string) $txt['page_txt']['tertiary_label'] ?? 'Contact CitOmni support';
-$quaternary_label_txt	= (string) $txt['page_txt']['quaternary_label'] ?? 'Report issue';
+$timestamp_txt			= (string)($txt['page_txt']['timestamp'] ?? 'Timestamp');
+$error_id_txt			= (string)($txt['page_txt']['error_id'] ?? 'Error ID');
+$message_txt			= (string)($txt['page_txt']['message'] ?? 'Message');
+$primary_label_txt		= (string)($txt['page_txt']['primary_label'] ?? 'Home');
+$secondary_label_txt	= (string)($txt['page_txt']['secondary_label'] ?? 'Go Back');
+$tertiary_label_txt		= (string)($txt['page_txt']['tertiary_label'] ?? 'Contact CitOmni support');
+$quaternary_label_txt	= (string)($txt['page_txt']['quaternary_label'] ?? 'Report issue');
 
 // var_dump($is5xx);
 // var_dump($txt);
@@ -472,7 +477,7 @@ $quaternary_label_txt	= (string) $txt['page_txt']['quaternary_label'] ?? 'Report
 					return $proto . '://' . $host;
 				})();
 
-			$requestUri  = $_SERVER['REQUEST_URI'] ?? '/';
+			$requestUri  = \explode('?', (string)($_SERVER['REQUEST_URI'] ?? '/'), 2)[0];  // Path only: A query string can carry tokens.
 			$absUrl      = $origin . $requestUri;
 			$host        = $_SERVER['HTTP_HOST'] ?? 'localhost';
 			$isLocalHost = \in_array($host, ['localhost', '127.0.0.1', '::1'], true);
@@ -569,7 +574,7 @@ $quaternary_label_txt	= (string) $txt['page_txt']['quaternary_label'] ?? 'Report
 
 
 			// -------- Email (greeting + prompt, short trace, hard cap) --------
-			const MAILTO_MAX_TOTAL = 1750; // conservative total-size guard for the whole mailto URI
+			$mailtoMaxTotal = 1750; // conservative total-size guard for the whole mailto URI
 
 			$greeting = "Hi CitOmni Support\r\n\r\n<DESCRIBE YOUR ISSUE HERE>\r\n\r\n\r\nDetails:\r\n";
 
@@ -600,7 +605,7 @@ $quaternary_label_txt	= (string) $txt['page_txt']['quaternary_label'] ?? 'Report
 			$mailtoBase = 'mailto:support@citomni.com?subject=' . \rawurlencode($subject) . '&body=';
 			$mailto     = $mailtoBase . \rawurlencode($bodyEmail);
 
-			if (\strlen($mailto) > MAILTO_MAX_TOTAL) {
+			if (\strlen($mailto) > $mailtoMaxTotal) {
 				// If still too long (e.g., very long URL/UA), drop the trace entirely and re-encode.
 				$bodyEmailShort = $greeting . $detailsEmail . "\r\nTrace: [omitted due to email client limits]\r\n";
 				$mailto = $mailtoBase . \rawurlencode($bodyEmailShort);
@@ -608,9 +613,10 @@ $quaternary_label_txt	= (string) $txt['page_txt']['quaternary_label'] ?? 'Report
 			?>
 
 			<nav class="actions" aria-label="Actions">
-				<a class="btn btn--primary" href="<?= \defined('CITOMNI_PUBLIC_ROOT_URL') ? \CITOMNI_PUBLIC_ROOT_URL : '/' ?>"><?= $e($primary_label_txt) ?></a>
+				<a class="btn btn--primary" href="<?= $e(\defined('CITOMNI_PUBLIC_ROOT_URL') ? \CITOMNI_PUBLIC_ROOT_URL : '/') ?>"><?= $e($primary_label_txt) ?></a>
 				<a class="btn btn--muted" href="javascript:history.back()"><?= $e($secondary_label_txt) ?></a>
-				<?php if ($is5xx): ?>
+				<?php // The support links reach CitOmni with this request's details: For an app's own developers only. ?>
+				<?php if ($is5xx && $isDev): ?>
 				<a class="btn" href="<?= $e($mailto) ?>"><?= $e($tertiary_label_txt) ?></a>				
 				<a class="btn" href="<?= $e($issueUrl) ?>" target="_blank" rel="noopener noreferrer"><?= $e($quaternary_label_txt) ?></a>
 				<?php endif; ?>

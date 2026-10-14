@@ -156,7 +156,7 @@ return [
 	 * ERROR HANDLER
 	 *------------------------------------------------------------------
 	 * Overview:
-	 * - The HTTP ErrorHandler always logs and always renders for:
+	 * - The HTTP ErrorHandler logs and renders, best effort and whatever the masks say, for:
 	 *   1) Uncaught exceptions,
 	 *   2) Shutdown fatals (E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR, E_USER_ERROR),
 	 *   3) Router HTTP errors (404/405/5xx via httpError(...)).
@@ -186,6 +186,8 @@ return [
 	 * - error_handler.log.trigger controls non-fatal PHP-error logging after the active
 	 *   error_reporting() mask. Exceptions, shutdown fatals and Router HTTP errors are
 	 *   logged independently of this mask.
+	 * - error_handler.log.trace_args (bool): Logged exception traces show argument values
+	 *   only when true; otherwise each argument's type. Arguments can carry passwords.
 	 * - error_handler.log.path (absolute dir) must be writable.
 	 * - Rotation is size-guarded. Before a write would exceed max_bytes, the live JSONL
 	 *   is rotated. A single record larger than max_bytes is written whole when the live
@@ -274,7 +276,10 @@ return [
 			///
 			'trigger'    => E_ALL,
 
-			
+			// Log argument values in exception traces? false logs each argument's type only.
+			'trace_args' => false,
+
+
 			// Log directory (absolute). Files are JSONL with size-guarded rotation.
 			// - Rotation strategy: sidecar lock + copy+truncate, timestamped rotated files.
 			// - Retention: keeps at most 'max_files' rotated siblings per base; live file persists.

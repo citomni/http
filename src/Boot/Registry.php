@@ -163,13 +163,14 @@ final class Registry {
 		 * ERROR HANDLER (HTTP)
 		 *------------------------------------------------------------------
 		 *
-		 * Guarantees:
-		 *   - Always logs (JSONL with size-based rotation).
-		 *   - Always renders for:
+		 * Not configurable:
+		 *   - These are logged (JSONL with size-based rotation) and rendered whatever render.trigger
+		 *     and log.trigger say:
 		 *       * Uncaught exceptions,
 		 *       * Shutdown fatals (E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR, E_USER_ERROR),
 		 *       * Terminal request/router HTTP errors (413/404/405/5xx via httpError(...)).
-		 *     These are NOT configurable (to prevent "blank pages").
+		 *   - Both are best effort: A full disk or a process killed from outside can still lose
+		 *     the record or the response.
 		 *
 		 * Rendering of non-fatal PHP errors (warnings/notices/etc.) is optional and generally
 		 * only desirable in DEV. Therefore the baseline keeps it OFF; enable in your dev overlay.
@@ -213,7 +214,8 @@ final class Registry {
 					/*
 					 * Trace formatting limits. These caps ALWAYS bound the trace written to the
 					 * exception log (http_err_exception.jsonl), in every environment - they are the
-					 * only control over logged trace depth/size. detail.level + 'dev' additionally
+					 * only control over logged trace depth/size. The value caps apply only when
+					 * log.trace_args lets argument values in. detail.level + 'dev' additionally
 					 * gate whether the same bounded exception trace is exposed to the client; they
 					 * do not widen the caps.
 					 */
@@ -243,10 +245,20 @@ final class Registry {
 				 * - Exceptions, shutdown fatals and terminal HTTP errors are logged independently
 				 *   of this mask.
 				 * - Router errors use separate files:
-				 *   http_router_404.jsonl, http_router_405.jsonl, http_router_5xx.jsonl
+				 *   http_router_404.jsonl, http_router_405.jsonl, http_router_5xx.jsonl,
+				 *   http_router_other.jsonl
 				 * - HTTP errors with context source 'request' use http_request.jsonl.
 				 */
 				'trigger'   => E_ALL,
+
+				/*
+				 * Whether logged exception traces include argument values (bool).
+				 * - false (baseline): Each argument is logged as its type, such as string(15) or
+				 *   array(3), never its value. Arguments can carry passwords and tokens, and PHP
+				 *   keeps them in traces unless zend.exception_ignore_args is on.
+				 * - true: Values are logged within the render.detail.trace caps. Suits dev only.
+				 */
+				'trace_args' => false,
 
 				/*
 				 * Log directory (absolute). Files are JSONL with size-guarded rotation.
@@ -264,7 +276,7 @@ final class Registry {
 				'max_bytes' => 2_000_000, // ~2 MB
 
 				/*
-				 * Maximum number of rotated files to keep per base (live file excluded).
+				 * Maximum number of rotated files to keep per base (live file excluded); 0 keeps all.
 				 * Example: Keep the last 10 http_err_exception.<timestamp>.jsonl rotations.
 				 */
 				'max_files' => 10,

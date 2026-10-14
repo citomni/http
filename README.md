@@ -1588,7 +1588,9 @@ Uncaught exceptions, shutdown fatals, and explicit terminal HTTP errors still ge
 
 `error_handler.render.detail.level` defaults to `0`. Level `1` exposes developer detail **only in `dev`**; production is still restricted. The trace limits under `error_handler.render.detail.trace` bound logged and rendered trace size.
 
-The normal error templates are **plain PHP templates** receiving a `$data` array (including status, error ID, request ID, and optional details). They are not `TemplateEngine` layer references. If the configured template cannot be loaded, the handler attempts the failsafe template and then a minimal inline page.
+`error_handler.log.trace_args` defaults to `false`: a logged exception trace shows each argument's type, such as `string(15)`, never its value, because arguments can carry passwords and tokens. The dev scaffold sets it to `true`. A parameter marked `#[\SensitiveParameter]` shows no value either way.
+
+The normal error templates are **plain PHP templates** receiving a `$data` array (including status, error ID, request ID, and optional details). They are not `TemplateEngine` layer references. If the configured template cannot be loaded, the handler attempts the failsafe template and then a minimal inline page. After an out-of-memory fatal, the handler renders the inline page directly.
 
 Example safe production defaults:
 
@@ -1601,6 +1603,7 @@ return [
 		],
 		'log' => [
 			'trigger' => E_ALL,
+			'trace_args' => false,
 			'path' => CITOMNI_APP_PATH . '/var/logs',
 			'max_bytes' => 2_000_000,
 			'max_files' => 10,

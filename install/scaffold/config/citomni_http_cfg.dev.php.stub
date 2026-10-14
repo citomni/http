@@ -81,7 +81,9 @@ return [
 	 * ------------------------------------------------------------------
 	 * Render selected non-fatal PHP errors and expose developer details.
 	 * Force E_ALL so the active runtime mask cannot suppress diagnostics
-	 * selected below. Trace bounds, log paths and rotation inherit baseline.
+	 * selected below, and log trace argument values for debugging (they can
+	 * include passwords typed in dev). Trace bounds, log paths and rotation
+	 * inherit baseline.
 	 */
 	'error_handler' => [
 		'render' => [
@@ -94,7 +96,8 @@ return [
 			'force_error_reporting' => E_ALL,
 		],
 		'log' => [
-			'trigger' => E_ALL,
+			'trigger'    => E_ALL,
+			'trace_args' => true,
 		],
 	],
 

@@ -22,16 +22,21 @@ use CitOmni\Kernel\Service\BaseService;
  *
  * Gives a failed HTTP request a defined end instead of a blank page: A JSONL record with a
  * fresh error id, and an HTML or JSON response that carries the same id. It is the error
- * path, so it must keep working when cfg, templates or the service graph are the cause of
- * the failure. Which errors render, how much detail a client sees and where the logs go are
- * cfg decisions. CLI error handling is left to the CLI package.
+ * path, so it must keep working when cfg, templates, memory or the service graph are the
+ * cause of the failure. Which errors render, how much detail a client sees and where the logs
+ * go are cfg decisions. CLI error handling is left to the CLI package.
  *
  * Rules:
  * - Never let an exception escape a handler path; report internal failures to PHP's error_log.
+ *   Only a value in httpError() context that cannot be cast to string or JSON-encoded may
+ *   still throw; that failure is the caller's.
  * - Read cfg error_handler only in init(); later code uses the hydrated fields.
  * - Resolve no other services.
- * - Show traces, log records and caller context to a client only when developer detail is on.
+ * - Show exception and PHP error messages, traces, log records and the httpError() context to
+ *   a client only when developer detail is on; the context keys title and message are client
+ *   text.
  * - Pass caller-supplied context through scrubContext() before it is logged.
+ * - Log the value of a trace argument only when log.trace_args is on.
  * - Mark the handler run as in progress before rendering, so a nested event never renders a
  *   second response.
  *
@@ -41,6 +46,12 @@ final class ErrorHandler extends BaseService {
 	
 	/** JSON encoding flags: Readable slashes and Unicode; invalid input degrades instead of failing the encode. */
 	private const JSON_FLAGS = \JSON_UNESCAPED_SLASHES | \JSON_UNESCAPED_UNICODE | \JSON_PARTIAL_OUTPUT_ON_ERROR | \JSON_INVALID_UTF8_SUBSTITUTE;
+
+	/** Headers an abandoned response may have queued that would corrupt the error response sent in its place, such as a stale Content-Length. */
+	private const REPRESENTATION_HEADERS = ['Content-Length', 'Content-Encoding', 'Content-Disposition', 'Content-Range', 'Content-Location', 'Location', 'ETag', 'Last-Modified', 'Refresh'];
+
+	/** Bytes install() reserves and handleShutdown() releases first, so an out-of-memory fatal leaves room to log and render. */
+	private const RESERVED_MEMORY_BYTES = 65536;
 
 	/** Frozen options: cfg.error_handler merged with ctor $options (last-wins). */
 	private array $opt = [];
@@ -76,11 +87,17 @@ final class ErrorHandler extends BaseService {
 	/** True while a handler run is in progress; a run that ends in exit() leaves it true. */
 	private static bool $inHandler = false;
 
+	/** Memory held from install() until handleShutdown() releases it; null when none is held. */
+	private static ?string $reservedMemory = null;
+
 	/** Correlation id sent as X-Request-Id and logged with every record; empty until install(). */
 	private string $requestId = '';
 
 	/** Whether clients get developer details; true only in the dev environment. */
 	private bool $devDetail = false;
+
+	/** Whether logged traces carry argument values; otherwise each argument is logged as its type. */
+	private bool $traceArgs = false;
 
 	/** Maximum number of frames in a formatted trace. */
 	private int $traceMaxFrames = 120;
@@ -177,6 +194,7 @@ final class ErrorHandler extends BaseService {
 		$this->logDir   = \rtrim($dir, '/\\');
 		$this->maxBytes = (int)($this->opt['log']['max_bytes'] ?? 2_000_000);
 		$this->maxFiles = (int)($this->opt['log']['max_files'] ?? 10);
+		$this->traceArgs = (bool)($this->opt['log']['trace_args'] ?? false);
 
 		// Templates: Primary and failsafe files (empty strings mean "no template")
 		$this->templates['html']          = (string)($this->opt['templates']['html']          ?? '');
@@ -213,6 +231,7 @@ final class ErrorHandler extends BaseService {
 	 * - Sets display_errors to 0, and error_reporting() to render.force_error_reporting when that is an int.
 	 * - Adopts the sanitized inbound X-Request-Id, or mints one, and sends it as X-Request-Id
 	 *   unless headers were already sent.
+	 * - Reserves RESERVED_MEMORY_BYTES of memory for handleShutdown().
 	 * - A call after a completed install() does nothing.
 	 *
 	 * @return void
@@ -243,6 +262,9 @@ final class ErrorHandler extends BaseService {
 		\set_exception_handler([$this, 'handleException']);
 		\set_error_handler([$this, 'handlePhpError']);
 		\register_shutdown_function([$this, 'handleShutdown']);
+
+		// After an out-of-memory fatal, the heap is full until handleShutdown() frees this.
+		self::$reservedMemory ??= \str_repeat("\0", self::RESERVED_MEMORY_BYTES);
 
 		// Flip the idempotency guard last: If anything above failed, we can try again
 		$this->installed = true;
@@ -283,7 +305,7 @@ final class ErrorHandler extends BaseService {
 	 * @param  array<string,mixed>  $context  Log context. Keys title and message shape the response;
 	 *                                        source 'request' selects http_request.jsonl.
 	 * @return never
-	 * @see \CitOmni\Http\Service\ErrorHandler::renderResponse()  Negotiation, headers and partial output.
+	 * @see \CitOmni\Http\Service\ErrorHandler::emitResponse()  Negotiation, headers and partial output.
 	 */
 	public function httpError(int $status, array $context = []): never {
 		
@@ -397,8 +419,8 @@ final class ErrorHandler extends BaseService {
 	 *     - writing one php_error record to http_err_phperror.jsonl when log.trigger includes
 	 *       the level,
 	 *     - rendering status_defaults.php_error and ending the request when render.trigger
-	 *       includes the level and no other handler run is in progress. The PHP error message
-	 *       is shown to the client; the record only with developer detail.
+	 *       includes the level and no other handler run is in progress. The PHP error message,
+	 *       and the record as details, reach the client only with developer detail.
 	 *
 	 * @param  int     $errno    PHP error level.
 	 * @param  string  $errstr   Error message.
@@ -453,7 +475,7 @@ final class ErrorHandler extends BaseService {
 				}
 				$this->renderResponse((int)($this->statusDefaults['php_error'] ?? 500), $errorId, [
 					'title'   => 'PHP Error',
-					'message' => $errstr,
+					'message' => $this->devDetail ? $errstr : 'An unexpected error occurred.',
 					'details' => $this->devDetail ? $rec : null,
 					'type'    => 'php_error',
 				]);
@@ -473,18 +495,25 @@ final class ErrorHandler extends BaseService {
 	 * install() registers it as a shutdown function.
 	 *
 	 * Behavior:
-	 * - Does nothing unless error_get_last() reports a fatal-class error: E_ERROR, E_PARSE,
+	 * - Releases the memory install() reserved before anything else.
+	 * - Does nothing more unless error_get_last() reports a fatal-class error: E_ERROR, E_PARSE,
 	 *   E_CORE_ERROR, E_COMPILE_ERROR or E_USER_ERROR.
 	 * - Otherwise writes one shutdown record to http_err_shutdown.jsonl and renders
 	 *   status_defaults.shutdown. The PHP error message, and the record as details, reach the
 	 *   client only with developer detail.
-	 * - Renders even while another handler run is in progress.
+	 * - Renders the built-in HTML page without trying the templates after an out-of-memory
+	 *   fatal, and after a fatal that ended another handler run.
+	 * - Renders even while another handler run is in progress, then returns: Shutdown functions
+	 *   registered after this one still run, and their output follows the response.
 	 *
 	 * @return void
-	 * @see \CitOmni\Http\Service\ErrorHandler::renderResponse()  What a render does once output was sent.
+	 * @see \CitOmni\Http\Service\ErrorHandler::emitResponse()  What a render does once output was sent.
 	 */
 	public function handleShutdown(): void {
-		
+
+		// First, before anything allocates: After an out-of-memory fatal, this is the room to work in.
+		self::$reservedMemory = null;
+
 		// Ask PHP what the last error was; might be null if nothing noteworthy happened.
 		$e = \error_get_last();
 		if ($e === null) {
@@ -497,6 +526,14 @@ final class ErrorHandler extends BaseService {
 			return; // Not our party.
 		}
 
+		$message = (string)($e['message'] ?? '');
+
+		// A template may need more memory than the reserve, and one that has just failed
+		// inside another handler run may fail the same way again.
+		$builtInOnly = self::$inHandler
+			|| \str_starts_with($message, 'Allowed memory size of')
+			|| \str_starts_with($message, 'Out of memory');
+
 		// Pick the status code for shutdown fatals and mint a correlation-friendly id.
 		$status  = (int)($this->statusDefaults['shutdown'] ?? 500);
 		$errorId = $this->newErrorId();
@@ -504,7 +541,7 @@ final class ErrorHandler extends BaseService {
 		// Build the log record with bounded, serializable fields.
 		$rec = $this->baseRecord('shutdown', $errorId, $status) + [
 			'errno'   => $errno,
-			'message' => (string)($e['message'] ?? ''),
+			'message' => $message,
 			'file'    => (string)($e['file'] ?? ''),
 			'line'    => (int)($e['line'] ?? 0),
 		];
@@ -516,13 +553,14 @@ final class ErrorHandler extends BaseService {
 		// re-enter handlePhpError() and produce a nested/duplicate response.
 		self::$inHandler = true;
 
-		// Own the last word on the wire: Render a clean error page or a minimal tail.
-		$this->renderResponse($status, $errorId, [
+		// Own the last word on the wire, without exit(): exit() in a shutdown function cancels
+		// every shutdown function registered after it.
+		$this->emitResponse($status, $errorId, [
 			'title'   => 'Fatal Error',
-			'message' => $this->devDetail ? (string)($e['message'] ?? '') : 'A fatal error occurred.',
+			'message' => $this->devDetail ? $message : 'A fatal error occurred.',
 			'details' => $this->devDetail ? $rec : null,
 			'type'    => 'shutdown',
-		]);
+		], $builtInOnly);
 	}
 
 
@@ -532,28 +570,49 @@ final class ErrorHandler extends BaseService {
 	// ----------------------------------------------------------------
 
 	/**
-	 * Send the error response and end the request.
-	 *
-	 * Behavior:
-	 * - While headers are not sent: Discards buffered output where PHP allows it, then sends the
-	 *   status, no-store and nosniff headers, X-Request-Id and a body:
-	 *     - JSON with error_id, type, status, title and message when the client prefers JSON;
-	 *       details only with developer detail,
-	 *     - otherwise the HTML page from renderHtml().
-	 * - Once headers are sent: Leaves status and headers alone, and appends an HTML comment with
-	 *   the error id when the client accepts HTML.
-	 * - Ends the request with exit(0).
-	 *
-	 * Notes:
-	 * - A HEAD request gets a body too.
+	 * Send the error response and end the request with exit(0).
 	 *
 	 * @param  int                  $status   HTTP status, sent only while headers are not sent.
 	 * @param  string               $errorId  Error id shown to the client.
 	 * @param  array<string,mixed>  $payload  Optional keys title, message, details and type.
 	 * @return never
+	 * @see \CitOmni\Http\Service\ErrorHandler::emitResponse()  What is sent.
 	 */
 	private function renderResponse(int $status, string $errorId, array $payload): never {
-		
+
+		$this->emitResponse($status, $errorId, $payload, false);
+
+		// End of the line: Deterministic termination avoids "zombie" work after an error. No "walkers" here ;)
+		exit(0);
+	}
+
+
+	/**
+	 * Send the error response without ending the request.
+	 *
+	 * Behavior:
+	 * - While headers are not sent: Discards buffered output where PHP allows it, removes the
+	 *   REPRESENTATION_HEADERS an earlier response queued, then sends the status, no-store and
+	 *   nosniff headers, X-Request-Id and a body:
+	 *     - JSON with error_id, type, status, title and message when the client prefers JSON;
+	 *       details only with developer detail,
+	 *     - otherwise the HTML page from renderHtml().
+	 * - Once headers are sent: Leaves status and headers alone, and appends an HTML comment with
+	 *   the error id when the response under way is HTML.
+	 *
+	 * Notes:
+	 * - A HEAD request gets a body too.
+	 * - Other headers an earlier response queued, such as Set-Cookie or Content-Security-Policy,
+	 *   go out with the error response.
+	 *
+	 * @param  int                  $status       HTTP status, sent only while headers are not sent.
+	 * @param  string               $errorId      Error id shown to the client.
+	 * @param  array<string,mixed>  $payload      Optional keys title, message, details and type.
+	 * @param  bool                 $builtInOnly  Render the built-in HTML page without trying the templates.
+	 * @return void
+	 */
+	private function emitResponse(int $status, string $errorId, array $payload, bool $builtInOnly): void {
+
 		// Decide negotiation and whether we can still replace the response
 		$wantsJson  = $this->wantsJson();
 		$canReplace = !\headers_sent();
@@ -561,6 +620,12 @@ final class ErrorHandler extends BaseService {
 		if ($canReplace) {
 			// Clean slate: Drop any partial output so we present one coherent response
 			$this->clearAllBuffers();
+
+			// The abandoned response's own headers would corrupt this one: A stale
+			// Content-Length cuts it short, Content-Disposition turns it into a download.
+			foreach (self::REPRESENTATION_HEADERS as $name) {
+				\header_remove($name);
+			}
 
 			// Status line: Force the status ourselves, overriding any raw "HTTP/..." line
 			// a prior layer (Response/Router) may have queued. We intentionally avoid
@@ -606,19 +671,17 @@ final class ErrorHandler extends BaseService {
 						'message' => (string)($payload['message'] ?? 'An error occurred.'),
 						'details' => $this->devDetail ? ($payload['details'] ?? null) : null,
 						'type'    => (string)($payload['type'] ?? 'error'),
-					]
+					],
+					$builtInOnly
 				);
 			}
 		} else {
 			// Late stage: Headers/body already sent. Do not touch headers or status (we can't replace the response at this point)
-			// Append a tiny HTML tail only when the client likely expects HTML. Avoid corrupting JSON streams
-			if ($this->wantsHtmlTail()) {
+			// Append a tiny HTML tail only to an HTML body. Avoid corrupting JSON, CSV or file streams
+			if ($this->sendsHtml()) {
 				echo "\n<!-- error_id={$errorId} -->";
 			}
 		}
-
-		// End of the line: Deterministic termination avoids "zombie" work after an error. No "walkers" here ;)
-		exit(0);
 	}
 
 
@@ -644,13 +707,20 @@ final class ErrorHandler extends BaseService {
 
 
 	/**
-	 * Tell whether an HTML comment may be appended to a response that is already under way.
+	 * Tell whether the response already under way is HTML.
 	 *
-	 * @return bool  True when the Accept header is empty or contains text/html.
+	 * @return bool  True when its Content-Type is text/html, or when it has none and PHP's
+	 *               default_mimetype is text/html.
 	 */
-	private function wantsHtmlTail(): bool {
-		$ct = (string)($_SERVER['HTTP_ACCEPT'] ?? '');
-		return ($ct === '' || \stripos($ct, 'text/html') !== false); // Neutral HTML comment only when safe
+	private function sendsHtml(): bool {
+		foreach (\headers_list() as $header) {
+			if (\strncasecmp($header, 'Content-Type:', 13) === 0) {
+				return \stripos($header, 'text/html', 13) !== false;
+			}
+		}
+
+		// Without a Content-Type header, PHP sent its default_mimetype.
+		return \stripos((string)\ini_get('default_mimetype'), 'text/html') !== false;
 	}
 
 
@@ -661,6 +731,8 @@ final class ErrorHandler extends BaseService {
 	 * - Removes output buffers from the top down, discarding their content.
 	 * - Stops at the first buffer that cannot be removed, after emptying it when it can be cleaned;
 	 *   that buffer and the ones below it stay.
+	 * - An exception thrown by a buffer's output handler goes to PHP's error_log; the clearing
+	 *   carries on.
 	 *
 	 * @return void
 	 */
@@ -671,10 +743,22 @@ final class ErrorHandler extends BaseService {
 		// cleanable, then stop - we can neither remove it nor reach the buffers beneath it.
 		// Stopping also avoids an infinite loop in the one place that must never hang.
 		while (($level = \ob_get_level()) > 0) {
-			if (@\ob_end_clean() && \ob_get_level() < $level) {
+			try {
+				$removed = @\ob_end_clean();
+			} catch (\Throwable $t) {
+				// The output handler threw while PHP discarded its buffer; the level check below
+				// tells whether the buffer is gone.
+				@\error_log('[CitOmni] output handler threw while its buffer was discarded: ' . $t->getMessage());
+				$removed = true;
+			}
+			if ($removed && \ob_get_level() < $level) {
 				continue; // Removed a buffer and made progress.
 			}
-			@\ob_clean(); // Non-removable: discard content if cleanable (no-op otherwise).
+			try {
+				@\ob_clean(); // Non-removable: discard content if cleanable (no-op otherwise).
+			} catch (\Throwable $t) {
+				@\error_log('[CitOmni] output handler threw while its buffer was cleaned: ' . $t->getMessage());
+			}
 			break;        // Cannot pop past a buffer we cannot remove.
 		}
 	}
@@ -685,7 +769,7 @@ final class ErrorHandler extends BaseService {
 	 *
 	 * Behavior:
 	 * - Tries the primary template, then the failsafe template; a missing file, or a template
-	 *   that throws, is skipped.
+	 *   that throws, is skipped. With $builtInOnly, neither is tried and the locale is not read.
 	 * - A template gets $data with keys language, status, status_text, error_id, title, message,
 	 *   details, request_id and year; details is null without developer detail.
 	 * - The built-in page escapes title and message, and shows details as escaped JSON with
@@ -695,59 +779,65 @@ final class ErrorHandler extends BaseService {
 	 * Notes:
 	 * - The values in $data are not escaped; a template must escape what it prints.
 	 *
-	 * @param  int                  $status   HTTP status shown on the page.
-	 * @param  string               $errorId  Error id shown on the page.
-	 * @param  array<string,mixed>  $payload  Optional keys title, message, details and type.
+	 * @param  int                  $status       HTTP status shown on the page.
+	 * @param  string               $errorId      Error id shown on the page.
+	 * @param  array<string,mixed>  $payload      Optional keys title, message, details and type.
+	 * @param  bool                 $builtInOnly  Skip the templates and build the built-in page.
 	 * @return string  Complete HTML document.
 	 */
-	private function renderHtml(int $status, string $errorId, array $payload): string {
-		
-		// Locale is read defensively: On the terminal error path we must assume config
-		// or application state may itself be broken (often the very reason we are
-		// rendering an error), so a missing/defective locale must never be able to throw
-		// before the primary/failsafe/inline fallback chain runs. This targeted catch is
-		// the sanctioned ErrorHandler exception to the no-broad-catch rule.
-		try {
-			$language = (string)($this->app->cfg->locale->language ?? '');
-		} catch (\Throwable) {
-			$language = '';
-		}
+	private function renderHtml(int $status, string $errorId, array $payload, bool $builtInOnly): string {
 
-		// Template data. The values are raw; a template escapes what it prints.
-		$data = [
-			'language'   => $language,  // Exposed for templates that localize copy
-			'status'     => $status,
-			'status_text'=> $this->statusText($status),
-			'error_id'   => $errorId,
-			'title'      => (string)($payload['title'] ?? $this->statusText($status)),
-			'message'    => (string)($payload['message'] ?? 'An error occurred.'),
-			'details'    => $this->devDetail ? ($payload['details'] ?? null) : null,  // Only show details in dev
-			'request_id' => $this->requestId,
-			'year'       => \date('Y'),
-		];
+		$title   = (string)($payload['title'] ?? $this->statusText($status));
+		$message = (string)($payload['message'] ?? 'An error occurred.');
 
-		// Try the primary template first; if it throws or returns null, fall through
-		$primary = (string)($this->templates['html'] ?? '');
-		if ($primary !== '' && \is_file($primary)) {
-			$out = $this->includeTemplate($primary, $data);
-			if ($out !== null) {
-				return $out;
+		if (!$builtInOnly) {
+			// Locale is read defensively: On the terminal error path we must assume config
+			// or application state may itself be broken (often the very reason we are
+			// rendering an error), so a missing/defective locale must never be able to throw
+			// before the primary/failsafe/inline fallback chain runs. This targeted catch is
+			// the sanctioned ErrorHandler exception to the no-broad-catch rule.
+			try {
+				$language = (string)($this->app->cfg->locale->language ?? '');
+			} catch (\Throwable) {
+				$language = '';
 			}
-		}
 
-		// Second chance: Failsafe template (smaller surface area; still skinnable by apps)
-		$failsafe = (string)($this->templates['html_failsafe'] ?? '');
-		if ($failsafe !== '' && \is_file($failsafe)) {
-			$out = $this->includeTemplate($failsafe, $data);
-			if ($out !== null) {
-				return $out;
+			// Template data. The values are raw; a template escapes what it prints.
+			$data = [
+				'language'   => $language,  // Exposed for templates that localize copy
+				'status'     => $status,
+				'status_text'=> $this->statusText($status),
+				'error_id'   => $errorId,
+				'title'      => $title,
+				'message'    => $message,
+				'details'    => $this->devDetail ? ($payload['details'] ?? null) : null,  // Only show details in dev
+				'request_id' => $this->requestId,
+				'year'       => \date('Y'),
+			];
+
+			// Try the primary template first; if it throws or returns null, fall through
+			$primary = (string)($this->templates['html'] ?? '');
+			if ($primary !== '' && \is_file($primary)) {
+				$out = $this->includeTemplate($primary, $data);
+				if ($out !== null) {
+					return $out;
+				}
+			}
+
+			// Second chance: Failsafe template (smaller surface area; still skinnable by apps)
+			$failsafe = (string)($this->templates['html_failsafe'] ?? '');
+			if ($failsafe !== '' && \is_file($failsafe)) {
+				$out = $this->includeTemplate($failsafe, $data);
+				if ($out !== null) {
+					return $out;
+				}
 			}
 		}
 
 		// Last resort: Minimal inline HTML (no dependencies, no surprises)
 		// Title/message are HTML-escaped; details (if any) are JSON-encoded and escaped
-		$title   = \htmlspecialchars((string)$data['title'], \ENT_QUOTES | \ENT_SUBSTITUTE, 'UTF-8');
-		$message = \htmlspecialchars((string)$data['message'], \ENT_QUOTES | \ENT_SUBSTITUTE, 'UTF-8');
+		$title   = \htmlspecialchars($title, \ENT_QUOTES | \ENT_SUBSTITUTE, 'UTF-8');
+		$message = \htmlspecialchars($message, \ENT_QUOTES | \ENT_SUBSTITUTE, 'UTF-8');
 
 		$detail = '';
 		if ($this->devDetail && isset($payload['details'])) {
@@ -838,27 +928,29 @@ HTML;
 	 *   a failure.
 	 * - Appends the line under an exclusive lock. A record that cannot be encoded is written as
 	 *   {"encode_error":true}.
-	 * - When the directory cannot be created or the file cannot be opened, reports
-	 *   "[CitOmni] writeJsonl failed: <reason>" to PHP's error_log. Nothing is thrown, and a failed
-	 *   write is not detected.
+	 * - Cuts off a line the file took only in part, so the next record does not continue it.
+	 * - Reports a failure to PHP's error_log as "[CitOmni] writeJsonl failed: <reason>", naming
+	 *   the file and, where PHP gave one, the cause. Nothing is thrown.
 	 *
 	 * Notes:
 	 * - The file lock is released before rotate() runs, so a writer never waits for the rotation
 	 *   lock while it holds the file lock.
 	 * - log.max_bytes is a soft limit: Concurrent writers can push the live file past it until a
 	 *   later rotation.
+	 * - Where the lock cannot be taken, the line is still appended, but a partial line stays:
+	 *   Cutting it off could cut another writer's record.
 	 *
 	 * @param  string               $file    Live JSONL file.
 	 * @param  array<string,mixed>  $record  Record to append.
 	 * @return void
 	 */
 	private function writeJsonl(string $file, array $record): void {
-		
+
 		try {
 			// Make sure the log directory exists (best effort; do not escalate on failure).
 			// mkdir() fails when a concurrent request created the directory first; is_dir() decides.
 			if (!\is_dir($this->logDir) && !@\mkdir($this->logDir, 0775, true) && !\is_dir($this->logDir)) {
-				throw new \RuntimeException('log dir create failed');
+				throw new \RuntimeException('cannot create ' . $this->logDir . $this->lastFailure());
 			}
 
 			// Encode once; partial output beats losing the whole event
@@ -875,21 +967,21 @@ HTML;
 			// Open for append and take an exclusive lock to serialize writers
 			$fh = @\fopen($file, 'ab');
 			if ($fh === false) {
-				throw new \RuntimeException('open failed');
+				throw new \RuntimeException('cannot open ' . $file . $this->lastFailure());
 			}
 
 			try {
-				@\flock($fh, \LOCK_EX);
+				$locked = @\flock($fh, \LOCK_EX);
 
-				// Fresh size under lock to avoid races/stale metadata
-				\clearstatcache(true, $file);
-				$size = @\filesize($file) ?: 0;
+				// Fresh size under lock, read from the handle, so no stat cache is involved
+				$size = $this->streamSize($fh);
 
 				// If this write would cross the threshold, rotate first.
 				if (($size + $lineBytes) > $threshold) {
 					// Important: Release the main lock before rotating to avoid deadlocks
 					@\flock($fh, \LOCK_UN);
 					@\fclose($fh);
+					$fh = false;
 
 					// Rotation takes a sidecar lock and does copy+truncate
 					$this->rotate($file, $lineBytes);
@@ -897,21 +989,32 @@ HTML;
 					// Back to appending on the fresh file (reopen and re-lock after rotation).
 					$fh = @\fopen($file, 'ab');
 					if ($fh === false) {
-						throw new \RuntimeException('reopen failed');
+						throw new \RuntimeException('cannot reopen ' . $file . ' after rotation' . $this->lastFailure());
 					}
-					@\flock($fh, \LOCK_EX);
+					$locked = @\flock($fh, \LOCK_EX);
+					$size = $this->streamSize($fh);
 				}
 
-				// Append the line and flush to disk
-				@\fwrite($fh, $line);
-				@\fflush($fh);
-				
+				// Append the line. A full disk or quota takes part of it, or none.
+				$written = @\fwrite($fh, $line);
+				if ($written !== $lineBytes) {
+					$written = \is_int($written) ? $written : 0;
+					$cause   = $this->lastFailure();
+
+					// A partial line would run into the next record. Without the lock, the bytes
+					// after $size may already belong to another writer, so they stay.
+					$cut = ($written === 0) || ($locked && @\ftruncate($fh, $size));
+					throw new \RuntimeException("cannot append to {$file}: {$written} of {$lineBytes} bytes written"
+						. ($cut ? '' : ', the partial line remains') . $cause);
+				}
 			} finally {
 				// Always release the lock and handle; nothing leaks
-				@\flock($fh, \LOCK_UN);
-				@\fclose($fh);
+				if ($fh !== false) {
+					@\flock($fh, \LOCK_UN);
+					@\fclose($fh);
+				}
 			}
-			
+
 		} catch (\Throwable $t) {
 			// Fail-soft: Do not throw from an error handler; leave a breadcrumb
 			@\error_log('[CitOmni] writeJsonl failed: ' . $t->getMessage());
@@ -923,21 +1026,26 @@ HTML;
 	 * Move a live JSONL file's content to a timestamped sibling, unless the pending line fits after all.
 	 *
 	 * Behavior:
-	 * - Serializes rotations of one file with a sidecar lock, <file>.lock, and holds an exclusive
-	 *   lock on the live file while it works.
+	 * - Serializes rotations of one file with a sidecar lock, <file>.lock, and works under an
+	 *   exclusive lock on the live file. Without that lock it does not rotate.
 	 * - Returns without rotating when the live file is empty, or when its size plus $pendingBytes
 	 *   fits log.max_bytes.
 	 * - Otherwise copies the content to <base>.<timestamp><ext> and truncates the live file. The
 	 *   timestamp is UTC, such as 20251001T123045.582913Z, with a short hex suffix on a name
 	 *   collision. The live path stays the same, so tailers keep working.
-	 * - The copy is written to a .tmp file and renamed into place; then prune() keeps
-	 *   log.max_files rotations.
-	 * - Reports exceptions to PHP's error_log; nothing is thrown. A file that cannot be opened
-	 *   skips the rotation silently.
+	 * - Truncates only once the copy is complete, synced to disk and renamed into place. A
+	 *   failure before that removes the copy and leaves the live file as it was; a failed
+	 *   truncation leaves the records in both files.
+	 * - The rotated file gets the live file's permission bits.
+	 * - After a rotation, prune() keeps log.max_files rotations.
+	 * - Reports a failure to PHP's error_log as "[CitOmni] rotate failed: <reason>"; nothing is
+	 *   thrown. A live file that cannot be opened skips the rotation silently.
 	 *
 	 * Notes:
 	 * - The locks are advisory and assume a local filesystem. When the lock file cannot be
-	 *   opened, rotations are not serialized.
+	 *   opened, rotations are not serialized; the lock on the live file still keeps writers out.
+	 * - Where locks or fsync() fail, the live file grows past log.max_bytes instead of rotating.
+	 *   A copy behind a stream wrapper other than plain files is not synced.
 	 * - A record larger than log.max_bytes is appended whole to an empty live file, so consecutive
 	 *   oversized records rotate one file per record.
 	 *
@@ -946,7 +1054,7 @@ HTML;
 	 * @return void
 	 */
 	private function rotate(string $file, int $pendingBytes): void {
-		
+
 		$lockPath = $file . '.lock';
 
 		// Take a sidecar lock so only one worker rotates this file at a time
@@ -966,13 +1074,14 @@ HTML;
 			}
 
 			try {
-				// Lock before any size checks to avoid races with writers
-				@\flock($main, \LOCK_EX);
+				// Copy and truncate are only safe while no writer can append in between.
+				if (!@\flock($main, \LOCK_EX)) {
+					throw new \RuntimeException('cannot lock ' . $file . '; not rotated');
+				}
 
 				// Fresh size under lock; another worker may have rotated just now
-				\clearstatcache(true, $file);
 				$stat = @\fstat($main);
-				$size = (int)($stat['size'] ?? 0);
+				$size = \is_array($stat) ? (int)$stat['size'] : 0;
 				if ($size === 0 || ($size + $pendingBytes) <= $threshold) {
 					return; // The pending write still fits, or rotating an empty file cannot help.
 				}
@@ -1006,28 +1115,39 @@ HTML;
 				if ($tmpH === false) {
 					$tmpH = @\fopen($tmp, 'wb');
 					if ($tmpH === false) {
-						return; // Cannot rotate safely
+						throw new \RuntimeException('cannot create ' . $tmp . $this->lastFailure() . '; not rotated');
 					}
 				}
 
-				try {
-					// Copy current content first, then hand writers a clean slate
-					@\rewind($main);
-					@\stream_copy_to_stream($main, $tmpH);
-					@\fflush($tmpH);
+				// The live file is truncated only once its records are safe in the rotated file:
+				// complete, synced and published under its own name. Until then, a failure must
+				// leave the live file as it was.
+				@\rewind($main);
+				$copied  = @\stream_copy_to_stream($main, $tmpH);
+				$failure = ($copied === $size) ? '' : (($copied === false) ? 'copy failed' : "copied {$copied} of {$size} bytes") . $this->lastFailure();
 
-					// Truncate live file to zero while still locked
-					@\ftruncate($main, 0);
-					@\fflush($main);
-				} finally {
-					@\fclose($tmpH);
+				// fsync() exists for plain files only; another stream wrapper keeps its own durability.
+				if ($failure === '' && \stream_get_meta_data($tmpH)['wrapper_type'] === 'plainfile' && !@\fsync($tmpH)) {
+					$failure = 'fsync failed';
 				}
+				@\fclose($tmpH);
 
 				// Publish the rotated file atomically within the same directory
-				@\rename($tmp, $rotated);
-				@\chmod($rotated, 0644);
+				if ($failure === '') {
+					@\chmod($tmp, $stat['mode'] & 0777);
+					if (!@\rename($tmp, $rotated)) {
+						$failure = 'rename failed' . $this->lastFailure();
+					}
+				}
+				if ($failure !== '') {
+					@\unlink($tmp);
+					throw new \RuntimeException("cannot publish {$rotated}: {$failure}; {$file} is unchanged");
+				}
 
-				// Live file remains open (now empty); writers can continue immediately
+				// Truncate live file to zero while still locked; writers continue on the empty file
+				if (!@\ftruncate($main, 0)) {
+					throw new \RuntimeException("cannot truncate {$file}; its records are also in {$rotated}");
+				}
 			} finally {
 				@\flock($main, \LOCK_UN);
 				@\fclose($main);
@@ -1054,47 +1174,75 @@ HTML;
 	 * Delete the oldest rotations of a JSONL file, keeping the newest $max.
 	 *
 	 * Behavior:
-	 * - Every file next to $file that matches <base>.*<ext>, other than $file itself, counts as a
-	 *   rotation, not only names that rotate() created.
-	 * - Keeps the $max newest by modification time and deletes the rest; a failed deletion is
-	 *   ignored.
+	 * - Counts as a rotation only a file next to $file whose name rotate() could have created:
+	 *   <base>.<UTC timestamp><ext>, with or without a collision suffix. Other files, the
+	 *   rotations of other logs included, are left alone.
+	 * - Keeps the $max newest by the timestamp in their names and deletes the rest; a failed
+	 *   deletion is ignored.
 	 *
 	 * @param  string  $file  Live JSONL file.
 	 * @param  int     $max   Number of rotations to keep; 0 or less deletes nothing.
 	 * @return void
 	 */
 	public function prune(string $file, int $max): void {
-		
+
 		// Retention disabled or nothing to do
 		if ($max <= 0) {
 			return;
 		}
 
-		// Split "<prefix><ext>" so we can match "<prefix>.*<ext>" (keeps ".jsonl" intact).
-		[$prefix, $ext] = (static function (string $path): array {
-			$dot = \strrpos($path, '.');
-			return ($dot === false) ? [$path, ''] : [\substr($path, 0, $dot), \substr($path, $dot)];
-		})($file);
+		$dir  = \dirname($file);
+		$name = \basename($file);
+		$dot  = \strrpos($name, '.');
+		$base = ($dot === false) ? $name : \substr($name, 0, $dot);
+		$ext  = ($dot === false) ? '' : \substr($name, $dot);
 
-		// Find rotated siblings in the same directory (non-sorted).
-		$pattern = $prefix . '.*' . $ext;
-		$list = \glob($pattern, \GLOB_NOSORT) ?: [];
+		// A directory listing instead of glob(): The directory path may contain glob syntax.
+		$entries = @\scandir($dir, \SCANDIR_SORT_NONE);
+		if ($entries === false) {
+			return;
+		}
 
-		// Exclude the live file and anything that is not a regular file.
-		$list = \array_values(\array_filter($list, static fn(string $p) => $p !== $file && \is_file($p)));
+		$pattern   = '~\A' . \preg_quote($base, '~') . '\.\d{8}T\d{6}(?:\.\d{6})?Z(?:-[0-9a-f]{4})?' . \preg_quote($ext, '~') . '\z~';
+		$rotations = \preg_grep($pattern, $entries);
+		if (\count($rotations) <= $max) {
+			return;
+		}
 
-		// Sort newest first by mtime. Quiet fs reads to avoid noise if files disappear mid-flight
-		\usort($list, static function (string $a, string $b): int {
-			$ma = @\filemtime($a) ?: 0;
-			$mb = @\filemtime($b) ?: 0;
-			return $mb <=> $ma; // Newest first
-		});
+		// The UTC timestamps sort chronologically as strings; newest first.
+		\rsort($rotations, \SORT_STRING);
 
 		// Delete everything after the first $max. Best-effort: ignore unlink failures.
-		$toDelete = \array_slice($list, $max);
-		foreach ($toDelete as $path) {
-			@\unlink($path);
+		foreach (\array_slice($rotations, $max) as $entry) {
+			@\unlink($dir . '/' . $entry);
 		}
+	}
+
+
+	/**
+	 * Return the size of an open file.
+	 *
+	 * @param  resource  $handle  Open file.
+	 * @return int  Size in bytes; 0 when it cannot be read.
+	 */
+	private function streamSize(mixed $handle): int {
+		$stat = @\fstat($handle);
+		return \is_array($stat) ? (int)$stat['size'] : 0;
+	}
+
+
+	/**
+	 * Return PHP's last diagnostic when this file raised it, for an error_log breadcrumb.
+	 *
+	 * Right after a failed operation that raises one, such as fopen(), mkdir(), rename() or a
+	 * write to a plain file, that diagnostic is the operation's cause. After an operation that
+	 * fails without one, it can be an earlier diagnostic from this file.
+	 *
+	 * @return string  ": <diagnostic>", or an empty string when there is none or another file raised it.
+	 */
+	private function lastFailure(): string {
+		$last = \error_get_last();
+		return ($last !== null && $last['file'] === __FILE__) ? ': ' . $last['message'] : '';
 	}
 
 
@@ -1124,7 +1272,9 @@ HTML;
 			'status'   => $status,
 			'request'  => [
 				'method'     => (string)($_SERVER['REQUEST_METHOD'] ?? ''),
-				'uri'        => (string)\strtok((string)($_SERVER['REQUEST_URI'] ?? ''), '?'),  // Strip query: No secrets in logs
+				// Strip query: No secrets in logs. Not strtok(): handlePhpError() resumes the
+				// application, which may be in the middle of its own strtok() loop.
+				'uri'        => \explode('?', (string)($_SERVER['REQUEST_URI'] ?? ''), 2)[0],
 				'host'       => (string)($_SERVER['HTTP_HOST'] ?? ''),  // As sent; may be spoofed by clients
 				'ua'         => (string)($_SERVER['HTTP_USER_AGENT'] ?? ''),  // Logged verbatim for triage
 				'ip'         => (string)($_SERVER['REMOTE_ADDR'] ?? ''),  // Direct client IP (proxies not resolved here)
@@ -1342,11 +1492,13 @@ HTML;
 	 *
 	 * Behavior:
 	 * - Shows at most render.detail.trace.max_array_items arguments, then the ellipsis marker.
+	 * - Shows argument values only when log.trace_args is on; otherwise each argument's type.
 	 * - A frame without a function name shows "unknown".
 	 *
 	 * @param  array<string,mixed>  $f  One frame of a backtrace.
 	 * @return string
-	 * @see \CitOmni\Http\Service\ErrorHandler::dumpArg()  How each argument is shown.
+	 * @see \CitOmni\Http\Service\ErrorHandler::dumpArg()  How a value is shown.
+	 * @see \CitOmni\Http\Service\ErrorHandler::describeArg()  How a type is shown.
 	 */
 	private function formatCall(array $f): string {
 		
@@ -1365,11 +1517,31 @@ HTML;
 					$args[] = $this->ellipsis; // Too many args; hint and stop
 					break;
 				}
-				$args[] = $this->dumpArg($a, 0);
+				$args[] = $this->traceArgs ? $this->dumpArg($a, 0) : $this->describeArg($a);
 			}
 		}
 
 		return $call . '(' . \implode(', ', $args) . ')';
+	}
+
+
+	/**
+	 * Render one trace argument as its type, without its value.
+	 *
+	 * @param  mixed  $v  Argument.
+	 * @return string  "string(<bytes>)", "array(<count>)", "object(<class>)" or the type name, such as int or null.
+	 */
+	private function describeArg(mixed $v): string {
+		return match (true) {
+			\is_string($v) => 'string(' . \strlen($v) . ')',
+			\is_array($v)  => 'array(' . \count($v) . ')',
+			\is_object($v) => 'object(' . $v::class . ')',
+			\is_int($v)    => 'int',
+			\is_float($v)  => 'float',
+			\is_bool($v)   => 'bool',
+			\is_null($v)   => 'null',
+			default        => \gettype($v),
+		};
 	}
 
 
