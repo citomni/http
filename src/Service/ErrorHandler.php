@@ -18,93 +18,28 @@ namespace CitOmni\Http\Service;
 use CitOmni\Kernel\Service\BaseService;
 
 /**
- * ErrorHandler: HTTP-only global error/exception/shutdown handler for CitOmni.
+ * ErrorHandler: HTTP service that logs and renders uncaught exceptions, PHP errors, fatal errors and terminal HTTP errors.
  *
- * Responsibilities:
- * - Install process-wide handlers and guarantee "no blank page".
- *   1) Registers exception, error, and shutdown handlers.
- *   2) Always logs; always renders for fatals/exceptions/HTTP errors; optional render for non-fatals.
- *   3) Terminates deterministically after rendering (exit(0)).
- * - Emit safe, negotiated responses (HTML/JSON) with correlation.
- *   1) Adds X-Request-Id (uses inbound header if present, otherwise generates).
- *   2) Sends no-store and X-Content-Type-Options=nosniff headers.
- *   3) Replaces any partial output when possible; otherwise appends a tiny HTML tail (error_id).
- * - Write robust JSONL logs with rotation.
- *   1) Atomic-enough append with flock.
- *   2) Size-based rotation via sidecar lock; timestamped files.
- *   3) Prunes rotated siblings according to max_files.
- * - Respect environment and developer ergonomics.
- *   1) Hides client details by default; exposes traces to clients only in dev and when enabled.
- *   2) Redacts sensitive keys in HTTP context (authorization, tokens, etc.).
- *   3) Never throws from handlers; failures degrade to error_log.
+ * Gives a failed HTTP request a defined end instead of a blank page: A JSONL record with a
+ * fresh error id, and an HTML or JSON response that carries the same id. It is the error
+ * path, so it must keep working when cfg, templates or the service graph are the cause of
+ * the failure. Which errors render, how much detail a client sees and where the logs go are
+ * cfg decisions. CLI error handling is left to the CLI package.
  *
- * Collaborators:
- * - App container (read-only): Reads $this->app->cfg->error_handler during init.
- * - Kernel/Router/HTTP adapters: Call httpError(int $status, array $context) for terminal HTTP errors.
- * - BaseService: Construction/options plumbing; no other services are resolved here.
+ * Rules:
+ * - Never let an exception escape a handler path; report internal failures to PHP's error_log.
+ * - Read cfg error_handler only in init(); later code uses the hydrated fields.
+ * - Resolve no other services.
+ * - Show traces, log records and caller context to a client only when developer detail is on.
+ * - Pass caller-supplied context through scrubContext() before it is logged.
+ * - Mark the handler run as in progress before rendering, so a nested event never renders a
+ *   second response.
  *
- * Configuration keys:
- * - error_handler.render.force_error_reporting (int|null) - If set, forces error_reporting() on install.
- * - error_handler.render.trigger (int bitmask) - Non-fatal PHP errors that should render to the client.
- *   Note: Fatal classes (E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR, E_USER_ERROR) are ignored here
- *   and handled exclusively by the shutdown handler.
- * - error_handler.render.detail.level (int: 0|1) - 0=minimal, 1=developer details (effective only in dev).
- * - error_handler.render.detail.trace.max_frames (int, default 120)
- * - error_handler.render.detail.trace.max_arg_strlen (int, default 512)
- * - error_handler.render.detail.trace.max_array_items (int, default 20)
- * - error_handler.render.detail.trace.max_depth (int, default 3)
- * - error_handler.render.detail.trace.ellipsis (string, default "...")
- * - error_handler.log.trigger (int bitmask, default E_ALL) - Which PHP errors to log (non-fatal path).
- * - error_handler.log.path (string) - Directory for JSONL logs. An empty or whitespace-only value
- *   falls back to CITOMNI_APP_PATH . '/var/logs'.
- * - error_handler.log.max_bytes (int, default 2_000_000) - Soft pre-write rotation threshold per
- *   live file. rotate() re-checks the current size plus the pending record under lock; concurrent
- *   writers may still temporarily push the live file past the threshold before a later rotation.
- * - error_handler.log.max_files (int, default 10) - Max rotated siblings to retain (pruned newest-first).
- * - error_handler.templates.html (string) - Primary HTML template path.
- * - error_handler.templates.html_failsafe (string) - Minimal fallback template path.
- * - error_handler.status_defaults.exception|shutdown|php_error (int HTTP status, default 500).
- *
- * Error handling:
- * - Fail-soft inside handlers: Never throw; unexpected failures are sent to PHP's error_log.
- * - Reentrancy guard prevents recursive handling.
- * - E_USER_ERROR is treated as fatal: Short-circuited in handlePhpError() so shutdown owns logging/render.
- * - If headers were already sent, only a neutral HTML comment with error_id is appended (no header changes).
- *
- * Typical usage:
- *
- *   // HTTP kernel bootstrap
- *   ob_start();           // prevent partial output
- *   ob_implicit_flush(false);
- *   $app = new App($configDir, Mode::HTTP);
- *   $app->errorHandler->install();   // idempotent
- *
- *   // In the router when producing HTTP-layer errors:
- *   $app->errorHandler->httpError(404, ['title' => 'Not Found', 'message' => 'Route not found']);
- *
- * Examples:
- *
- *   // Enable developer details in dev via cfg:
- *   // error_handler.render.detail.level = 1   (effective only when CITOMNI_ENVIRONMENT === 'dev')
- *
- *   // Render notices/warnings in dev, but never in prod:
- *   // error_handler.render.trigger = E_WARNING | E_NOTICE | E_USER_WARNING | E_USER_NOTICE
- *
- * Failure:
- *
- *   // Any uncaught exception or fatal error:
- *   // - Logged to JSONL with a fresh error_id
- *   // - Returned as HTML/JSON (negotiated), minimal in prod, detailed in dev (if enabled)
- *   // - Process ends via exit(0) to stop the bleeding
- *
- * Notes:
- * - HTTP-only by design. CLI error handling should live in a separate CLI handler.
- * - This service reads cfg once during init; runtime behavior is driven by those frozen options.
- * - Humor is allowed, but blank pages are not.
+ * @see \CitOmni\Http\Boot\Registry::CFG_HTTP  Meaning of the error_handler cfg keys.
  */
 final class ErrorHandler extends BaseService {
 	
-	/** Shared JSON encoding policy for responses, logs, dev details, and trace keys. */
+	/** JSON encoding flags: Readable slashes and Unicode; invalid input degrades instead of failing the encode. */
 	private const JSON_FLAGS = \JSON_UNESCAPED_SLASHES | \JSON_UNESCAPED_UNICODE | \JSON_PARTIAL_OUTPUT_ON_ERROR | \JSON_INVALID_UTF8_SUBSTITUTE;
 
 	/** Frozen options: cfg.error_handler merged with ctor $options (last-wins). */
@@ -116,7 +51,7 @@ final class ErrorHandler extends BaseService {
 	/** PHP error bitmask to log (applies to non-fatals here; fatals logged in shutdown). */
 	private int $logMask = 0;
 
-	/** Absolute log directory (no trailing slash). */
+	/** Log directory without trailing separators. */
 	private string $logDir = '';
 
 	/** Soft pre-write rotation threshold in bytes; concurrent writers may temporarily exceed it. */
@@ -124,84 +59,65 @@ final class ErrorHandler extends BaseService {
 
 	/** How many rotated siblings to keep (newest first). */
 	private int $maxFiles = 10;
-	// /** If we ever bulk-delete old rotations, threshold goes here. */
-	// private int $bulkDeleteThreshold = 10;
 
-	/** Template paths: Primary HTML and minimal failsafe. */
+	/** Paths of the primary and failsafe HTML templates; an empty string means none. */
 	private array $templates = [
 		'html'          => '',
 		'html_failsafe' => '',
 	];
 
-	/** Default HTTP statuses per event type (used unless overridden at call site). */
+	/** HTTP status rendered per event type: exception, shutdown and php_error. */
 	private array $statusDefaults = [
 		'exception' => 500,
 		'shutdown'  => 500,
 		'php_error' => 500,
 	];
 
-	/** Reentrancy guard: Prevents recursive handling/loops. */
+	/** True while a handler run is in progress; a run that ends in exit() leaves it true. */
 	private static bool $inHandler = false;
 
-	/** Per-request correlation id (propagated via X-Request-Id). */
+	/** Correlation id sent as X-Request-Id and logged with every record; empty until install(). */
 	private string $requestId = '';
 
-	/** When true, include developer details (only effective in dev). */
+	/** Whether clients get developer details; true only in the dev environment. */
 	private bool $devDetail = false;
 
-	/** Trace shaping: Hard caps applied to exception logs and developer detail output. */
+	/** Maximum number of frames in a formatted trace. */
 	private int $traceMaxFrames = 120;
+
+	/** Maximum length of a string argument in a trace, in bytes. */
 	private int $traceMaxArgStr = 512;
+
+	/** Maximum number of arguments or array items shown per level in a trace. */
 	private int $traceMaxItems  = 20;
+
+	/** Maximum nesting depth of a dumped argument in a trace. */
 	private int $traceMaxDepth  = 3;
-	/** Ellipsis marker for truncated strings/collections. */
+
+	/** Marker appended where a trace string, argument list or array was cut. */
 	private string $ellipsis    = '...';
 
-	/** Idempotency flag: Ensures install() runs only once. */
+	/** True once install() has completed. */
 	protected bool $installed = false;
 
 
 
-
-/*
- *---------------------------------------------------------------
- * BOOTSTRAP & CONFIG
- *---------------------------------------------------------------
- * PURPOSE
- *   Read configuration, merge options, and install global handlers.
- *
- * NOTES
- *   - Must not resolve other services.
- *   - Keep side effects only in install(); init()/hydrate() are pure-ish.
- *
- */
+	// ----------------------------------------------------------------
+	// Construction and installation
+	// ----------------------------------------------------------------
 
 	/**
-	 * Initialize configuration from cfg and constructor options, then hydrate fields.
+	 * Merge cfg error_handler with the service options and hydrate the runtime fields.
 	 *
 	 * Behavior:
-	 * - Reads cfg->error_handler exactly once and unwraps it to a plain array.
-	 * - Merges ctor $this->options over cfg using deterministic "last wins".
-	 * - Freezes runtime options by clearing $this->options after the merge.
-	 * - Calls hydrate() to populate all internal fields from $this->opt.
-	 * - Swallows cfg read failures (\Throwable) and falls back to an empty config.
-	 *
-	 * Notes:
-	 * - No global side effects: Does not emit headers, modify INI, or resolve services.
-	 * - Input shape is tolerant: Accepts either an array or a CitOmni\Kernel\Cfg.
-	 * - Determinism: Given the same cfg and options, results are identical across runs.
-	 * - This method never throws; failures are treated as "no config".
-	 *
-	 * Typical usage:
-	 *   Called automatically during service construction. Consumers should not call it directly.
-	 *
-	 * Examples:
-	 *   // Service wiring with options that override cfg (last wins):
-	 *   // $app->errorHandler is created by the container with:
-	 *   //   options = ['render' => ['trigger' => E_WARNING | E_NOTICE]]
-	 *   // If cfg has a different 'render.trigger', the options value takes precedence.
+	 * - Service options win over cfg; the options are cleared after the merge.
+	 * - A cfg read that throws counts as an empty error_handler node.
+	 * - Sends no headers, changes no INI settings and registers no handlers; install() does that.
 	 *
 	 * @return void
+	 * @see \CitOmni\Kernel\Service\BaseService::__construct()  Calls init() during construction.
+	 * @see \CitOmni\Kernel\Arr::mergeAssocLastWins()  Merge semantics.
+	 * @see \CitOmni\Http\Service\ErrorHandler::hydrate()  How the merged options become fields.
 	 */
 	protected function init(): void {
 
@@ -222,55 +138,29 @@ final class ErrorHandler extends BaseService {
 		$this->opt = \CitOmni\Kernel\Arr::mergeAssocLastWins($cfgNode, $this->options);
 		
 		// Freeze options: Avoid accidental re-merge or reuse later in the request
-		$this->options = []; // freeze & free
+		$this->options = [];
 
-		// Populate internals from $this->opt only: No more cfg reads beyond this point.
-		$this->hydrate(); // uses $this->opt
+		// Populate internals from $this->opt only: No error_handler cfg reads beyond this point.
+		$this->hydrate();
 	}
 
 
 	/**
-	 * Hydrate internal fields from merged options.
+	 * Populate the runtime fields from the merged options.
 	 *
 	 * Behavior:
-	 * - Reads pre-merged $this->opt and assigns strongly-typed properties.
-	 * - Sanitizes the render mask to exclude fatal-class errors (shutdown owns those).
-	 * - Loads logging configuration (mask, directory, rotation limits). An empty or
-	 *   whitespace-only log.path falls back to CITOMNI_APP_PATH . '/var/logs'.
-	 * - Resolves template paths and status defaults for each error bucket.
-	 * - Computes developer-detail gating from cfg + environment.
-	 * - Applies bounded trace limits (frames, arg length, array items, depth, ellipsis).
-	 *
-	 * Notes:
-	 * - Pure in-memory: No I/O, no service lookups, no global effects.
-	 * - Fail-soft casting: Non-integer or missing values are coerced to safe defaults.
-	 * - Policy: Fatal-class errors (E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR, E_USER_ERROR)
-	 *   never trigger render here; they are handled in the shutdown path to avoid partial output.
-	 * - Security: Developer details are emitted only when explicitly enabled and in "dev".
-	 *
-	 * Typical usage:
-	 *   Called by init() after cfg+options have been merged; safe to re-run if options change.
-	 *
-	 * Examples:
-	 *
-	 *   // Default setup after init()
-	 *   $handler->hydrate(); // Uses E_ALL for logging if not provided.
-	 *
-	 *   // Custom trace bounds picked from options
-	 *   $handler->hydrate(); // Applies max_frames/max_depth/etc. caps for safe output.
-	 *
-	 * Failure:
-	 * - Never throws; invalid inputs are sanitized or ignored.
+	 * - Fatal-class bits are cleared from the render mask; handleShutdown() owns fatal errors.
+	 * - An empty or whitespace-only log.path falls back to CITOMNI_APP_PATH . '/var/logs'.
+	 * - Developer detail is on only when render.detail.level is 1 or more and CITOMNI_ENVIRONMENT is 'dev'.
+	 * - Values are cast to the field types, not validated; a missing key keeps a built-in default.
 	 *
 	 * @return void
 	 */
 	private function hydrate(): void {
 
-		// Render trigger from options; keep only non-fatal bits (shutdown owns fatals).
 		$this->renderMask = (int)($this->opt['render']['trigger'] ?? 0);
-		
-		// Sanitize: Never allow fatal classes here; those are handled by shutdown()
-		// Clear fatal PHP error bits from $this->renderMask so only non-fatal levels can trigger rendering.
+
+		// Fatal-class levels never render from here; handleShutdown() owns them.
 		// Bit trick: (~X) flips the bits in X, so the fatal flags become 0; "&=" AND-assign keeps all existing bits
 		// except those flags (because bitwise AND with 0 clears them). Equivalent to: mask = mask & ~X.
 		$this->renderMask &= ~(E_ERROR | E_PARSE | E_CORE_ERROR | E_COMPILE_ERROR | E_USER_ERROR);
@@ -299,7 +189,6 @@ final class ErrorHandler extends BaseService {
 			}
 		}
 
-		// Developer detail: Enabled only if cfg level >= 1 AND environment is dev
 		$level = (int)($this->opt['render']['detail']['level'] ?? 0);
 		$this->devDetail = ($level >= 1) && (\defined('CITOMNI_ENVIRONMENT') && \CITOMNI_ENVIRONMENT === 'dev');
 
@@ -314,37 +203,22 @@ final class ErrorHandler extends BaseService {
 
 
 	/**
-	 * Install global handlers and finalize the error-handling environment.
+	 * Take over PHP's exception, error and shutdown handling for this request.
+	 *
+	 * Call it once at boot, before anything can fail: Until then, nothing reaches the handlers,
+	 * and a response from httpError() carries an empty X-Request-Id.
 	 *
 	 * Behavior:
-	 * - Installs exception, error, and shutdown handlers for the current request.
-	 * - Optionally overrides PHP's error_reporting (when configured).
-	 * - Forces display_errors=0 to avoid accidental plaintext leaks to clients.
-	 * - Ensures every request has a correlation id and emits the X-Request-Id header.
-	 * - Idempotent: A second (or tenth) call is a no-op.
-	 *
-	 * Notes:
-	 * - Uses only pre-hydrated options; does not resolve other services.
-	 * - Header emission is best-effort and only attempted if headers are not sent.
-	 * - The @-operators are intentional here to favor "fail soft" in hostile environments.
-	 *
-	 * Typical usage:
-	 *   Call once during HTTP bootstrap right after creating the App container.
-	 *
-	 * Examples:
-	 *
-	 *   // Kernel boot path (happy path):
-	 *   $app = CitOmni\Http\Kernel::boot($entryPath);
-	 *   $app->errorHandler->install(); // Handlers are now active for this request.
-	 *
-	 *   // Idempotency:
-	 *   $app->errorHandler->install(); // No side effects the second time.
+	 * - Registers handleException(), handlePhpError() and handleShutdown() with PHP.
+	 * - Sets display_errors to 0, and error_reporting() to render.force_error_reporting when that is an int.
+	 * - Adopts the sanitized inbound X-Request-Id, or mints one, and sends it as X-Request-Id
+	 *   unless headers were already sent.
+	 * - A call after a completed install() does nothing.
 	 *
 	 * @return void
 	 */
 	public function install(): void {
 	
-		// Already installed for this request? Nothing to do
 		if ($this->installed) {
 			return;
 		}
@@ -372,76 +246,44 @@ final class ErrorHandler extends BaseService {
 
 		// Flip the idempotency guard last: If anything above failed, we can try again
 		$this->installed = true;
-	}	
-	
+	}
 
 
 
-
-
-/*
- *---------------------------------------------------------------
- * PUBLIC ENTRY POINTS (HTTP & GLOBAL HANDLERS)
- *---------------------------------------------------------------
- * PURPOSE
- *   External-facing entry points that log and render errors.
- *
- * NOTES
- *   - Always log; rendering is conditional only for non-fatals per cfg.
- *   - Guard re-entrancy via static $inHandler.
- *   - E_USER_ERROR flow: Some PHP setups route E_USER_ERROR through
- *     set_error_handler(). This handler treats it as fatal and returns
- *     early so the shutdown handler owns logging/rendering. This avoids
- *     duplicate logs and partial responses (see isFatal() guard).
- *
- */
+	// ----------------------------------------------------------------
+	// Handlers
+	// ----------------------------------------------------------------
 
 	/**
-	 * Emit and log a terminal HTTP-layer error on behalf of Kernel, Router or HTTP adapters.
+	 * Log and render a terminal HTTP error, then end the request.
+	 *
+	 * For HTTP outcomes that Kernel, Router or an adapter decides on, such as 404, 405 or 413.
+	 * An uncaught exception goes through handleException() instead.
 	 *
 	 * Behavior:
-	 * - Generates a new error id and writes a structured JSONL record
-	 * - Redacts obvious secrets in the provided $context (tokens, cookies, etc.)
-	 * - Logs context source 'request' to http_request.jsonl; otherwise preserves router status logs
-	 * - Renders a client response (HTML or JSON via content negotiation) and terminates the request
-	 * - While another handler run is in progress, terminates at once without logging or rendering;
-	 *   the response is what that run has emitted or buffered so far
+	 * - Writes one http_error record with a new error id and the scrubbed context to:
+	 *     - http_request.jsonl when context source is 'request',
+	 *     - otherwise http_router_404.jsonl, http_router_405.jsonl, http_router_5xx.jsonl for 500
+	 *       and above, or http_router_other.jsonl.
+	 * - Renders the status with context title, or "<status> Error", and context message, or the
+	 *   status text. The context itself reaches the client only with developer detail.
+	 * - A failed log write goes to PHP's error_log; the response is still rendered.
+	 * - While another handler run is in progress, terminates at once without logging or
+	 *   rendering; the response is what that run has emitted or buffered so far.
 	 *
 	 * Notes:
-	 * - Intended for terminal HTTP outcomes; application exceptions go through handleException().
-	 * - Logging is fail-soft; errors during logging are routed to PHP's error_log.
-	 * - The response includes X-Request-Id and a stable error_id for support correlation.
 	 * - After this method has rendered, the handler run stays in progress, because exit() skips
 	 *   the finally block. A call from a shutdown function or destructor therefore also
 	 *   terminates without logging or rendering.
 	 *
 	 * Typical usage:
-	 *   Call when an HTTP adapter decides on a terminal HTTP outcome and execution must stop.
+	 *   $this->app->errorHandler->httpError(404, ['reason' => 'route_not_found']);
 	 *
-	 * Examples:
-	 *
-	 *   // 404: Route not found
-	 *   $this->app->errorHandler->httpError(404, [
-	 *     'title'   => 'Not Found',
-	 *     'message' => 'No matching route.',
-	 *     'route'   => $requestedPath,
-	 *   ]);
-	 *
-	 *   // 405: Method not allowed (Router may also add an Allow header elsewhere)
-	 *   $this->app->errorHandler->httpError(405, [
-	 *     'title'   => 'Method Not Allowed',
-	 *     'message' => 'Use one of: GET, POST.',
-	 *   ]);
-	 *
-	 *   // 500: Router decided this is a server error
-	 *   $this->app->errorHandler->httpError(500, [
-	 *     'title'   => 'Internal Server Error',
-	 *     'message' => 'Unexpected router failure.',
-	 *   ]);
-	 *
-	 * @param int   $status  HTTP status (404, 405, 500, ...).
-	 * @param array $context Optional metadata; source 'request' selects request-level logging.
+	 * @param  int                  $status   HTTP status to send.
+	 * @param  array<string,mixed>  $context  Log context. Keys title and message shape the response;
+	 *                                        source 'request' selects http_request.jsonl.
 	 * @return never
+	 * @see \CitOmni\Http\Service\ErrorHandler::renderResponse()  Negotiation, headers and partial output.
 	 */
 	public function httpError(int $status, array $context = []): never {
 		
@@ -458,7 +300,6 @@ final class ErrorHandler extends BaseService {
 			// Best-effort scrub for sensitive content (so logs do not become a secrets vault)
 			$context = $this->scrubContext($context);
 
-			// Base record + HTTP context for the log.
 			$rec = $this->baseRecord('http_error', $errorId, $status) + [
 				'context' => $context,
 			];
@@ -481,35 +322,25 @@ final class ErrorHandler extends BaseService {
 				'type'    => 'http_error',
 			]);
 		} finally {
-			// Release the re-entrancy guard even if something above failed
+			// Runs only when something above threw: exit() skips finally blocks.
 			self::$inHandler = false;
 		}
 	}
 
 
 	/**
-	 * Handle an uncaught exception and terminate the request with a safe response.
+	 * Log an uncaught exception and render a response, ending the request.
+	 *
+	 * install() registers it as PHP's exception handler.
 	 *
 	 * Behavior:
-	 * - Applies a simple re-entrancy guard to avoid recursive handler loops.
-	 * - Builds a bounded, scrubbable trace via traceArray(...) (frame/arg/depth limits).
-	 * - Logs a structured JSONL record (one line per event) with a fresh error id.
-	 * - Chooses the HTTP status from statusDefaults['exception'] (defaults to 500).
-	 * - Renders an HTML/JSON error response and ends execution (no blank page).
+	 * - Writes one exception record to http_err_exception.jsonl: Class, message and a trace
+	 *   bounded by the trace limits.
+	 * - Renders status_defaults.exception. The exception message, and the record as details,
+	 *   reach the client only with developer detail.
+	 * - Returns without logging or rendering while another handler run is in progress.
 	 *
-	 * Notes:
-	 * - Client-facing detail is gated by $this->devDetail; exception logs always include the same bounded trace data.
-	 * - The response format is negotiated in renderResponse(...); headers are set there.
-	 * - Never throws; control flow ends inside renderResponse(...).
-	 *
-	 * Typical usage:
-	 *   Installed once via install(); PHP calls this automatically for uncaught exceptions.
-	 *
-	 * Examples:
-	 *
-	 *   // Any uncaught \Throwable during request handling:
-	 *   throw new \RuntimeException('Boom'); // Handled here; user gets a 500 with correlation id.
-	 *
+	 * @param  \Throwable  $e  The uncaught exception.
 	 * @return void
 	 */
 	public function handleException(\Throwable $e): void {
@@ -546,44 +377,34 @@ final class ErrorHandler extends BaseService {
 				'type'    => 'exception',
 			]);
 		} finally {
-			// Clear guard even if rendering/logging hit a snag (we fail soft)
+			// Runs only when something above threw: exit() skips finally blocks.
 			self::$inHandler = false;
 		}
 	}
 
 
 	/**
-	 * Handle non-fatal PHP errors (warnings/notices/etc.).
+	 * Log a non-fatal PHP error, and render it when render.trigger includes its level.
+	 *
+	 * install() registers it as PHP's error handler.
 	 *
 	 * Behavior:
-	 * - Short-circuits for fatal-class errors; they are owned by the shutdown handler.
-	 * - Logs non-fatal errors when the log mask matches.
-	 * - Optionally renders a response when the render mask matches (typically only in dev).
-	 * - Returns true for handled non-fatals; returns false to defer (E_USER_ERROR, or errors
-	 *   suppressed via @ / below error_reporting()) so PHP's own handling proceeds.
+	 * - Returns false, and does nothing, for a level outside error_reporting(), which includes
+	 *   diagnostics suppressed with @.
+	 * - Returns false for a fatal-class level, so PHP halts and handleShutdown() logs and renders
+	 *   it. E_USER_ERROR is the only one that reaches a user error handler.
+	 * - Otherwise returns true, after:
+	 *     - writing one php_error record to http_err_phperror.jsonl when log.trigger includes
+	 *       the level,
+	 *     - rendering status_defaults.php_error and ending the request when render.trigger
+	 *       includes the level and no other handler run is in progress. The PHP error message
+	 *       is shown to the client; the record only with developer detail.
 	 *
-	 * Notes:
-	 * - E_USER_ERROR: Some setups route E_USER_ERROR through set_error_handler(). We treat it as fatal and
-	 *   defer to the shutdown handler to avoid duplicate logging and half-rendered responses. The isFatal()
-	 *   guard enforces this.
-	 * - Honors @-suppression / error_reporting(): suppressed diagnostics are ignored
-	 *   (returns false) so the @ operator keeps working and our own fail-soft I/O does
-	 *   not recurse back through this handler.
-	 * - Re-entrancy: while already inside a handler/render (self::$inHandler), the
-	 *   client render is skipped; logging still happens.
-	 * - Never throws; write failures are fail-soft inside writeJsonl().
-	 *
-	 * Typical usage:
-	 *   Installed via install(); do not call directly.
-	 *
-	 * Examples:
-	 *   // Production (render mask off):
-	 *   // Warning/notice is logged to JSONL; request continues unless a fatal occurs later.
-	 *
-	 *   // Development (render mask includes E_WARNING, etc.):
-	 *   // Warning triggers an immediate HTML/JSON error response with developer details.
-	 *
-	 * @return bool True when handled here; false to defer to PHP (E_USER_ERROR, @-suppressed, or out-of-mask).
+	 * @param  int     $errno    PHP error level.
+	 * @param  string  $errstr   Error message.
+	 * @param  string  $errfile  File the error was raised in.
+	 * @param  int     $errline  Line the error was raised on.
+	 * @return bool  False to let PHP's own handling proceed.
 	 */
 	public function handlePhpError(int $errno, string $errstr, string $errfile, int $errline): bool {
 
@@ -647,32 +468,20 @@ final class ErrorHandler extends BaseService {
 
 
 	/**
-	 * Shutdown handler: Detects fatal engine errors and emits the final response.
+	 * Log and render the fatal error that ended the request, if there was one.
+	 *
+	 * install() registers it as a shutdown function.
 	 *
 	 * Behavior:
-	 * - Reads the last PHP error via error_get_last() and inspects its type.
-	 * - Acts only on fatal-class errors (E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR, E_USER_ERROR).
-	 * - Writes a structured JSONL log entry with request metadata and an error id.
-	 * - Renders a safe HTML/JSON error page and terminates via renderResponse(...).
-	 *
-	 * Notes:
-	 * - E_USER_ERROR is intentionally handled here: Some setups route it through set_error_handler(),
-	 *   but our non-fatal handler returns early for fatal classes to avoid duplicates.
-	 * - Runs at the very end of the request: No exceptions should escape; all failures are fail-soft.
-	 * - Response replacement vs. tailing is delegated to renderResponse(), which decides based on headers_sent().
-	 *
-	 * Typical usage:
-	 *   Registered by install(); PHP invokes it automatically at request shutdown.
-	 *
-	 * Examples:
-	 *
-	 *   // A fatal occurs (e.g., undefined function or parse error):
-	 *   // Result: One JSONL line in http_err_shutdown.jsonl and a 500 response with error_id.
-	 *
-	 *   // Non-fatal warning was the last error:
-	 *   // Result: No action here; warnings are handled by handlePhpError() and logging policy.
+	 * - Does nothing unless error_get_last() reports a fatal-class error: E_ERROR, E_PARSE,
+	 *   E_CORE_ERROR, E_COMPILE_ERROR or E_USER_ERROR.
+	 * - Otherwise writes one shutdown record to http_err_shutdown.jsonl and renders
+	 *   status_defaults.shutdown. The PHP error message, and the record as details, reach the
+	 *   client only with developer detail.
+	 * - Renders even while another handler run is in progress.
 	 *
 	 * @return void
+	 * @see \CitOmni\Http\Service\ErrorHandler::renderResponse()  What a render does once output was sent.
 	 */
 	public function handleShutdown(): void {
 		
@@ -718,69 +527,36 @@ final class ErrorHandler extends BaseService {
 
 
 
-
-
-
-/*
- *---------------------------------------------------------------
- * RESPONSE EMISSION (NEGOTIATION & HTML)
- *---------------------------------------------------------------
- * PURPOSE
- *   Decide JSON vs. HTML, write headers, and emit complete bodies.
- *
- * NOTES
- *   - If headers were already sent, never change status/headers; append tail only.
- *   - Discard buffered partial output where possible before writing the error response.
- *   - Include X-Request-Id and no-cache headers; set X-Content-Type-Options:nosniff.
- *
- */
+	// ----------------------------------------------------------------
+	// Response
+	// ----------------------------------------------------------------
 
 	/**
-	 * Emits a complete, negotiated error response (HTML or JSON) with safe replacement semantics, and stops execution.
+	 * Send the error response and end the request.
 	 *
 	 * Behavior:
-	 * - If headers are not sent, replace the response where buffering permits:
-	 *   1) Discard buffered partial output where possible
-	 *   2) Set HTTP status, no-cache headers, X-Content-Type-Options, and X-Request-Id
-	 *   3) Negotiate body (HTML or JSON), set Content-Type, and emit the full body
-	 * - If headers/bytes are already sent, do not change headers or status:
-	 *   - Append a minimal, neutral HTML tail with the error_id when acceptable
-	 * - Always terminates the request with exit(0)
+	 * - While headers are not sent: Discards buffered output where PHP allows it, then sends the
+	 *   status, no-store and nosniff headers, X-Request-Id and a body:
+	 *     - JSON with error_id, type, status, title and message when the client prefers JSON;
+	 *       details only with developer detail,
+	 *     - otherwise the HTML page from renderHtml().
+	 * - Once headers are sent: Leaves status and headers alone, and appends an HTML comment with
+	 *   the error id when the client accepts HTML.
+	 * - Ends the request with exit(0).
 	 *
 	 * Notes:
-	 * - Developer details are only included when $this->devDetail is true and a details payload is provided
-	 * - JSON uses JSON_PARTIAL_OUTPUT_ON_ERROR for resilience; better a partial payload than a broken response
-	 * - HEAD requests are not special-cased; sending a body is acceptable here (error path, not a normal handler)
-	 * - Status is forced via a raw "HTTP/<proto> <code>" header (last-write-wins),
-	 *   not http_response_code(): the latter emits an E_WARNING on PHP 8.5+ (and has
-	 *   no effect) when a status line was already queued by a prior layer
-	 * - Idempotent per request: Once called, control flow ends predictably from this method
+	 * - A HEAD request gets a body too.
 	 *
-	 * Typical usage:
-	 *   Called internally by httpError(), handleException(), handlePhpError() (when configured), and handleShutdown()
-	 *
-	 * Examples:
-	 *
-	 *   // Fresh response (headers not sent): Full JSON body with 500
-	 *   $this->renderResponse(500, $id, ['type' => 'exception', 'title' => 'Unhandled Exception', 'message' => 'Boom']);
-	 *
-	 *   // Late failure (headers already sent): Appends <!-- error_id=... --> tail only
-	 *   $this->renderResponse(500, $id, ['type' => 'shutdown', 'title' => 'Fatal Error']);
-	 *
-	 * Failure:
-	 * - Never throws. If emission fails, we still terminate cleanly; logging occurred earlier in the flow
-	 *
-	 * @param int                 $status  HTTP status code to emit (when replaceable)
-	 * @param string              $errorId Correlation id shown to the client
-	 * @param array<string,mixed> $payload Optional keys: 'title','message','details','type'
-	 *
+	 * @param  int                  $status   HTTP status, sent only while headers are not sent.
+	 * @param  string               $errorId  Error id shown to the client.
+	 * @param  array<string,mixed>  $payload  Optional keys title, message, details and type.
 	 * @return never
 	 */
 	private function renderResponse(int $status, string $errorId, array $payload): never {
 		
 		// Decide negotiation and whether we can still replace the response
 		$wantsJson  = $this->wantsJson();
-		$canReplace = !\headers_sent(); // Decisive criterion
+		$canReplace = !\headers_sent();
 
 		if ($canReplace) {
 			// Clean slate: Drop any partial output so we present one coherent response
@@ -847,21 +623,10 @@ final class ErrorHandler extends BaseService {
 
 
 	/**
-	 * Decide whether the client prefers JSON
+	 * Tell whether the client prefers JSON.
 	 *
-	 * Behavior:
-	 * - Returns true for XHR requests or when Accept contains "application/json" or "+json"
-	 *
-	 * Notes:
-	 * - Best-effort heuristic; empty Accept means "probably HTML"
-	 *
-	 * Typical usage:
-	 *   if ($this->wantsJson()) { echo json_encode($payload); } else { echo $this->renderHtml(...); }
-	 *
-	 * Failure:
-	 * - None. Never throws.
-	 *
-	 * @return bool
+	 * @return bool  True for X-Requested-With: XMLHttpRequest, or an Accept header that contains
+	 *               application/json or +json.
 	 */
 	private function wantsJson(): bool {
 		
@@ -879,21 +644,9 @@ final class ErrorHandler extends BaseService {
 
 
 	/**
-	 * Decide whether it is safe to append an HTML tail
+	 * Tell whether an HTML comment may be appended to a response that is already under way.
 	 *
-	 * Behavior:
-	 * - Returns true when Accept is empty or includes "text/html"
-	 *
-	 * Notes:
-	 * - Used only after headers/body started to avoid corrupting JSON streams
-	 *
-	 * Typical usage:
-	 *   if ($this->wantsHtmlTail()) { echo "<!-- error_id=... -->"; }
-	 *
-	 * Failure:
-	 * - None. Never throws.
-	 *
-	 * @return bool
+	 * @return bool  True when the Accept header is empty or contains text/html.
 	 */
 	private function wantsHtmlTail(): bool {
 		$ct = (string)($_SERVER['HTTP_ACCEPT'] ?? '');
@@ -902,19 +655,12 @@ final class ErrorHandler extends BaseService {
 
 
 	/**
-	 * Clear all active output buffers
+	 * Discard buffered output, as far down the buffer stack as PHP allows.
 	 *
 	 * Behavior:
-	 * - Pops removable buffers; a non-removable buffer is content-cleared (if cleanable) and left in place
-	 *
-	 * Notes:
-	 * - Removes leftovers where possible; a non-removable buffer may remain but is emptied when cleanable
-	 *
-	 * Typical usage:
-	 *   $this->clearAllBuffers(); // Right before writing status line + headers + body
-	 *
-	 * Failure:
-	 * - None. Suppresses PHP notices during cleanup
+	 * - Removes output buffers from the top down, discarding their content.
+	 * - Stops at the first buffer that cannot be removed, after emptying it when it can be cleaned;
+	 *   that buffer and the ones below it stay.
 	 *
 	 * @return void
 	 */
@@ -935,31 +681,24 @@ final class ErrorHandler extends BaseService {
 
 
 	/**
-	 * Render an HTML error page using primary/failsafe templates with a strict inline fallback.
+	 * Build the HTML error page from the primary template, the failsafe template or a built-in page.
 	 *
 	 * Behavior:
-	 * - Builds a bounded, template-friendly $data array (safe strings; dev details are gated).
-	 * - Tries the primary template; if it fails or is missing, tries the failsafe template.
-	 * - If both templates are unavailable or error out, returns a minimal inline HTML page.
-	 * - Sanitizes title/message for the inline path to avoid XSS; details are JSON-encoded.
+	 * - Tries the primary template, then the failsafe template; a missing file, or a template
+	 *   that throws, is skipped.
+	 * - A template gets $data with keys language, status, status_text, error_id, title, message,
+	 *   details, request_id and year; details is null without developer detail.
+	 * - The built-in page escapes title and message, and shows details as escaped JSON with
+	 *   developer detail.
+	 * - Sends no headers.
 	 *
 	 * Notes:
-	 * - No headers are sent here; caller (renderResponse) already set status and content type.
-	 * - Templates are executed in isolation via includeTemplate(); failures do not recurse.
-	 * - Developer details are only exposed when $this->devDetail is true.
-	 * - The heredoc markup contains no comments by design (keeps the payload clean).
+	 * - The values in $data are not escaped; a template must escape what it prints.
 	 *
-	 * Typical usage:
-	 *   Called by renderResponse() when the negotiated content is HTML.
-	 *
-	 * Examples:
-	 *   // Build the HTML body for a 500 response:
-	 *   $html = $this->renderHtml(500, $errorId, ['title' => 'Internal Error', 'message' => 'Please try again later.']);
-	 *
-	 * @param int                 $status   HTTP status code (for title/status text and badges).
-	 * @param string              $errorId  Correlation identifier to surface to end users.
-	 * @param array<string,mixed> $payload  Optional keys: 'title','message','details','type'.
-	 * @return string HTML markup for the error body (full page or minimal inline fallback).
+	 * @param  int                  $status   HTTP status shown on the page.
+	 * @param  string               $errorId  Error id shown on the page.
+	 * @param  array<string,mixed>  $payload  Optional keys title, message, details and type.
+	 * @return string  Complete HTML document.
 	 */
 	private function renderHtml(int $status, string $errorId, array $payload): string {
 		
@@ -974,7 +713,7 @@ final class ErrorHandler extends BaseService {
 			$language = '';
 		}
 
-		// Build a compact context for templates; only safe, bounded values
+		// Template data. The values are raw; a template escapes what it prints.
 		$data = [
 			'language'   => $language,  // Exposed for templates that localize copy
 			'status'     => $status,
@@ -1051,28 +790,21 @@ HTML;
 
 
 	/**
-	 * Include a PHP template safely and capture its output.
+	 * Run a PHP template and return what it printed.
 	 *
 	 * Behavior:
-	 * - Exposes variables to the template under a single $data-array.
-	 * - Buffers output; returns the rendered markup on success.
-	 * - On any Throwable, discards the buffer and returns null.
+	 * - Returns the captured output, or null when the template throws; partial output is discarded.
 	 *
 	 * Notes:
-	 * - No fallback here; the caller decides the next rendering option.
-	 * - Prevents partial output leaks by always cleaning the buffer.
+	 * - The template runs in this method's scope: Besides $data it sees $file, $vars and $this.
 	 *
-	 * Typical usage:
-	 *   $html = $this->includeTemplate($path, $vars);
-	 *   if ($html !== null) { return $html; }
-	 *
-	 * @param string                $file Absolute path to the PHP template file.
-	 * @param array<string,mixed>   $vars Data made available to the template as $data.
-	 * @return ?string Rendered template, or null if inclusion failed.
+	 * @param  string               $file  PHP template file.
+	 * @param  array<string,mixed>  $vars  Exposed to the template as $data.
+	 * @return string|null  Template output, or null when the template threw.
 	 */
 	private function includeTemplate(string $file, array $vars): ?string {
 		
-		// Keep the template surface clean: Hand over a single $data array.
+		// Hand the values over as one $data array.
 		\extract(['data' => $vars], EXTR_SKIP);
 
 		// Capture everything the template prints. No half-printed templates today.
@@ -1094,57 +826,30 @@ HTML;
 
 
 
-
-
-
-
-/*
- *---------------------------------------------------------------
- * LOGGING & ROTATION (JSONL)
- *---------------------------------------------------------------
- * PURPOSE
- *   Append robust JSONL records with size-guarded rotation and pruning.
- *
- * NOTES
- *   - Never throw from logging; fail-soft via error_log().
- *   - Rotate using sidecar lock; copy+truncate; timestamped filenames.
- *   - Prune after rotation to keep at most $maxFiles.
- *
- */
+	// ----------------------------------------------------------------
+	// Logging and rotation
+	// ----------------------------------------------------------------
 
 	/**
-	 * Append one JSON line to a log with size-guarded rotation.
+	 * Append one record to a JSONL file, rotating the file first when the line would cross log.max_bytes.
 	 *
 	 * Behavior:
-	 * - Encodes $record once and appends it under an exclusive file lock (best effort).
-	 * - Checks current size under lock; if the next line would exceed $this->maxBytes,
-	 *   it unlocks/closes and asks rotate(...) to re-check current size plus the pending
-	 *   line under the rotation lock before rotating. maxBytes remains a soft threshold
-	 *   under concurrent writers.
-	 * - Never throws to callers; any failure is soft-logged via PHP's error_log.
+	 * - Creates the log directory when it is missing; losing that race to another request is not
+	 *   a failure.
+	 * - Appends the line under an exclusive lock. A record that cannot be encoded is written as
+	 *   {"encode_error":true}.
+	 * - When the directory cannot be created or the file cannot be opened, reports
+	 *   "[CitOmni] writeJsonl failed: <reason>" to PHP's error_log. Nothing is thrown, and a failed
+	 *   write is not detected.
 	 *
 	 * Notes:
-	 * - Uses JSON_PARTIAL_OUTPUT_ON_ERROR to avoid losing the whole event on edge cases.
-	 * - clearstatcache(...) is called before size checks to avoid stale FS metadata.
-	 * - Rotation is delegated to rotate($file, $pendingBytes), which serializes rotations with a sidecar lock.
-	 * - This method is safe to call from within error/exception/shutdown handlers.
+	 * - The file lock is released before rotate() runs, so a writer never waits for the rotation
+	 *   lock while it holds the file lock.
+	 * - log.max_bytes is a soft limit: Concurrent writers can push the live file past it until a
+	 *   later rotation.
 	 *
-	 * Concurrency notes:
-	 * - A failed mkdir() is a failure only if the log directory is still missing, so a
-	 *   writer that loses the race to create it keeps logging.
-	 * - Writers never rotate while holding the main-file lock (prevents deadlocks).
-	 * - Size checks use clearstatcache(...) to avoid stale results.
-	 * - JSON encoding uses JSON_PARTIAL_OUTPUT_ON_ERROR to avoid losing the event.
-	 *
-	 * Typical usage:
-	 *   Append a single event to the live JSONL log from any handler.
-	 *
-	 * Examples:
-	 *   $this->writeJsonl($this->logDir . '/http_err_exception.jsonl', $rec);
-	 *   // Appends one JSON line; rotation is triggered around the configured soft threshold.
-	 *
-	 * @param string               $file   Absolute path to the live JSONL file (e.g., ".../http_err_exception.jsonl").
-	 * @param array<string, mixed> $record Event payload to encode and append.
+	 * @param  string               $file    Live JSONL file.
+	 * @param  array<string,mixed>  $record  Record to append.
 	 * @return void
 	 */
 	private function writeJsonl(string $file, array $record): void {
@@ -1187,7 +892,7 @@ HTML;
 					@\fclose($fh);
 
 					// Rotation takes a sidecar lock and does copy+truncate
-					$this->rotate($file, $lineBytes);  // sidecar-locked, copy+truncate, timestamped name
+					$this->rotate($file, $lineBytes);
 
 					// Back to appending on the fresh file (reopen and re-lock after rotation).
 					$fh = @\fopen($file, 'ab');
@@ -1215,42 +920,29 @@ HTML;
 	
 	
 	/**
-	 * Rotate a JSONL log using a sidecar lock and copy-and-truncate strategy.
+	 * Move a live JSONL file's content to a timestamped sibling, unless the pending line fits after all.
 	 *
 	 * Behavior:
-	 * - Serializes rotations per file using a sidecar lock: "<file>.lock" (LOCK_EX).
-	 * - Locks the live file exclusively, then:
-	 *   1) Rechecks current size plus the pending write under lock and bails if it still fits.
-	 *   2) Builds a unique UTC timestamped sibling name (colon-free; Windows-safe).
-	 *   3) Copies current content to a temp file and truncates the live file to zero.
-	 *   4) Atomically renames the temp to the final rotated name and sets permissions.
-	 * - Releases locks predictably; writers can resume immediately on the live path.
+	 * - Serializes rotations of one file with a sidecar lock, <file>.lock, and holds an exclusive
+	 *   lock on the live file while it works.
+	 * - Returns without rotating when the live file is empty, or when its size plus $pendingBytes
+	 *   fits log.max_bytes.
+	 * - Otherwise copies the content to <base>.<timestamp><ext> and truncates the live file. The
+	 *   timestamp is UTC, such as 20251001T123045.582913Z, with a short hex suffix on a name
+	 *   collision. The live path stays the same, so tailers keep working.
+	 * - The copy is written to a .tmp file and renamed into place; then prune() keeps
+	 *   log.max_files rotations.
+	 * - Reports exceptions to PHP's error_log; nothing is thrown. A file that cannot be opened
+	 *   skips the rotation silently.
 	 *
 	 * Notes:
-	 * - Fail-soft by design: This method never throws; errors are logged via error_log.
-	 * - Retention is delegated to prune(...), called at the end to keep at most $maxFiles.
-	 * - A single record larger than maxBytes may exceed the threshold when the live file is empty;
-	 *   rotating an empty file would not reduce that record. Consecutive oversized records rotate
-	 *   the previous live record before appending the next, so retention may churn one file per record.
-	 * - Works across typical FPM/Apache/Nginx deployments and on Windows (no colons in names).
-	 * - The live file path remains stable; only content is truncated (tailers survive).
-	 * 
-	 * Guarantees (local filesystems with advisory locks):
-	 * - Only one rotation at a time via sidecar lock: <file>.lock (LOCK_EX).
-	 * - Exclusive lock on the live file during copy+truncate.
-	 * - Rotated name is UTC timestamped: <base>.<YmdTHis.uZ><-suffix>.jsonl
-	 *   (colon-free; Windows-safe). On rare collision a short hex suffix is appended.
-	 * - Atomic publish of the rotated file: rename(<tmp>, <final>) within the same directory.
+	 * - The locks are advisory and assume a local filesystem. When the lock file cannot be
+	 *   opened, rotations are not serialized.
+	 * - A record larger than log.max_bytes is appended whole to an empty live file, so consecutive
+	 *   oversized records rotate one file per record.
 	 *
-	 * Typical usage:
-	 *   Called by writeJsonl(...) when the next append would exceed $maxBytes.
-	 *
-	 * Examples:
-	 *   // Internal call path when threshold is hit:
-	 *   // writeJsonl($file, $record) -> rotate($file, strlen($line)) -> prune($file, $this->maxFiles)
-	 *
-	 * @param string $file         Absolute path to the live JSONL file (e.g., ".../http_err_exception.jsonl").
-	 * @param int    $pendingBytes Number of bytes waiting to be appended after rotation.
+	 * @param  string  $file          Live JSONL file.
+	 * @param  int     $pendingBytes  Length of the line waiting to be appended, in bytes.
 	 * @return void
 	 */
 	private function rotate(string $file, int $pendingBytes): void {
@@ -1266,10 +958,11 @@ HTML;
 		try {
 			$threshold = \max(1, (int)$this->maxBytes);
 
-			// Open and exclusively lock the live file; abort if it vanished
+			// Open and exclusively lock the live file; 'c+b' creates it when missing, so a
+			// failure here means it cannot be opened at all.
 			$main = @\fopen($file, 'c+b');
 			if ($main === false) {
-				return; // Nothing to rotate
+				return; // Cannot rotate
 			}
 
 			try {
@@ -1358,30 +1051,16 @@ HTML;
 
 
 	/**
-	 * Prune: Delete oldest rotated JSONL siblings, keeping at most $max.
+	 * Delete the oldest rotations of a JSONL file, keeping the newest $max.
 	 *
 	 * Behavior:
-	 * - Scans for siblings matching "<base>.*<ext>" next to $file.
-	 * - Excludes the live file ($file) itself.
-	 * - Sorts siblings by modification time (newest first) and deletes any beyond $max.
+	 * - Every file next to $file that matches <base>.*<ext>, other than $file itself, counts as a
+	 *   rotation, not only names that rotate() created.
+	 * - Keeps the $max newest by modification time and deletes the rest; a failed deletion is
+	 *   ignored.
 	 *
-	 * Notes:
-	 * - Best-effort and non-throwing: Uses silenced ops to avoid surfacing file-system issues from the error path.
-	 * - Only touches timestamped rotations produced by rotate() that follow the "<base>.<timestamp><ext>" pattern.
-	 * - Ordering uses mtime; ties are rare and acceptable for retention semantics.
-	 *
-	 * Typical usage:
-	 *   Enforce retention after rotate() publishes a new timestamped file.
-	 *
-	 * Examples:
-	 *   // Keep the 20 most recent exception logs:
-	 *   $this->prune(CITOMNI_APP_PATH . '/var/logs/http_err_exception.jsonl', 20);
-	 *
-	 *   // Disable pruning during a forensic session:
-	 *   $this->prune($path, 0); // No-op.
-	 *
-	 * @param string $file Base live JSONL path whose rotated siblings should be pruned.
-	 * @param int    $max  Maximum number of rotated files to keep (0 disables pruning).
+	 * @param  string  $file  Live JSONL file.
+	 * @param  int     $max   Number of rotations to keep; 0 or less deletes nothing.
 	 * @return void
 	 */
 	public function prune(string $file, int $max): void {
@@ -1401,7 +1080,7 @@ HTML;
 		$pattern = $prefix . '.*' . $ext;
 		$list = \glob($pattern, \GLOB_NOSORT) ?: [];
 
-		// Keep only actual rotated files: exclude the live file and non-files (paranoia).
+		// Exclude the live file and anything that is not a regular file.
 		$list = \array_values(\array_filter($list, static fn(string $p) => $p !== $file && \is_file($p)));
 
 		// Sort newest first by mtime. Quiet fs reads to avoid noise if files disappear mid-flight
@@ -1420,44 +1099,22 @@ HTML;
 
 
 
-
-
-
-/*
- *---------------------------------------------------------------
- * CONTEXT, IDS & RECORD SHAPING
- *---------------------------------------------------------------
- * PURPOSE
- *   Build base log records and generate correlation identifiers.
- *
- * NOTES
- *   - Detect incoming X-Request-Id when present; sanitize it.
- *   - Scrub sensitive context keys before logging.
- *
- */
+	// ----------------------------------------------------------------
+	// Records and ids
+	// ----------------------------------------------------------------
 
 	/**
-	 * Build a canonical baseline for log records tied to the current request.
+	 * Build the fields every log record shares.
 	 *
 	 * Behavior:
-	 * - Stamps an ISO 8601 timestamp and includes the correlation id.
-	 * - Normalizes request metadata (method, URI without query, host, UA, IP).
-	 * - Carries caller-supplied category, error id, and HTTP status.
+	 * - The request fields other than request_id come from $_SERVER as sent, or are empty when
+	 *   missing. The query string is cut from the URI, so it cannot leak secrets into the log.
+	 * - ts is ISO 8601 in PHP's default timezone.
 	 *
-	 * Notes:
-	 * - Query string is intentionally stripped to avoid leaking secrets.
-	 * - All request fields are best-effort; empty strings if not available.
-	 *
-	 * Typical usage:
-	 *   $rec = $this->baseRecord('exception', $errorId, 500);
-	 *
-	 * Failure:
-	 * - None. Never throws.
-	 *
-	 * @param string $type     Category such as 'exception'|'shutdown'|'php_error'|'http_error'.
-	 * @param string $errorId  Correlation id for this error event.
-	 * @param int    $status   HTTP status intended for the response.
-	 * @return array<string,mixed>
+	 * @param  string  $type     Event type: exception, shutdown, php_error or http_error.
+	 * @param  string  $errorId  Error id of the event.
+	 * @param  int     $status   HTTP status the event renders.
+	 * @return array{ts:string, error_id:string, type:string, status:int, request:array{method:string, uri:string, host:string, ua:string, ip:string, request_id:string}}
 	 */
 	private function baseRecord(string $type, string $errorId, int $status): array {
 		return [
@@ -1478,25 +1135,11 @@ HTML;
 
 
 	/**
-	 * Derive or mint a stable request correlation id.
+	 * Return the sanitized inbound X-Request-Id, or a new id when nothing survives sanitizing.
 	 *
-	 * Behavior:
-	 * - Prefer the incoming X-Request-Id header; otherwise generate time+random.
-	 *
-	 * Notes:
-	 * - Header value is sanitized to a safe ASCII subset.
-	 *
-	 * Typical usage:
-	 *   Attach to responses and logs for cross-system correlation.
-	 *
-	 * Examples:
-	 *
-	 *   $id = $this->detectRequestId(); // "20251001123456-AB12-1a2b3c4d"
-	 *
-	 * Failure:
-	 * - None. Never throws.
-	 *
-	 * @return string
+	 * @return string  Inbound id, or a new id formatted YYYYMMDDHHMMSS-XXXX-xxxxxxxx with
+	 *                 uppercase and lowercase hex digits.
+	 * @see \CitOmni\Http\Service\ErrorHandler::sanitizeId()  What survives sanitizing.
 	 */
 	private function detectRequestId(): string {
 		
@@ -1509,27 +1152,20 @@ HTML;
 		}
 		
 		// Very cheap, unique-enough id: time + random
-		// Example: 20251001-7H2X-6f4d91c8
+		// Example: 20251001123045-7A2F-6f4d91c8
 		return \date('YmdHis') . '-' . \strtoupper($this->randomHex(2)) . '-' . \substr($this->randomHex(5), 0, 8);
 	}
 
 
 	/**
-	 * Sanitize a candidate id to a safe ASCII subset.
+	 * Reduce a candidate id to a safe ASCII subset.
 	 *
 	 * Behavior:
-	 * - Truncates to 128 chars, strips everything not in [A-Za-z0-9._-].
+	 * - Cuts the input to 128 bytes, then removes every character other than A-Z, a-z, 0-9, dot,
+	 *   underscore and hyphen.
 	 *
-	 * Notes:
-	 * - Deterministic transformation; useful for headers and filenames.
-	 *
-	 * Typical usage:
-	 *   $safe = $this->sanitizeId($possiblyHostile);
-	 *
-	 * Failure:
-	 * - None. Never throws.
-	 *
-	 * @return string
+	 * @param  string  $s  Candidate id, possibly hostile.
+	 * @return string  Sanitized id; empty when nothing survives.
 	 */
 	private function sanitizeId(string $s): string {
 		$s = \substr($s, 0, 128);  // Hard length cap
@@ -1538,22 +1174,10 @@ HTML;
 
 
 	/**
-	 * Generate a new internal error id.
-	 *
-	 * Behavior:
-	 * - Returns "e_" + 16 hex chars from random bytes.
-	 *
-	 * Notes:
-	 * - Intended for logs and client-facing correlation.
-	 *
-	 * Typical usage:
-	 *   $errorId = $this->newErrorId(); // e_1a2b3c4d5e6f7a8b
-	 *
-	 * Failure:
-	 * - None. Random generation degrades to a non-cryptographic fallback if random_bytes() fails.
-	 *   Random generation is fail-soft via randomHex().
+	 * Return a new error id: "e_" followed by 16 lowercase hex characters.
 	 *
 	 * @return string
+	 * @see \CitOmni\Http\Service\ErrorHandler::randomHex()  Randomness and its fallback.
 	 */
 	private function newErrorId(): string {
 		return 'e_' . \substr($this->randomHex(8), 0, 16);  // 8 bytes -> 16 hex chars
@@ -1561,16 +1185,14 @@ HTML;
 
 
 	/**
-	 * Return N random bytes as lowercase hex, without ever throwing.
+	 * Return random bytes as lowercase hex, without ever throwing.
 	 *
 	 * Behavior:
-	 * - Uses random_bytes() for cryptographic quality on the happy path.
-	 * - On the (astronomically rare) failure, falls back to mt_rand() so the handlers
-	 *   keep their "never throw" contract. The fallback is not cryptographically
-	 *   strong, but correlation ids do not require that.
+	 * - Uses random_bytes(). If that throws, falls back to mt_rand(), which is not
+	 *   cryptographically strong; correlation ids do not need that.
 	 *
-	 * @param  int    $bytes Number of random bytes to produce.
-	 * @return string Lowercase hex string of length 2*$bytes.
+	 * @param  int  $bytes  Number of random bytes.
+	 * @return string  Hex string of 2 * $bytes characters.
 	 */
 	private function randomHex(int $bytes): string {
 		try {
@@ -1587,32 +1209,18 @@ HTML;
 	
 	
 	/**
-	 * Scrub sensitive keys from a context array (recursive, case-insensitive).
+	 * Return a copy of a context array with the values of sensitive keys replaced by "[redacted]".
 	 *
 	 * Behavior:
-	 * - Redacts values for known sensitive keys like "authorization", "cookie", "password", "token", etc.
-	 * - Compares keys case-insensitively (e.g., "Authorization" and "authorization" both match).
-	 * - Recurses into nested arrays; scalars and non-matching keys are copied as-is.
-	 * - Does not mutate the input array; returns a sanitized copy.
+	 * - A key is sensitive when its lowercase form is one of authorization, cookie, set-cookie,
+	 *   password, passwd, token, access_token, refresh_token, secret, api_key or apikey.
+	 * - Nested arrays are scrubbed at every depth; objects are not traversed.
 	 *
 	 * Notes:
-	 * - Only keys are matched, not values. If you log ad-hoc payloads, ensure keys are well-formed.
-	 * - Objects are not traversed; expected input is array<string, mixed>.
-	 * - The redact list is intentionally conservative. Extend it if your app carries extra secrets.
+	 * - Only keys are matched: A secret under any other key, or inside a value, is logged as it is.
 	 *
-	 * Typical usage:
-	 *   Sanitize router/context fields before logging an HTTP error event.
-	 *
-	 * Examples:
-	 *   $safe = $this->scrubContext([
-	 *     'Authorization' => 'Bearer abc123',
-	 *     'note'          => 'ok',
-	 *     'nested'        => ['password' => 'shh']
-	 *   ]);
-	 *   // Result: ['Authorization' => '[redacted]', 'note' => 'ok', 'nested' => ['password' => '[redacted]']]
-	 *
-	 * @param array<string,mixed> $ctx Arbitrary context payload (headers, route params, etc.).
-	 * @return array<string,mixed> Sanitized copy with sensitive values replaced by "[redacted]".
+	 * @param  array<array-key,mixed>  $ctx  Context to scrub.
+	 * @return array<array-key,mixed>  Scrubbed copy.
 	 */
 	private function scrubContext(array $ctx): array {
 
@@ -1643,44 +1251,15 @@ HTML;
 
 
 
-
-
-
-
-/*
- *---------------------------------------------------------------
- * CLASSIFICATION & STATUS TEXT
- *---------------------------------------------------------------
- * PURPOSE
- *   Map PHP error types and HTTP codes to internal decisions/labels.
- *
- * NOTES
- *   - isFatal() defines which PHP errors are handled in shutdown().
- *   - statusText() provides human-readable HTTP status text.
- *
- */
+	// ----------------------------------------------------------------
+	// Classification
+	// ----------------------------------------------------------------
 
 	/**
-	 * Tell whether a PHP error number belongs to the fatal-class set.
+	 * Tell whether a PHP error level is fatal-class.
 	 *
-	 * Behavior:
-	 * - Returns true for E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR, and E_USER_ERROR.
-	 *
-	 * Notes:
-	 * - Keep in sync with the shutdown path; E_USER_ERROR is treated as fatal to avoid partial output.
-	 *
-	 * Typical usage:
-	 *   Gate logging/rendering paths in handlers to prevent duplicates and half responses.
-	 *
-	 * Examples:
-	 *
-	 *   // Fatal: Hand over to shutdown handler
-	 *   if ($this->isFatal($errno)) { return true; }
-	 *
-	 * Failure:
-	 * - None. Pure function; does not throw.
-	 *
-	 * @return bool
+	 * @param  int  $errno  PHP error level.
+	 * @return bool  True for E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR and E_USER_ERROR.
 	 */
 	private function isFatal(int $errno): bool {
 		// Policy: Treat user-triggered fatal (E_USER_ERROR) like a core fatal to avoid partial output
@@ -1689,26 +1268,10 @@ HTML;
 
 
 	/**
-	 * Map an HTTP status code to a short English reason phrase.
+	 * Return the reason phrase for an HTTP status.
 	 *
-	 * Behavior:
-	 * - Returns a stable phrase for common codes; falls back to "HTTP Error".
-	 *
-	 * Notes:
-	 * - Intentionally minimal list; avoid coupling to full IANA registry.
-	 *
-	 * Typical usage:
-	 *   Use for page titles and default messages when composing error responses.
-	 *
-	 * Examples:
-	 *
-	 *   // 404 -> "Not Found"; 418 -> "HTTP Error"
-	 *   $text = $this->statusText(404);
-	 *
-	 * Failure:
-	 * - None. Unknown codes return "HTTP Error".
-	 *
-	 * @return string
+	 * @param  int  $code  HTTP status.
+	 * @return string  The phrase for a status on the curated list, otherwise "HTTP Error".
 	 */
 	private function statusText(int $code): string {
 		
@@ -1732,40 +1295,22 @@ HTML;
 
 
 
-
-
-
-/*
- *---------------------------------------------------------------
- * TRACE CAPTURE & SAFE STRINGIFICATION
- *---------------------------------------------------------------
- * PURPOSE
- *   Produce bounded, safe traces and argument dumps for logs/dev detail.
- *
- * NOTES
- *   - All limits (frames/args/depth/strlen) are enforced here.
- *   - Never throw; always return printable strings/arrays.
- *
- * METHODS
- *   private function traceArray(array $trace, string $file, int $line): array
- *   private function formatCall(array $f): string
- *   private function dumpArg(mixed $v, int $depth): string
- *   private function truncate(string $s): string
- *   private function dumpArray(array $a, int $depth): string
- */
+	// ----------------------------------------------------------------
+	// Trace formatting
+	// ----------------------------------------------------------------
 
 	/**
-	 * Format a backtrace into a safe, bounded array for logs/templates.
+	 * Format a backtrace as a bounded list of frames for logs and developer detail.
 	 *
 	 * Behavior:
-	 * - Prepends the throw site as the first frame.
-	 * - Caps frames at $this->traceMaxFrames and appends an ellipsis marker if truncated.
-	 * - Uses formatCall(...) for compact call + args rendering.
+	 * - The first frame is the throw site, with function "(thrown)".
+	 * - A trace longer than render.detail.trace.max_frames is cut there and ends with
+	 *   ['ellipsis' => true].
 	 *
-	 * @param array<int,array<string,mixed>> $trace Raw trace from Throwable::getTrace().
-	 * @param string                         $file  Throw-site file.
-	 * @param int                            $line  Throw-site line.
-	 * @return array<int,array<string,mixed>> Bounded, log-friendly frames.
+	 * @param  array<int,array<string,mixed>>  $trace  Trace from Throwable::getTrace().
+	 * @param  string                          $file   Throw-site file.
+	 * @param  int                             $line   Throw-site line.
+	 * @return list<array{file:string, line:int, function:string}|array{file:string, line:int, call:string}|array{ellipsis:true}>
 	 */
 	private function traceArray(array $trace, string $file, int $line): array {
 		
@@ -1793,17 +1338,15 @@ HTML;
 
 
 	/**
-	 * Render one trace frame's callable with a compact, safe argument preview.
+	 * Render one trace frame as "Class->method(args)", "Class::method(args)" or "function(args)".
 	 *
 	 * Behavior:
-	 * - Builds "Class->method(...)" or "function(...)".
-	 * - Caps arguments at $this->traceMaxItems; uses dumpArg(...) per value.
+	 * - Shows at most render.detail.trace.max_array_items arguments, then the ellipsis marker.
+	 * - A frame without a function name shows "unknown".
 	 *
-	 * Notes:
-	 * - Unknown fields degrade gracefully to "unknown".
-	 *
-	 * @param array<string,mixed> $f One frame from a backtrace.
-	 * @return string Human-readable call signature.
+	 * @param  array<string,mixed>  $f  One frame of a backtrace.
+	 * @return string
+	 * @see \CitOmni\Http\Service\ErrorHandler::dumpArg()  How each argument is shown.
 	 */
 	private function formatCall(array $f): string {
 		
@@ -1831,16 +1374,16 @@ HTML;
 
 
 	/**
-	 * Format a single argument for trace output with depth and size limits.
+	 * Render one trace argument as a bounded string.
 	 *
 	 * Behavior:
-	 * - Strings are quoted and truncated via truncate().
-	 * - Arrays delegate to dumpArray() with increased depth.
-	 * - Objects become "object(FQCN)".
+	 * - Strings are quoted and cut, arrays are dumped item by item, objects become
+	 *   "object(<class>)" and other values their literal or type name.
+	 * - At render.detail.trace.max_depth, the value becomes the ellipsis marker.
 	 *
-	 * @param mixed $v     Value to render.
-	 * @param int   $depth Current recursion depth (0 for top-level).
-	 * @return string Safe, single-line representation.
+	 * @param  mixed  $v      Value to render.
+	 * @param  int    $depth  Current nesting depth; 0 for a top-level argument.
+	 * @return string
 	 */
 	private function dumpArg(mixed $v, int $depth): string {
 		
@@ -1863,14 +1406,10 @@ HTML;
 
 
 	/**
-	 * Quote and truncate a string for trace output.
+	 * Quote a string for a trace, cut to render.detail.trace.max_arg_strlen bytes with the ellipsis marker.
 	 *
-	 * Behavior:
-	 * - Returns a single-quoted string.
-	 * - Cuts to $this->traceMaxArgStr chars and appends $this->ellipsis if needed.
-	 *
-	 * @param string $s Input string.
-	 * @return string Quoted, possibly truncated string.
+	 * @param  string  $s  String to quote.
+	 * @return string  Single-quoted string; quotes and line breaks inside it are kept as they are.
 	 */
 	private function truncate(string $s): string {
 		
@@ -1883,16 +1422,15 @@ HTML;
 
 
 	/**
-	 * Render an array for traces with item and depth limits.
+	 * Render an array for a trace as [key=>value, ...].
 	 *
 	 * Behavior:
-	 * - Emits "key=>value" pairs; keys are json-encoded for clarity.
-	 * - Caps items at $this->traceMaxItems; appends an ellipsis when truncated.
-	 * - Delegates value formatting to dumpArg(...).
+	 * - Keys are JSON-encoded; values are rendered by dumpArg() at the given depth.
+	 * - Shows at most render.detail.trace.max_array_items items, then the ellipsis marker.
 	 *
-	 * @param array<mixed> $a     Array to render.
-	 * @param int          $depth Current recursion depth.
-	 * @return string Compact, single-line array representation.
+	 * @param  array<array-key,mixed>  $a      Array to render.
+	 * @param  int                     $depth  Nesting depth of the array's items.
+	 * @return string
 	 */
 	private function dumpArray(array $a, int $depth): string {
 		
