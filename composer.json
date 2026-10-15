@@ -25,11 +25,6 @@
 			"CitOmni\\Http\\": "src/"
 		}
 	},
-	"autoload-dev": {
-		"psr-4": {
-			"CitOmni\\Http\\Tests\\": "tests/"
-		}
-	},
 	"suggest": {
 		"ext-json": "Faster JSON handling for Response/ErrorHandler",
 		"ext-fileinfo": "Accurate MIME detection for Response::download()",
