@@ -43,8 +43,9 @@ use CitOmni\Kernel\Service\BaseService;
  * - Publishes a non-executable JSON manifest last, after the compiled generation is complete.
  * - On a warm cache hit, validates actual dependency paths and metadata without rereading or
  *   reparsing template source.
- * - Cache identity includes compiler version, PHP version, layer mapping and compile flags so
- *   incompatible compiled output is never reused across compiler/runtime configurations.
+ * - Cache identity includes compiler version, PHP version, layer mapping, compile flags and the
+ *   escape charset so incompatible compiled output is never reused across compiler/runtime
+ *   configurations.
  *
  * Notes:
  * - Relevant `cfg->view` configuration is preserved:
@@ -108,7 +109,7 @@ final class TemplateEngine extends BaseService {
 	// ----------------------------------------------------------------
 
 	/** Compiler/cache format version. Increment when emitted PHP or dependency/compiler semantics change. */
-	private const string COMPILER_VERSION = '2';
+	private const string COMPILER_VERSION = '3';
 
 	/** Maximum recursive include depth before failing fast. */
 	private const int MAX_INCLUDE_DEPTH = 16;
@@ -149,6 +150,9 @@ final class TemplateEngine extends BaseService {
 
 	/** Whether CitOmni `{? ... ?}` and `{?= ... ?}` inline-PHP tags are compiled. */
 	private bool $allowPhpTags = true;
+
+	/** Runtime charset from cfg locale.charset: compiled into escaped echoes and exposed as the charset global. */
+	private string $charset = 'UTF-8';
 
 	/** Global cache-busting version used by the `$asset()` helper. */
 	private string $assetVersion = '';
@@ -223,8 +227,10 @@ final class TemplateEngine extends BaseService {
 	 *   override corresponding view configuration values where supported.
 	 * - Normalizes `cfg->view->vars` into static/dynamic definitions and precompiles each
 	 *   include/exclude matcher with compilePathMatcher().
+	 * - Reads cfg locale.charset, or UTF-8 when it is not set, as the charset for escaped output
+	 *   and the charset global.
 	 * - Builds a deterministic cache signature from compiler version, PHP version, short-open-tag
-	 *   state, compile flags and the sorted layer map.
+	 *   state, compile flags, the escape charset and the sorted layer map.
 	 * - Resolves the established cache root to `CITOMNI_APP_PATH . '/var/cache'` without creating
 	 *   the directory until compilation actually needs it.
 	 *
@@ -294,6 +300,10 @@ final class TemplateEngine extends BaseService {
 		$this->trimWhitespace = (bool)($opt['trim_whitespace'] ?? $viewCfg->trim_whitespace);
 		$this->removeHtmlComments = (bool)($opt['remove_html_comments'] ?? $viewCfg->remove_html_comments);
 		$this->allowPhpTags = (bool)($opt['allow_php_tags'] ?? $viewCfg->allow_php_tags);
+
+		// locale.charset is app cfg, read with the kernel's default. compileSyntax() emits it
+		// as a literal, so a template variable named charset cannot change escaping.
+		$this->charset = (string)($this->app->cfg->locale->charset ?? 'UTF-8');
 
 
 		// -- 4. Snapshot passthrough view configuration --------------------
@@ -368,6 +378,7 @@ final class TemplateEngine extends BaseService {
 			$this->trimWhitespace,
 			$this->removeHtmlComments,
 			$this->allowPhpTags,
+			$this->charset,
 			$identityLayers,
 		]));
 	}
@@ -389,8 +400,8 @@ final class TemplateEngine extends BaseService {
 	 * - Builds the final variable scope for this render.
 	 * - Emits the optional `_viewvars` diagnostic before template output when enabled in dev/stage.
 	 * - Resolves or compiles the requested template to an executable cached PHP generation.
-	 * - Extracts final template variables with `EXTR_SKIP` and requires the compiled generation in
-	 *   the established service scope, preserving the existing `$this` and local-scope contract.
+	 * - Runs the generation with the final variables as its locals, in the scope that
+	 *   executeCompiled() defines.
 	 *
 	 * Notes:
 	 * - Template references must use the explicit `relative/path.html@layer` form.
@@ -405,15 +416,14 @@ final class TemplateEngine extends BaseService {
 	 * @return void
 	 * @throws \InvalidArgumentException  On an invalid template reference.
 	 * @throws \RuntimeException  On template compilation, source or cache failure.
+	 * @see \CitOmni\Http\Service\TemplateEngine::executeCompiled()  The template scope.
 	 */
 	public function render(string $ref, array $data = []): void {
 		$vars = $this->buildFinalVars($data);
 		if ($this->app->request->get('_viewvars') !== null) {
 			$this->printViewVars($vars);
 		}
-		$file = $this->compile($ref);
-		\extract($vars, \EXTR_SKIP);
-		require $file;
+		$this->executeCompiled($this->compile($ref), $vars);
 	}
 
 
@@ -442,12 +452,33 @@ final class TemplateEngine extends BaseService {
 		$file = $this->compile($ref);
 		\ob_start();
 		try {
-			\extract($vars, \EXTR_SKIP);
-			require $file;
+			$this->executeCompiled($file, $vars);
 			return (string)\ob_get_contents();
 		} finally {
 			\ob_end_clean();
 		}
+	}
+
+
+	/**
+	 * Run a compiled generation with the final template variables as its locals.
+	 *
+	 * Takes two positional arguments that the signature deliberately does not declare:
+	 * 1) the absolute path of the compiled generation, 2) the final variable map.
+	 *
+	 * Behavior:
+	 * - The template runs with $this bound to this engine and can reach $this->app.
+	 * - Every variable becomes a local under its own key. A key named this, or one that is not a
+	 *   valid variable name, is skipped.
+	 * - Template output and exceptions pass through unchanged.
+	 *
+	 * @return void
+	 */
+	private function executeCompiled(): void {
+		// No parameters and no locals: extract() skips keys that already exist, so any name
+		// declared here would hide the variable with that key from the template.
+		\extract(\func_get_arg(1), \EXTR_SKIP);
+		require \func_get_arg(0);
 	}
 
 
@@ -504,8 +535,8 @@ final class TemplateEngine extends BaseService {
 	 * - The result is memoized by buildFinalVars() for this TemplateEngine/App instance.
 	 * - base_url comes from cfg http.base_url; when that is empty, from CITOMNI_PUBLIC_ROOT_URL
 	 *   if defined. public_root_url prefers the constant when defined.
-	 * - app_name, language and charset come from the app's identity.app_name, locale.language and
-	 *   locale.charset, with '', '' and 'UTF-8' when a key is not set.
+	 * - app_name and language come from the app's identity.app_name and locale.language, with ''
+	 *   when a key is not set. charset is the escape charset that init() reads.
 	 * - `$asset()` applies the configured asset version without discarding an existing query string.
 	 * - `$csrfField()` returns an empty string when the CSRF service is not registered.
 	 * - `$captchaField()` and `$captchaUrl()` return an empty string when the captcha service is not
@@ -539,7 +570,7 @@ final class TemplateEngine extends BaseService {
 			'base_url'	=> $baseUrl,
 			'public_root_url' => $publicUrl,
 			'language'	=> (string)($cfg->locale->language ?? ''),
-			'charset'	=> (string)($cfg->locale->charset ?? 'UTF-8'),
+			'charset'	=> $this->charset,
 
 
 			// -- 3. View passthroughs -----------------------------------------
@@ -1743,7 +1774,7 @@ final class TemplateEngine extends BaseService {
 		$hash = \substr(\hash('sha256', $this->cacheSignature . "\0" . $rel . '@' . $layer), 0, 32);
 
 		// Example cache identity prefix:
-		//   /var/cache/tpl_v2_citomni_admin__foo_bar_html_<identity-hash>
+		//   /var/cache/tpl_v3_citomni_admin__foo_bar_html_<identity-hash>
 		// compile() then publishes:
 		//   <prefix>_<generation-sha256>.php
 		//   <prefix>.meta.json
@@ -2221,7 +2252,8 @@ final class TemplateEngine extends BaseService {
 	 *
 	 * Behavior:
 	 * - Output:
-	 *   1) `{{ expr }}` emits HTML-escaped output using the runtime charset.
+	 *   1) `{{ expr }}` emits HTML-escaped output in the charset that init() reads, compiled in as
+	 *      a literal; no template variable changes it.
 	 *   2) `{{{ expr }}}` emits raw output for trusted markup.
 	 * - Assignment:
 	 *   1) `{% set $name = expr %}` assigns to a native local PHP variable.
@@ -2310,6 +2342,9 @@ final class TemplateEngine extends BaseService {
 		// Keep this array in exactly the same order as $patterns above. The $1/$2
 		// references here are intentional compiler-owned replacements. Arbitrary child
 		// block/include source is inserted elsewhere through callbacks and never lands here.
+		// The escape charset is a PHP literal; addcslashes() keeps its backslashes and dollar
+		// signs literal in the replacement.
+		$charset = \addcslashes(\var_export($this->charset, true), '\\$');
 		$replacements = [
 			// Custom inline PHP. Disabled forms compile to an empty string.
 			$this->allowPhpTags ? '<?php echo $1; ?>' : '',
@@ -2317,7 +2352,7 @@ final class TemplateEngine extends BaseService {
 
 			// Raw and escaped output.
 			'<?php echo $1; ?>',
-			'<?php echo htmlspecialchars($1 ?? "", \ENT_QUOTES | \ENT_SUBSTITUTE, $charset ?? "UTF-8"); ?>',
+			'<?php echo htmlspecialchars($1 ?? "", \ENT_QUOTES | \ENT_SUBSTITUTE, ' . $charset . '); ?>',
 
 			// Assignment and control flow.
 			'<?php $$1 = $2; ?>',

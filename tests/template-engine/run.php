@@ -32,6 +32,7 @@ declare(strict_types=1);
 require dirname(__DIR__) . '/bootstrap.php';
 
 use CitOmni\Http\Tests\App;
+use CitOmni\Http\Tests\Cfg;
 use CitOmni\Http\Tests\CountingProvider;
 use function CitOmni\Http\Tests\makeRoot;
 use function CitOmni\Http\Tests\removeTree;
@@ -273,6 +274,13 @@ TPL,
 		same('APP', (new $class(new App(['app' => $root . '/templates'])))->renderToString('same.html@app'));
 		same('PROVIDER', (new $class(new App(['app' => $root . '/provider'])))->renderToString('same.html@app'));
 	});
+	test('Locale charset changes get distinct identities', function () use ($root, $layers) {
+		writeTemplate($root, 'charset.html', '{{ $value }}');
+		$latin = new App($layers); $latin->cfg = new Cfg(['locale' => ['language' => 'da', 'charset' => 'ISO-8859-1']] + $latin->cfg->toArray());
+		same("\u{FFFD}", engine()->renderToString('charset.html@app', ['value' => "\xFF"]));
+		same("\xFF", engine(app: $latin)->renderToString('charset.html@app', ['value' => "\xFF"]));
+		same("\u{FFFD}", engine()->renderToString('charset.html@app', ['value' => "\xFF"]));
+	});
 	test('Corrupt manifest rebuilt without evaluating its content', function () use ($root) {
 		writeTemplate($root, 'manifest.html', 'ok'); $e = engine(); $e->renderToString('manifest.html@app');
 		$base = callPrivate($e, 'cacheFileName', 'manifest.html', 'app');
@@ -416,7 +424,14 @@ TPL;
 		same('https://example.test/base/captcha.png?id=00ff', $globals['captchaUrl']());
 		$captcha->enabled = false; same('', $globals['captchaField']()); same('', $globals['captchaUrl']()); same(1, $captcha->issued);
 	});
-	test('Legacy local variable scope retained', fn() => same('yes', renderSource('{{ isset($this, $ref, $data, $vars, $file) ? "yes" : "no" }}')));
+	test('Template scope has the engine and no engine locals', fn() => same('app:none', renderSource('{{ isset($this->app) ? "app" : "none" }}:{{ isset($ref) || isset($data) || isset($vars) || isset($file) ? "leak" : "none" }}', ['this' => 'X'])));
+	test('Controller keys ref, data, vars and file reach the template', function () use ($root) {
+		writeTemplate($root, 'engine-names.html', '{{ $ref }}{{ $data }}{{ $vars }}{{ $file }}');
+		$data = ['ref' => 'R', 'data' => 'D', 'vars' => 'V', 'file' => 'F']; $e = engine();
+		same('RDVF', $e->renderToString('engine-names.html@app', $data));
+		ob_start(); $e->render('engine-names.html@app', $data); same('RDVF', ob_get_clean());
+	});
+	test('Template variables do not change the escape charset', fn() => same("ISO-8859-1:\u{FFFD}\u{FFFD}", renderSource('{{ $charset }}:{{ $value }}{% set $charset = "ISO-8859-1" %}{{ $value }}', ['value' => "\xFF", 'charset' => 'ISO-8859-1'])));
 	test('render() output equals renderToString()', function () use ($root) {
 		writeTemplate($root, 'output.html', '<p>{{ $value }}</p>'); $e = engine(); ob_start(); $e->render('output.html@app', ['value'=>'x']); $output = ob_get_clean();
 		same($e->renderToString('output.html@app', ['value'=>'x']), $output);
@@ -477,7 +492,8 @@ TPL;
 {% foreach ([1,2] as $i) %}{% continue 2; %}{% break; %}{% endforeach %}
 {% block x %}body{% endblock %}{% yield x %}{% extends "base@app" %}
 TPL;
-		foreach ([true,false] as $allow) { same(callPrivate(new $baseline(new App($layers,['allow_php_tags'=>$allow])),'compileSyntax',$source),callPrivate(engine(['allow_php_tags'=>$allow]),'compileSyntax',$source)); }
+		// The baseline escaped with $charset from template scope; the engine compiles in locale.charset, UTF-8 here.
+		foreach ([true,false] as $allow) { same(str_replace('$charset ?? "UTF-8"', "'UTF-8'", callPrivate(new $baseline(new App($layers,['allow_php_tags'=>$allow])),'compileSyntax',$source)),callPrivate(engine(['allow_php_tags'=>$allow]),'compileSyntax',$source)); }
 	});
 
 	// Concurrent compilation and publication in worker processes (worker.php). Each phase starts
@@ -543,11 +559,12 @@ TPL;
 		}
 		test('Parallel writes leave one generation, one manifest, one lock and no temporary files', function () use ($parallelRoot) {
 			$cache = $parallelRoot . '/var/cache';
-			$generations = glob($cache . '/tpl_v2_*.php');
-			$manifests = glob($cache . '/tpl_v2_*.meta.json');
+			// Any compiler version, so the case also holds for an earlier engine under test.
+			$generations = glob($cache . '/tpl_v*.php');
+			$manifests = glob($cache . '/tpl_v*.meta.json');
 			same(1, count($generations));
 			same(1, count($manifests));
-			same(1, count(glob($cache . '/tpl_v2_*.lock')));
+			same(1, count(glob($cache . '/tpl_v*.lock')));
 			same([], glob($cache . '/*.tmp'));
 			$manifest = json_decode(file_get_contents($manifests[0]), true, 512, JSON_THROW_ON_ERROR);
 			same(true, str_contains(basename($generations[0]), $manifest['generation']));
