@@ -523,6 +523,12 @@ $quaternary_label_txt	= (string)($txt['page_txt']['quaternary_label'] ?? 'Report
 			/**
 			 * FULL prefill (fills all relevant fields in the issue form).
 			 * Note: Dropdowns (sev, pkg) cannot be prefilled via URL.
+			 *
+			 * Contract with the issue form: 'template' is the file name of the form and every key
+			 * except 'title' is a field id in it. The form is owned by citomni/.github, at
+			 * .github/ISSUE_TEMPLATE/citomni_error.yml, so a rename of the file or of a field id
+			 * there must be mirrored here, or that prefill is lost without any error. The same
+			 * applies to $paramsMinimal.
 			 */
 			$paramsFull = [
 				'template' => 'citomni_error.yml',
