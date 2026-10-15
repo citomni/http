@@ -94,7 +94,10 @@ function ok(bool $condition, string $message): void {
  * - Every ->cfg property counts as App cfg.
  * - A chain ends at a method call (->toArray()), at a dynamic property name and at array
  *   access. A named function starts a new scope; a closure body keeps the enclosing one.
- *   Variables are not followed across functions or through arrays.
+ *   Variables are not followed across functions or through arrays, and a cfg node held
+ *   in a property ($this->csrf = $this->app->cfg->security->csrf) is not followed at all.
+ * - A ?? after a closing parenthesis (($cfg->port) ?? 1) is not seen, so that read counts
+ *   as unguarded. ?: is no guard, since the read still throws on a missing key.
  *
  * @param  string  $srcDir  Absolute path to the package src/ directory.
  * @return list<array{file: string, line: int, path: string, guarded: bool, array: bool}>  One row per read.
@@ -107,7 +110,8 @@ function scanCfgReads(string $srcDir): array {
 			continue;
 		}
 		$relative = \str_replace('\\', '/', \substr($file->getPathname(), \strlen($srcDir) + 1));
-		$tokens = \array_values(\array_filter(\token_get_all((string)\file_get_contents($file->getPathname())),
+		// TOKEN_PARSE tokenizes a method named after a keyword (list, print, default) as T_STRING, so it starts a scope.
+		$tokens = \array_values(\array_filter(\token_get_all((string)\file_get_contents($file->getPathname()), \TOKEN_PARSE),
 			static fn(mixed $token): bool => !\is_array($token) || !\in_array($token[0], [\T_WHITESPACE, \T_COMMENT, \T_DOC_COMMENT], true)));
 		$is = static fn(int $i, int|string $kind, ?string $text = null): bool => isset($tokens[$i])
 			&& (\is_array($tokens[$i]) ? $tokens[$i][0] === $kind && ($text === null || $tokens[$i][1] === $text) : $tokens[$i] === $kind);

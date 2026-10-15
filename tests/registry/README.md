@@ -31,5 +31,6 @@ The package owns a path when its root is in `CFG_HTTP`. `security` is shared wit
 ## Not covered
 
 - Reads from arrays: `ErrorHandler` merges `error_handler` with its options into an array and reads that, `Cookie` and `Session` read `toArray()` results, and `Session::refuseRemovedOptions()` checks with `??` for keys the baseline dropped on purpose.
-- A chain ends at a method call (`->toArray()`) and at a dynamic property name. A named function starts a new scope; a closure body keeps the enclosing one. Variables are not followed across functions or through arrays.
+- A chain ends at a method call (`->toArray()`) and at a dynamic property name. A named function starts a new scope; a closure body keeps the enclosing one. Variables are not followed across functions or through arrays, and a cfg node held in a property is not followed at all.
+- A `??` after a closing parenthesis (`($cfg->port) ?? 1`) is not seen, so that read counts as unguarded. `?:` is no guard, since the read still throws on a missing key.
 - Every `->cfg` property counts as App cfg.
