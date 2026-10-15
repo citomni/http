@@ -371,7 +371,7 @@ The merge order for HTTP configuration, from lowest to highest priority, is:
 5. `config/citomni_cfg.{ENV}.php`.
 6. `config/citomni_http_cfg.{ENV}.php`.
 
-Associative values are merged by key with later values taking precedence. Lists are replaced rather than accumulated. Configuration is exposed through the read-only `$this->app->cfg` tree; absent properties fail fast on direct access, while `??` is safe for optional keys.
+Associative values are merged by key with later values taking precedence. Lists are replaced rather than accumulated. Configuration is exposed through the read-only `$this->app->cfg` tree; a direct read of an absent key throws `\OutOfBoundsException`. See [Configuration reference](#configuration-reference) for which read form to use.
 
 Example `config/citomni_http_cfg.prod.php`:
 
@@ -1806,7 +1806,13 @@ The baseline comes from `\CitOmni\Http\Boot\Registry::CFG_HTTP`. The table is an
 | `http.slug` | Optional policy keys | Slugger service |
 | `http.tags` | Optional policy keys | Tags service |
 
-Config keys are read-only when accessed through `$this->app->cfg`. Missing nested keys can be defaulted deliberately with `??`; a direct read of an unknown key may fail. The app's final configuration is the merged result of the package, providers, and application overlays, not the vendor array alone.
+Config keys are read-only when accessed through `$this->app->cfg`. A direct read of a missing key throws `\OutOfBoundsException`; `??` and `isset()` check every node on the path and never throw on a missing key. Choose the form by who owns the key:
+
+- The app reads keys it sets in its own config files directly, without `??`.
+- Other packages, and app code reading a key it does not set, read the keys above with `?? <default>`: they belong to citomni/http, and most exist in HTTP mode only. Example: `(bool)($this->app->cfg->security->captcha_protection ?? true)`.
+- Use `isset()` only to branch on whether a node exists.
+
+The app's final configuration is the merged result of the package, providers, and application overlays, not the vendor array alone.
 
 ### Environment configuration
 
