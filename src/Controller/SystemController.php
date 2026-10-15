@@ -182,7 +182,7 @@ final class SystemController extends BaseController {
 
 		$canonicalBase = \defined('CITOMNI_PUBLIC_ROOT_URL')
 			? (string)\CITOMNI_PUBLIC_ROOT_URL
-			: (string)($this->app->cfg->http->base_url ?? '');
+			: (string)$this->app->cfg->http->base_url;
 		$canonical = \rtrim($canonicalBase, '/') . '/_system/appinfo.html';
 
 		$this->app->tplEngine->render($this->routeConfig['template_file'] . '@' . $this->routeConfig['template_layer'], [
@@ -794,11 +794,11 @@ final class SystemController extends BaseController {
 
 		$cfg = $this->app->cfg->webhooks;
 
-		$headerSignature = (string)($cfg->header_signature ?? 'HTTP_X_CITOMNI_SIGNATURE');
-		$headerTimestamp = (string)($cfg->header_timestamp ?? 'HTTP_X_CITOMNI_TIMESTAMP');
-		$headerNonce = (string)($cfg->header_nonce ?? 'HTTP_X_CITOMNI_NONCE');
+		$headerSignature = (string)$cfg->header_signature;
+		$headerTimestamp = (string)$cfg->header_timestamp;
+		$headerNonce = (string)$cfg->header_nonce;
 
-		$rawAllowedIps = $cfg->allowed_ips ?? [];
+		$rawAllowedIps = $cfg->allowed_ips;
 		if ($rawAllowedIps instanceof \CitOmni\Kernel\Cfg) {
 			$rawAllowedIps = $rawAllowedIps->toArray();
 		}
@@ -848,9 +848,9 @@ final class SystemController extends BaseController {
 
 			'webhooks' => [
 				'enabled' => $this->app->webhooksAuth->isEnabled(),
-				'bind_context' => (bool)($cfg->bind_context ?? true),
-				'ttl_seconds' => (int)($cfg->ttl_seconds ?? 300),
-				'ttl_clock_skew_tolerance' => (int)($cfg->ttl_clock_skew_tolerance ?? 60),
+				'bind_context' => (bool)$cfg->bind_context,
+				'ttl_seconds' => (int)$cfg->ttl_seconds,
+				'ttl_clock_skew_tolerance' => (int)$cfg->ttl_clock_skew_tolerance,
 				'allowed_ips_configured' => $allowedIpsConfigured,
 			],
 		], 200);

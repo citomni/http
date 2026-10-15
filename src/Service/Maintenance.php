@@ -186,12 +186,12 @@ class Maintenance extends BaseService {
 			\header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
 			\header('Pragma: no-cache');
 			\header('X-Robots-Tag: noindex, noarchive');
-			\header('Content-Type: text/html; charset=' . (string)$this->app->cfg->locale->charset);
+			\header('Content-Type: text/html; charset=' . (string)($this->app->cfg->locale->charset ?? 'UTF-8'));
 			\header('Connection: close');
 		}
 
 		// Optional branded template (kept deliberately simple & deterministic)
-		$template = (string)($this->app->cfg->maintenance->flag->template ?? '');
+		$template = (string)$this->app->cfg->maintenance->flag->template;
 		if ($template !== '' && \is_file($template) && \is_readable($template)) {
 
 			// Variables available to the template (intentionally limited)
@@ -332,10 +332,10 @@ class Maintenance extends BaseService {
 		}
 
 		// 1) Defaults from cfg (declarative; cfg does not depend on runtime)
-		$cfgDefaultRetry = \max(0, (int)($this->app->cfg->maintenance->flag->default_retry_after ?? 300));
-		$cfgAllowlist    = \is_array($this->app->cfg->maintenance->flag->allowed_ips ?? null)
-			? (array)$this->app->cfg->maintenance->flag->allowed_ips
-			: [];
+		$cfgDefaultRetry = \max(0, (int)$this->app->cfg->maintenance->flag->default_retry_after);
+		// An empty list is a Cfg node, not an array, and means no allowlist.
+		$cfgAllowlist    = $this->app->cfg->maintenance->flag->allowed_ips;
+		$cfgAllowlist    = \is_array($cfgAllowlist) ? $cfgAllowlist : [];
 
 		// 2) Attempt to load the raw flag (no validation here)
 		$flag     = $this->readFlag();
@@ -411,7 +411,7 @@ class Maintenance extends BaseService {
 		$allowlist = $this->normalizeIps($ips);
 
 		// Write-time Retry-After: prefer explicit override, else cfg default.
-		$retry = \max(0, (int)($this->writeRetryAfter ?? ($this->app->cfg->maintenance->flag->default_retry_after ?? 300)));
+		$retry = \max(0, (int)($this->writeRetryAfter ?? $this->app->cfg->maintenance->flag->default_retry_after));
 
 		// Persist flag (idempotent write on every enable()).
 		$this->writeFlagFile(true, $allowlist, $retry);
@@ -450,7 +450,7 @@ class Maintenance extends BaseService {
 	 */
 	public function disable(): bool {
 		// Write-time Retry-After: prefer explicit override, else cfg default.
-		$retry = $this->writeRetryAfter ?? (int)($this->app->cfg->maintenance->flag->default_retry_after ?? 300);
+		$retry = $this->writeRetryAfter ?? (int)$this->app->cfg->maintenance->flag->default_retry_after;
 		$retry = \max(0, $retry);
 
 		// Write the flag-file
@@ -489,7 +489,7 @@ class Maintenance extends BaseService {
 	 * @return string
 	 */
 	protected function getFlagPath(): string {
-		$path = $this->app->cfg->maintenance->flag->path ?? null;
+		$path = $this->app->cfg->maintenance->flag->path;
 		if (\is_string($path) && $path !== '') {
 			return $path;
 		}
@@ -773,7 +773,7 @@ class Maintenance extends BaseService {
 			$clientIp = $this->app->request->ip();
 
 			// Take cfg literally, unless value is '' or not a string
-			$cfgName  = $this->app->cfg->maintenance->log->filename ?? null;
+			$cfgName  = $this->app->cfg->maintenance->log->filename;
 			$filename = (\is_string($cfgName) && $cfgName !== '') ? $cfgName : 'maintenance.json';
 
 			$payload  = $extra + [

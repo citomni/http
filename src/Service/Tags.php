@@ -15,6 +15,7 @@ declare(strict_types=1);
 
 namespace CitOmni\Http\Service;
 
+use CitOmni\Kernel\Cfg;
 use CitOmni\Kernel\Service\BaseService;
 
 /**
@@ -25,7 +26,7 @@ use CitOmni\Kernel\Service\BaseService;
  * - Keep allocations low and sequencing deterministic.
  *
  * Behavior:
- * - Immutable config loaded once at init(): options > cfg > defaults.
+ * - Immutable config loaded once at init(): options > cfg http.tags.
  * - Case policy: 'preserve' (keep user's casing), 'title' (ucfirst words), 'lower' (lowercase).
  * - Deduplication is performed on normalized labels (case-insensitive).
  *
@@ -70,13 +71,16 @@ final class Tags extends BaseService {
 	 * @return void
 	 */
 	protected function init(): void {
-		$raw = $this->app->cfg->http->tags ?? [];
-		$cfg = \is_array($raw) ? $raw : (method_exists($raw, 'toArray') ? $raw->toArray() : []);
+		$cfg = $this->app->cfg->http->tags;
 
 		$opt = $this->options;
 		$this->options = [];
 
-		$delims = $opt['delimiters'] ?? $cfg['delimiters'] ?? [',',';'];
+		// An empty list is a Cfg node, not an array, and is rejected below.
+		$delims = $opt['delimiters'] ?? $cfg->delimiters;
+		if ($delims instanceof Cfg) {
+			$delims = $delims->toArray();
+		}
 		if (!\is_array($delims) || $delims === []) {
 			throw new \InvalidArgumentException('tags.delimiters must be a non-empty string array.');
 		}
@@ -87,27 +91,27 @@ final class Tags extends BaseService {
 		}
 		$this->delimiters = \array_values(\array_unique($delims));
 
-		$len = $opt['maxLabelLength'] ?? $cfg['maxLabelLength'] ?? 80;
+		$len = $opt['maxLabelLength'] ?? $cfg->maxLabelLength;
 		if (!\is_int($len) || $len < 1) {
 			throw new \InvalidArgumentException('tags.maxLabelLength must be a positive integer.');
 		}
 		$this->maxLabelLength = $len;
 
-		$mode = $opt['caseMode'] ?? $cfg['caseMode'] ?? 'preserve';
+		$mode = $opt['caseMode'] ?? $cfg->caseMode;
 		if (!\in_array($mode, ['preserve','title','lower'], true)) {
 			throw new \InvalidArgumentException('tags.caseMode must be one of: preserve|title|lower.');
 		}
 		$this->caseMode = $mode;
 
-		$this->collapseWhitespace = (bool)($opt['collapseWhitespace'] ?? $cfg['collapseWhitespace'] ?? true);
+		$this->collapseWhitespace = (bool)($opt['collapseWhitespace'] ?? $cfg->collapseWhitespace);
 
-		$pat = $opt['disallowedPattern'] ?? $cfg['disallowedPattern'] ?? null;
+		$pat = $opt['disallowedPattern'] ?? $cfg->disallowedPattern;
 		if ($pat !== null && (!\is_string($pat) || $pat === '')) {
 			throw new \InvalidArgumentException('tags.disallowedPattern must be a non-empty string or null.');
 		}
 		$this->disallowedPattern = $pat;
 
-		$maxTags = $opt['maxTagsPerEntity'] ?? $cfg['maxTagsPerEntity'] ?? null;
+		$maxTags = $opt['maxTagsPerEntity'] ?? $cfg->maxTagsPerEntity;
 		if ($maxTags !== null) {
 			if (!\is_int($maxTags) || $maxTags < 1) {
 				throw new \InvalidArgumentException('tags.maxTagsPerEntity must be null or an integer >= 1.');

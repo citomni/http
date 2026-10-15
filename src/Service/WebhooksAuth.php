@@ -168,33 +168,31 @@ final class WebhooksAuth extends BaseService {
 	protected function init(): void {
 		$c = $this->app->cfg->webhooks;
 
-		$this->enabled = (bool)($c->enabled ?? false);
+		$this->enabled = (bool)$c->enabled;
 
-		$this->ttlSeconds = (int)($c->ttl_seconds ?? 300);
-		$this->clockSkew  = (int)($c->ttl_clock_skew_tolerance ?? 60);
-		$this->bindContext = (bool)($c->bind_context ?? true);
+		$this->ttlSeconds = (int)$c->ttl_seconds;
+		$this->clockSkew  = (int)$c->ttl_clock_skew_tolerance;
+		$this->bindContext = (bool)$c->bind_context;
 
-		$this->headerSignature = (string)($c->header_signature ?? 'HTTP_X_CITOMNI_SIGNATURE');
-		$this->headerTimestamp = (string)($c->header_timestamp ?? 'HTTP_X_CITOMNI_TIMESTAMP');
-		$this->headerNonce     = (string)($c->header_nonce     ?? 'HTTP_X_CITOMNI_NONCE');
+		$this->headerSignature = (string)$c->header_signature;
+		$this->headerTimestamp = (string)$c->header_timestamp;
+		$this->headerNonce     = (string)$c->header_nonce;
 
-		$this->logFailures  = (bool)($c->log_failures  ?? true);
-		$this->logSuccesses = (bool)($c->log_successes ?? false);
-		$this->logFile      = (string)($c->log_file ?? 'webhooks.jsonl');
+		$this->logFailures  = (bool)$c->log_failures;
+		$this->logSuccesses = (bool)$c->log_successes;
+		$this->logFile      = (string)$c->log_file;
 
 		// allowed_ips - may be a Cfg instance (empty array) or a list (non-empty).
-		$rawAllowed = $c->allowed_ips ?? [];
+		$rawAllowed = $c->allowed_ips;
 		if ($rawAllowed instanceof Cfg) {
 			$rawAllowed = $rawAllowed->toArray();
 		}
 		$this->allowedIps = $this->normalizeAllowedIps((array)$rawAllowed);
 
-		// Algo from cfg is meaningful only when present as a non-empty string.
-		// Note: PHP's ?? falls back to RHS when __get() returns null even though
-		// __isset() returns true, so 'algo' => null in baseline correctly defers
-		// to the file's algo or the default. See SUPPORTED_ALGOS for valid values.
+		// Algo from cfg is meaningful only as a non-empty string; null or '' defers to the
+		// secret file's algo, then DEFAULT_ALGO. See SUPPORTED_ALGOS for valid values.
 		$cfgAlgo = '';
-		$cfgAlgoRaw = $c->algo ?? null;
+		$cfgAlgoRaw = $c->algo;
 		if (\is_string($cfgAlgoRaw) && $cfgAlgoRaw !== '') {
 			$cfgAlgo = \strtolower($cfgAlgoRaw);
 			if (!\in_array($cfgAlgo, self::SUPPORTED_ALGOS, true)) {
@@ -223,7 +221,7 @@ final class WebhooksAuth extends BaseService {
 			throw new WebhooksAuthConfigException('WebhooksAuth: header_signature, header_timestamp, and header_nonce must be non-empty.');
 		}
 
-		$secretFile = (string)($c->secret_file ?? '');
+		$secretFile = (string)$c->secret_file;
 		if ($secretFile === '') {
 			throw new WebhooksAuthConfigException('WebhooksAuth: cfg.webhooks.secret_file is required when enabled.');
 		}

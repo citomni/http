@@ -137,7 +137,7 @@ Optional integrations used where registered:
 ## Requirements
 
 - PHP **8.5+**.
-- Composer with `citomni/kernel` **^1.0.2.5** (required by `composer.json`).
+- Composer with `citomni/kernel` **^1.0.2.8** (required by `composer.json`).
 - PHP `ext-intl` in HTTP mode; `Kernel::boot()` checks this explicitly.
 - A writable application `var/` area for the state, cache, log, or nonce features actually used.
 - A web server/front controller configured to forward application requests to `public/index.php`.
@@ -1728,7 +1728,7 @@ $unique = $this->app->slugger->ensureUnique(
 
 `slugExists()` is **illustrative application Repository code**, not a method provided by `citomni/http`. `ensureUnique()` tests the base and numeric suffixes deterministically; it does not lock a database row or guarantee race-free uniqueness. Enforce a unique index at the persistence boundary.
 
-Optional defaults live under `http.slug`, including `separator`, `maxLength`, `lowercase`, `transliterate`, `reserved`, and `allowedPattern`. Constructor options in a service-map definition can override the configured policy.
+The policy lives under `http.slug` in the baseline: `separator`, `lowercase`, `maxLength`, `transliterate`, `reserved`, and `allowedPattern`. Options in the service-map definition of `slugger` override single keys.
 
 ### Tags
 
@@ -1747,7 +1747,7 @@ $pivot = $tags->planPivotChanges([3, 7], [7, 9]);
 
 `resolveTagIds($labels, $getOrCreate)` invokes a caller-supplied callback receiving `(string $label, string $slug): int` for persistence, keeping SQL outside the HTTP service. Use your Repository or Operation to own transactions, tag uniqueness constraints, and pivot writes.
 
-Optional defaults under `http.tags` include `delimiters`, `maxLabelLength`, `caseMode`, `collapseWhitespace`, `disallowedPattern`, and `maxTagsPerEntity`. The tag service depends on `slugger` for tag slugs. It uses Unicode-aware `mb_*` functions for several operations; verify the application's relevant PHP extensions if those features are needed.
+The policy lives under `http.tags` in the baseline: `delimiters`, `maxLabelLength`, `caseMode`, `collapseWhitespace`, `disallowedPattern`, and `maxTagsPerEntity`. Options in the service-map definition of `tags` override single keys. The tag service depends on `slugger` for tag slugs. It uses Unicode-aware `mb_*` functions for several operations; verify the application's relevant PHP extensions if those features are needed.
 
 ---
 
@@ -1803,11 +1803,12 @@ The baseline comes from `\CitOmni\Http\Boot\Registry::CFG_HTTP`. The table is an
 | `maintenance` | `flag`, `backup`, `log` | Atomic maintenance flag and recovery |
 | `webhooks` | `enabled`, `secret_file`, `ttl_seconds`, `ttl_clock_skew_tolerance`, `allowed_ips`, `algo`, `bind_context`, header and log keys | Signed inbound webhooks |
 | `nonce` | `dir`, `max_len`, `purge_probability`, `purge_limit`, `dir_mode`, `file_mode` | Single-use ledger |
-| `http.slug` | Optional policy keys | Slugger service |
-| `http.tags` | Optional policy keys | Tags service |
+| `http.slug` | `separator`, `lowercase`, `maxLength`, `transliterate`, `reserved`, `allowedPattern` | Slugger policy |
+| `http.tags` | `delimiters`, `maxLabelLength`, `caseMode`, `collapseWhitespace`, `disallowedPattern`, `maxTagsPerEntity` | Tags policy |
 
 Config keys are read-only when accessed through `$this->app->cfg`. A direct read of a missing key throws `\OutOfBoundsException`; `??` and `isset()` check every node on the path and never throw on a missing key. Choose the form by who owns the key:
 
+- citomni/http reads the keys it ships directly, and app cfg such as `locale.charset` and `identity.app_name` with a default. Two reads before dispatch keep a guard for a compiled config from before their key existed; `tests/registry/README.md` lists them. `tests/registry/run.php` checks the property reads in `src/`.
 - The app reads keys it sets in its own config files directly, without `??`.
 - Other packages, and app code reading a key it does not set, read the keys above with `?? <default>`: they belong to citomni/http, and most exist in HTTP mode only. Example: `(bool)($this->app->cfg->security->captcha_protection ?? true)`.
 - Use `isset()` only to branch on whether a node exists.
@@ -1860,6 +1861,8 @@ var/cache/routes.http.php
 These are separate from `TemplateEngine`'s compiled template PHP generations and dependency manifests, which also live under the application's cache tree. Do not manually treat individual compiled files as authoritative configuration; the source configuration, providers, and routes remain authoritative inputs.
 
 The HMAC-protected `/_system/reset-cache` and `/_system/warmup-cache` operations can be used by trusted deployment tooling, subject to their actual action contracts. Avoid public or unsigned cache reset hooks.
+
+Rebuild the compiled maps after updating `citomni/http` or a provider, for example with `php bin/citomni cache:warm`. A compiled `cfg.http.php` holds the baseline of the version that built it, and the code reads its own keys directly, so a key that a newer baseline adds is missing until the rebuild.
 
 When a new route or provider registration does not appear, inspect source maps **and** the compiled maps. When a template unexpectedly remains stale, inspect the template cache's writable directory and freshness tracking separately. Neither symptom is fixed by introducing a legacy `view` service.
 
@@ -1938,6 +1941,7 @@ These are the first checks when an HTTP deployment behaves differently from its 
 | Webhook fails authentication | Check `webhooks.enabled`, the private secret file, its lowercase-hex text key, exact method/path/query/body signature, Unix timestamp, allowed IPs, and writable `nonce.dir` |
 | Template does not update | Check `view.template_layers`, compiled template artifacts beneath `var/cache`, template dependency freshness, and whether cache warm reuse is enabled |
 | Endpoint unexpectedly exposes diagnostics | Audit `/_system/` routes, `?_perf`, `?_viewvars`, and dev-only `?raw=1` AppInfo output; restrict the deployment rather than assuming all system routes are protected |
+| `Unknown cfg key` after an update | Rebuild the compiled maps (`php bin/citomni cache:warm` or the signed `/_system/reset-cache`); `var/cache/cfg.http.php` from before the update lacks keys that the new baseline adds |
 | Error page looks wrong or logs are absent | Inspect `error_handler.templates`, `error_handler.log.path`, write permissions, and `error_handler.render.detail.level`; don't look for a removed `security` or `view` service |
 
 The HTTP error-handler logs and `X-Request-Id` make it easier to correlate a failing response with the corresponding server-side record. The source maps and current code remain the authority when diagnosing a possible stale compiled artifact.
@@ -1965,6 +1969,7 @@ tests/fetch-metadata/run.php
 tests/maintenance/run.php
 tests/nonce/run.php
 tests/post-max-size/run.php
+tests/registry/run.php
 tests/request/run.php
 tests/router/run.php
 tests/session/run.php

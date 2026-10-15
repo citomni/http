@@ -16,6 +16,8 @@ namespace CitOmni\Kernel\Service {
 }
 
 namespace CitOmni\Http\Tests {
+	require_once \dirname(__DIR__) . '/src/Boot/Registry.php';
+
 	final class Cfg {
 		public function __construct(private array $data) {}
 		public function __isset(string $key): bool { return isset($this->data[$key]); }
@@ -48,7 +50,7 @@ namespace CitOmni\Http\Tests {
 				'http' => ['base_url' => 'https://example.test/base/'],
 				'locale' => ['language' => 'da', 'charset' => 'UTF-8'],
 				'security' => ['csrf' => ['enabled' => true], 'honeypot_protection' => false, 'form_action_switching' => true, 'captcha_protection' => false],
-				'view' => $view + ['template_layers' => $layers, 'cache_enabled' => true, 'asset_version' => 'v1', 'marketing_scripts' => '<tracking>'],
+				'view' => $view + ['template_layers' => $layers, 'cache_enabled' => true, 'asset_version' => 'v1', 'marketing_scripts' => '<tracking>'] + \CitOmni\Http\Boot\Registry::CFG_HTTP['view'],
 			]);
 			$this->request = new Request();
 		}

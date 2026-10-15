@@ -165,7 +165,9 @@ final class Csrf extends BaseService {
 	 * immutable scalars, validates constraints.
 	 *
 	 * Behavior:
-	 * - All config keys have sensible defaults via ?? (baseline should provide them).
+	 * - Reads its security.csrf keys directly, so a missing key throws \OutOfBoundsException.
+	 * - The flags must be booleans and protect_methods a list; anything else, null included,
+	 *   throws CsrfException instead of switching a check off.
 	 * - trusted_origins entries containing "://" are stored as full origins (strict match).
 	 *   Entries without "://" are stored as bare hostnames (host-only match, less strict).
 	 *   Both are lowercased and default-ports are stripped at init time.
@@ -173,32 +175,37 @@ final class Csrf extends BaseService {
 	 * - Fails fast with CsrfException on invalid config values.
 	 *
 	 * @return void
-	 * @throws CsrfException On invalid config (e.g. token_bytes < 16, empty field_name).
+	 * @throws CsrfException On invalid config (e.g. token_bytes < 16, empty field_name, a flag that
+	 *                       is not a boolean, protect_methods that is not a list).
 	 */
 	protected function init(): void {
 		$c = $this->app->cfg->security->csrf;
 
-		$this->enabled		= (bool)($c->enabled ?? true);
-		$this->fieldName	= (string)($c->field_name ?? '_csrf');
-		$this->headerName	= (string)($c->header_name ?? 'X-CSRF-Token');
-		$this->sessionKey	= (string)($c->session_key ?? '_csrf');
-		$this->tokenBytes	= (int)($c->token_bytes ?? 32);
-		$this->maskTokens	= (bool)($c->mask_tokens ?? true);
+		$this->enabled		= self::flag($c->enabled, 'enabled');
+		$this->fieldName	= (string)$c->field_name;
+		$this->headerName	= (string)$c->header_name;
+		$this->sessionKey	= (string)$c->session_key;
+		$this->tokenBytes	= (int)$c->token_bytes;
+		$this->maskTokens	= self::flag($c->mask_tokens, 'mask_tokens');
 
-		$this->originCheck	= (bool)($c->origin_check ?? true);
-		$this->refererFallbackOnHttps = (bool)($c->referer_fallback_on_https ?? true);
-		$this->allowMissingOriginOnHttp = (bool)($c->allow_missing_origin_on_http ?? true);
+		$this->originCheck	= self::flag($c->origin_check, 'origin_check');
+		$this->refererFallbackOnHttps = self::flag($c->referer_fallback_on_https, 'referer_fallback_on_https');
+		$this->allowMissingOriginOnHttp = self::flag($c->allow_missing_origin_on_http, 'allow_missing_origin_on_http');
 
-		$this->logFailures	= (bool)($c->log_failures ?? true);
-		$this->logChannel	= (string)($c->log_channel ?? 'security');
+		$this->logFailures	= self::flag($c->log_failures, 'log_failures');
+		$this->logChannel	= (string)$c->log_channel;
 
 		// protect_methods - indexed array, normalize to uppercase, trim, deduplicate.
-		$rawMethods = $c->protect_methods ?? ['POST', 'PUT', 'PATCH', 'DELETE'];
+		// An empty list is a Cfg node; null would leave every method unprotected.
+		$rawMethods = $c->protect_methods;
 		if ($rawMethods instanceof Cfg) {
 			$rawMethods = $rawMethods->toArray();
 		}
+		if (!\is_array($rawMethods)) {
+			throw new CsrfException('Config security.csrf.protect_methods must be a list of HTTP methods.');
+		}
 		$this->protectMethods = [];
-		foreach ((array)$rawMethods as $method) {
+		foreach ($rawMethods as $method) {
 			$method = \strtoupper(\trim((string)$method));
 			if ($method !== '') {
 				$this->protectMethods[] = $method;
@@ -207,7 +214,7 @@ final class Csrf extends BaseService {
 		$this->protectMethods = \array_values(\array_unique($this->protectMethods));
 
 		// trusted_origins - split into full origins and bare hostnames.
-		$rawOrigins = $c->trusted_origins ?? [];
+		$rawOrigins = $c->trusted_origins;
 		if ($rawOrigins instanceof Cfg) {
 			$rawOrigins = $rawOrigins->toArray();
 		}
@@ -235,14 +242,9 @@ final class Csrf extends BaseService {
 		}
 
 		// fetch_metadata - nested config node.
-		if (isset($c->fetch_metadata)) {
-			$fm = $c->fetch_metadata;
-			$this->fetchMetadataEnabled = (bool)($fm->enabled ?? true);
-			$this->fetchMetadataAllowSameSite = (bool)($fm->allow_same_site ?? true);
-		} else {
-			$this->fetchMetadataEnabled = true;
-			$this->fetchMetadataAllowSameSite = true;
-		}
+		$fm = $c->fetch_metadata;
+		$this->fetchMetadataEnabled = self::flag($fm->enabled, 'fetch_metadata.enabled');
+		$this->fetchMetadataAllowSameSite = self::flag($fm->allow_same_site, 'fetch_metadata.allow_same_site');
 
 		// Validate constraints.
 		if ($this->fieldName === '') {
@@ -257,6 +259,22 @@ final class Csrf extends BaseService {
 		if ($this->tokenBytes < 16) {
 			throw new CsrfException('Config security.csrf.token_bytes must be >= 16 (128 bits minimum).');
 		}
+	}
+
+
+	/**
+	 * Return a security.csrf flag, or throw when it is not a boolean.
+	 *
+	 * @param  mixed   $value  The cfg value.
+	 * @param  string  $key    Path below security.csrf, for the message.
+	 * @return bool
+	 * @throws CsrfException  When the value is not a boolean.
+	 */
+	private static function flag(mixed $value, string $key): bool {
+		if (!\is_bool($value)) {
+			throw new CsrfException("Config security.csrf.{$key} must be a boolean.");
+		}
+		return $value;
 	}
 
 

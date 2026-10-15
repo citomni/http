@@ -40,7 +40,7 @@ use CitOmni\Kernel\Service\BaseService;
  * Collaborators:
  * - $this->app->cfg->http->trust_proxy       (bool) Toggle proxy-aware scheme/IP detection.
  * - $this->app->cfg->http->trusted_proxies   (array) IP/CIDR allowlist for proxy trust.
- * - $this->app->cfg->http->base_url          (string) Optional absolute base URL.
+ * - $this->app->cfg->http->base_url          (string) Absolute base URL; '' means not set.
  * - CITOMNI_PUBLIC_ROOT_URL                  (const) Optional absolute base URL (stage/prod recommended).
  *
  * Configuration keys (read-only):
@@ -154,8 +154,9 @@ class Request extends BaseService {
 	 * Initial actions
 	 */
 	protected function init(): void {
-		// Seed trusted proxies from cfg if available (keeps setTrustedProxies() useful later).
-		$proxies = $this->app->cfg->http->trusted_proxies ?? null;
+		// Seed trusted proxies from cfg (keeps setTrustedProxies() useful later). An empty
+		// list is a Cfg node, not an array, and leaves the allowlist empty.
+		$proxies = $this->app->cfg->http->trusted_proxies;
 
 		if (\is_array($proxies)) {
 			$this->trustedProxies = $proxies;
@@ -176,7 +177,7 @@ class Request extends BaseService {
 	 * Whether to trust proxy headers for scheme/IP.
 	 */
 	protected function trustProxy(): bool {
-		return (bool)($this->app->cfg->http->trust_proxy ?? false);
+		return (bool)$this->app->cfg->http->trust_proxy;
 	}
 
 
@@ -885,7 +886,7 @@ class Request extends BaseService {
 			return \rtrim((string)\CITOMNI_PUBLIC_ROOT_URL, '/') . '/';
 		}
 		
-		$cfgBase = (string)($this->app->cfg->http->base_url ?? '');
+		$cfgBase = (string)$this->app->cfg->http->base_url;
 
 		if ($cfgBase !== '') {
 			return \rtrim($cfgBase, '/') . '/';

@@ -449,7 +449,7 @@ class Response extends BaseService {
 	 */
 	public function json(array $data, bool $di = false): never {
 		if (!\headers_sent()) {
-			\header('Content-Type: application/json; charset=' . $this->app->cfg->locale->charset);
+			\header('Content-Type: application/json; charset=' . (string)($this->app->cfg->locale->charset ?? 'UTF-8'));
 		}
 		$opts = \JSON_UNESCAPED_UNICODE | \JSON_UNESCAPED_SLASHES | \JSON_THROW_ON_ERROR;
 		if ($di) {
@@ -501,7 +501,7 @@ class Response extends BaseService {
 	public function jsonStatus(array $data, int $statusCode = 200, bool $di = false): never {
 		$this->setStatus($statusCode);
 		if (!\headers_sent()) {
-			\header('Content-Type: application/json; charset=' . (string)$this->app->cfg->locale->charset);
+			\header('Content-Type: application/json; charset=' . (string)($this->app->cfg->locale->charset ?? 'UTF-8'));
 		}
 		$opts = \JSON_UNESCAPED_UNICODE | \JSON_UNESCAPED_SLASHES | \JSON_THROW_ON_ERROR;
 		if ($di) {
@@ -597,7 +597,7 @@ class Response extends BaseService {
 		// Harden content type (no MIME sniffing) and advertise the RFC 7807 media type.
 		if (!\headers_sent()) {
 			\header('X-Content-Type-Options: nosniff');
-			\header('Content-Type: application/problem+json; charset=' . (string)$this->app->cfg->locale->charset);
+			\header('Content-Type: application/problem+json; charset=' . (string)($this->app->cfg->locale->charset ?? 'UTF-8'));
 		}
 
 		$opts = \JSON_UNESCAPED_UNICODE | \JSON_UNESCAPED_SLASHES | \JSON_THROW_ON_ERROR;
@@ -646,7 +646,7 @@ class Response extends BaseService {
 	public function text(string $body, int $statusCode = 200): never {
 		$this->setStatus($statusCode);
 		if (!\headers_sent()) {
-			\header('Content-Type: text/plain; charset=' . $this->app->cfg->locale->charset);
+			\header('Content-Type: text/plain; charset=' . (string)($this->app->cfg->locale->charset ?? 'UTF-8'));
 		}
 		echo $body;
 		exit;
@@ -670,7 +670,7 @@ class Response extends BaseService {
 	public function html(string $html, int $statusCode = 200): never {
 		$this->setStatus($statusCode);
 		if (!\headers_sent()) {
-			\header('Content-Type: text/html; charset=' . $this->app->cfg->locale->charset);
+			\header('Content-Type: text/html; charset=' . (string)($this->app->cfg->locale->charset ?? 'UTF-8'));
 		}
 		echo $html;
 		exit;

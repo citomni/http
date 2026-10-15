@@ -159,7 +159,7 @@ class Router extends BaseService {
 		$method = \strtoupper($_SERVER['REQUEST_METHOD'] ?? 'GET');
 
 		// Share the exact path interpretation with pre-dispatch security checks.
-		$caseInsensitive = (bool)($this->app->cfg->http->router_case_insensitive ?? false);
+		$caseInsensitive = (bool)$this->app->cfg->http->router_case_insensitive;
 		$uri = RoutePath::resolve(
 			(string)($_SERVER['REQUEST_URI'] ?? '/'),
 			\defined('CITOMNI_PUBLIC_ROOT_URL') ? \CITOMNI_PUBLIC_ROOT_URL : '',

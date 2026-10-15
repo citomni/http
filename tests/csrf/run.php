@@ -156,10 +156,10 @@ function csrfFor(SessionStore $session, array $server = [], array $post = [], ar
 	$_SERVER = \array_filter(\array_replace(BASE_SERVER, $server), static fn (?string $value): bool => $value !== null);
 	$_POST = $post;
 
-	$app = new App(mergeLastWins(
-		['http' => Registry::CFG_HTTP['http'], 'security' => ['csrf' => Registry::CFG_HTTP['security']['csrf']]],
-		['security' => ['csrf' => $cfg]]
-	));
+	$app = new App([
+		'http' => Registry::CFG_HTTP['http'],
+		'security' => ['csrf' => mergeLastWins(Registry::CFG_HTTP['security']['csrf'], $cfg)],
+	]);
 	$app->set('session', $session);
 	$app->set('request', new Request($app));
 	if ($log !== null) {
@@ -456,7 +456,11 @@ check('Failures are logged to the security channel without token values', functi
 });
 
 check('Invalid configuration fails at construction', function (): void {
-	foreach ([['token_bytes' => 15], ['field_name' => ''], ['header_name' => ''], ['session_key' => '']] as $cfg) {
+	foreach ([
+		['token_bytes' => 15], ['field_name' => ''], ['header_name' => ''], ['session_key' => ''],
+		['enabled' => null], ['origin_check' => 1], ['mask_tokens' => 'false'], ['fetch_metadata' => ['enabled' => null]],
+		['protect_methods' => null],
+	] as $cfg) {
 		$error = thrown(static fn () => csrfFor(new SessionStore(), [], [], $cfg));
 		same(CsrfException::class, $error::class, \json_encode($cfg));
 	}

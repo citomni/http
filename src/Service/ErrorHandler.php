@@ -146,7 +146,7 @@ final class ErrorHandler extends BaseService {
 
 		try {
 			// Input portability: Accept array or Cfg wrapper; unwrap deterministically
-			$raw = $this->app->cfg->error_handler ?? [];
+			$raw = $this->app->cfg->error_handler;
 			$cfgNode = ($raw instanceof \CitOmni\Kernel\Cfg) ? $raw->toArray() : (\is_array($raw) ? $raw : []);
 		} catch (\Throwable) {
 			

@@ -15,6 +15,7 @@ declare(strict_types=1);
 
 namespace CitOmni\Http\Service;
 
+use CitOmni\Kernel\Cfg;
 use CitOmni\Kernel\Service\BaseService;
 
 /**
@@ -25,7 +26,7 @@ use CitOmni\Kernel\Service\BaseService;
  * - No I/O and no storage assumptions; uniqueness is delegated via callback.
  *
  * Behavior:
- * - Immutable config read at init(): options > cfg > defaults (fail fast on invalid).
+ * - Immutable config read at init(): options > cfg http.slug (fail fast on invalid).
  * - Transliteration uses iconv if available; includes a tiny ASCII fallback map for common cases (e.g., Danish).
  * - Final slugs respect allowedPattern, separator collapsing, casing policy, and max length.
  *
@@ -67,20 +68,22 @@ final class Slugger extends BaseService {
 	 * @return void
 	 */
 	protected function init(): void {
-		// Read cfg subtree (tolerate absence)
-		$raw = $this->app->cfg->http->slug ?? [];
-		$cfg = \is_array($raw) ? $raw : (method_exists($raw, 'toArray') ? $raw->toArray() : []);
+		$cfg = $this->app->cfg->http->slug;
 
 		// Options override cfg
 		$opt = $this->options;
 		$this->options = [];
 
-		$this->separator     = self::pickString($opt['separator'] ?? $cfg['separator'] ?? '-', 'separator');
-		$this->lowercase     = (bool)($opt['lowercase'] ?? $cfg['lowercase'] ?? true);
-		$this->maxLength     = self::pickPositiveInt($opt['maxLength'] ?? $cfg['maxLength'] ?? 140, 'maxLength');
-		$this->transliterate = (bool)($opt['transliterate'] ?? $cfg['transliterate'] ?? true);
+		$this->separator     = self::pickString($opt['separator'] ?? $cfg->separator, 'separator');
+		$this->lowercase     = (bool)($opt['lowercase'] ?? $cfg->lowercase);
+		$this->maxLength     = self::pickPositiveInt($opt['maxLength'] ?? $cfg->maxLength, 'maxLength');
+		$this->transliterate = (bool)($opt['transliterate'] ?? $cfg->transliterate);
 
-		$reserved = $opt['reserved'] ?? $cfg['reserved'] ?? [];
+		// An empty list is a Cfg node, not an array.
+		$reserved = $opt['reserved'] ?? $cfg->reserved;
+		if ($reserved instanceof Cfg) {
+			$reserved = $reserved->toArray();
+		}
 		if (!\is_array($reserved)) {
 			throw new \InvalidArgumentException('slug.reserved must be an array of strings.');
 		}
@@ -94,7 +97,7 @@ final class Slugger extends BaseService {
 		}
 		$this->reserved = \array_keys($norm);
 
-		$allowedPattern = $opt['allowedPattern'] ?? $cfg['allowedPattern'] ?? '/[^a-z0-9\-]+/i';
+		$allowedPattern = $opt['allowedPattern'] ?? $cfg->allowedPattern;
 		if (!\is_string($allowedPattern) || $allowedPattern === '') {
 			throw new \InvalidArgumentException('slug.allowedPattern must be a non-empty PCRE string.');
 		}

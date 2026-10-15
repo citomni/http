@@ -51,7 +51,7 @@ namespace CitOmni\Kernel {
 
 		public function __construct(string $configDir, Mode $mode) {
 			$this->cfg = new Cfg([
-				'http' => ['base_url' => 'https://example.test'],
+				'http' => ['base_url' => 'https://example.test'] + \CitOmni\Http\Boot\Registry::CFG_HTTP['http'],
 				'locale' => ['language' => 'da'],
 				'error_handler' => [
 					'log' => ['path' => \CITOMNI_APP_PATH . '/logs'],
@@ -98,6 +98,7 @@ namespace CitOmni\Kernel {
 namespace {
 	use CitOmni\Http\Service\Request;
 
+	require_once \dirname(__DIR__, 2) . '/src/Boot/Registry.php';
 	require \dirname(__DIR__, 2) . '/src/Service/Request.php';
 	require \dirname(__DIR__, 2) . '/src/Service/ErrorHandler.php';
 	require \dirname(__DIR__, 2) . '/src/Kernel.php';
@@ -119,8 +120,10 @@ namespace {
 		return;
 	}
 
+	// Request::init() reads http.trusted_proxies; nothing else here reads cfg. Registry::CFG_HTTP
+	// is not used for it, because it derives paths from CITOMNI_APP_PATH, which this process lacks.
 	if (($argv[1] ?? '') === '--ini-probe') {
-		$request = new Request((object)['cfg' => new \CitOmni\Kernel\Cfg([])]);
+		$request = new Request((object)['cfg' => new \CitOmni\Kernel\Cfg(['http' => ['trusted_proxies' => []]])]);
 		$limit = $request->postMaxSize();
 		$_SERVER['REQUEST_METHOD'] = 'POST';
 		$out = ['limit' => $limit];
@@ -137,7 +140,7 @@ namespace {
 	$servers = [];
 	$root = sys_get_temp_dir() . '/citomni-post-max-' . bin2hex(random_bytes(8));
 	mkdir($root . '/config', 0700, true);
-	$request = new Request((object)['cfg' => new \CitOmni\Kernel\Cfg([])]);
+	$request = new Request((object)['cfg' => new \CitOmni\Kernel\Cfg(['http' => ['trusted_proxies' => []]])]);
 
 	function check(string $name, callable $test): void {
 		global $passed, $failed;

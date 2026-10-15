@@ -123,14 +123,14 @@ final class Nonce extends BaseService {
 	protected function init(): void {
 		$cfg = $this->app->cfg->nonce;
 
-		$dir = (string)($cfg->dir ?? '');
+		$dir = (string)$cfg->dir;
 		$dir = \trim($dir);
 		if ($dir === '' || \strpos($dir, "\0") !== false) {
 			throw new NonceConfigException('Nonce: cfg.nonce.dir must be a non-empty path without null bytes.');
 		}
 		$this->rootDir = \rtrim($dir, "/\\");
 
-		$maxLen = (int)($cfg->max_len ?? 128);
+		$maxLen = (int)$cfg->max_len;
 		if ($maxLen < 8 || $maxLen > 1024) {
 			throw new NonceConfigException('Nonce: cfg.nonce.max_len must be between 8 and 1024.');
 		}
@@ -139,20 +139,20 @@ final class Nonce extends BaseService {
 		// formats with '.' and ':', and similar URL-safe identifier schemes.
 		$this->nonceCharPattern = '/^[A-Za-z0-9_.:-]{1,' . $maxLen . '}$/';
 
-		$prob = (int)($cfg->purge_probability ?? 50);
+		$prob = (int)$cfg->purge_probability;
 		if ($prob < 1) {
 			throw new NonceConfigException('Nonce: cfg.nonce.purge_probability must be >= 1.');
 		}
 		$this->purgeProbability = $prob;
 
-		$limit = (int)($cfg->purge_limit ?? 25);
+		$limit = (int)$cfg->purge_limit;
 		if ($limit < 1) {
 			throw new NonceConfigException('Nonce: cfg.nonce.purge_limit must be >= 1.');
 		}
 		$this->purgeLimit = $limit;
 
-		$this->dirMode  = (int)($cfg->dir_mode  ?? 0775);
-		$this->fileMode = (int)($cfg->file_mode ?? 0660);
+		$this->dirMode  = (int)$cfg->dir_mode;
+		$this->fileMode = (int)$cfg->file_mode;
 
 		if (!\in_array(self::HASH_ALGO, \hash_algos(), true)) {
 			throw new NonceConfigException('Nonce: required hash algorithm not available: ' . self::HASH_ALGO);

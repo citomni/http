@@ -662,7 +662,7 @@ class Cookie extends BaseService {
 	 * @return bool True when any of the signals says https.
 	 */
 	private function siteUsesHttps(): bool {
-		$baseUrl = (string)($this->app->cfg->http->base_url ?? '');
+		$baseUrl = (string)$this->app->cfg->http->base_url;
 		if (\stripos($baseUrl, 'https://') === 0) {
 			return true;
 		}

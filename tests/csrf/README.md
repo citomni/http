@@ -49,10 +49,11 @@ Origin and Referer layer:
 Logging and configuration:
 
 - Failures are logged to the `security` channel as `csrf.failure` with the reason and request context, never with the submitted token or the session secret. `log_failures` off logs nothing.
-- `token_bytes` below 16 and empty field, header or session key names fail at construction.
+- `token_bytes` below 16, empty field, header or session key names, a flag that is not a boolean (`null`, `1`, `'false'`, also in `fetch_metadata`) and a `protect_methods` that is not a list fail at construction.
 
 ## Regression proof
 
 - Against the fetch metadata layer before it consulted `trusted_origins` (it refused every `cross-site` request), the trusted origins case fails.
 - Against the token layer before it checked the form field's type (it cast the array to "Array"), the array-shaped token case fails on the warning.
 - Against `Csrf` that started the session before reading the token, the case "Verification and clear() never create a session" fails.
+- Against `Csrf::init()` that cast its flags with `(bool)`, the invalid configuration case fails: `enabled => null` turned protection off.

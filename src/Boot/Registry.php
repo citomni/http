@@ -151,10 +151,30 @@ final class Registry {
 		 * - Request enforces an ASCII-only guard for paths (defense in depth).
 		 */
 		'http' => [
-			// 'base_url' => 'https://www.example.com', // Never include a trailing slash! Non-DEV MUST override with an absolute URL (e.g., "https://www.example.com")
+			'base_url'                => '',          // Absolute public base URL without trailing slash, e.g. https://www.example.com. Empty: DEV auto-detects it; non-DEV needs it unless CITOMNI_PUBLIC_ROOT_URL is defined.
 			'trust_proxy'             => false,       // Enable only behind a trusted proxy/LB listed below.
 			'trusted_proxies'         => ['10.0.0.0/8', '192.168.0.0/16', '::1'], // Empty list means; trust NO proxies.
 			'router_case_insensitive' => false,       // Local dev convenience; keep false in STAGE/PROD.
+
+			// Slugger policy. Service-map options of the slugger service override each key.
+			'slug' => [
+				'separator'      => '-',               // Text that replaces disallowed characters and joins words.
+				'lowercase'      => true,              // Lowercase slugs; validate() then rejects uppercase.
+				'maxLength'      => 140,               // Maximum slug length in bytes; slugify() shortens longer slugs, validate() rejects them.
+				'transliterate'  => true,              // Transliterate to ASCII before disallowed characters are replaced.
+				'reserved'       => [],                // Slugs that validate() rejects, compared case-insensitively.
+				'allowedPattern' => '/[^a-z0-9\-]+/i', // PCRE that matches the disallowed characters slugify() replaces with the separator.
+			],
+
+			// Tags policy. Service-map options of the tags service override each key.
+			'tags' => [
+				'delimiters'         => [',', ';'],    // Label separators for parse(): one entry splits on that string, several split on each of their characters.
+				'maxLabelLength'     => 80,            // Maximum label length in characters; validateLabel() rejects longer labels.
+				'caseMode'           => 'preserve',    // Label casing: preserve, title (each word capitalized, the rest lowercased) or lower.
+				'collapseWhitespace' => true,          // Replace runs of whitespace in a label with one space.
+				'disallowedPattern'  => null,          // PCRE that makes validateLabel() reject a label when it matches; null for none.
+				'maxTagsPerEntity'   => null,          // Maximum labels parse() returns; null for no limit.
+			],
 		],
 
 
@@ -230,10 +250,10 @@ final class Registry {
 
 				/*
 				 * Optional override of PHP error_reporting() at install time.
-				 * - Leave unset/null to respect current runtime settings.
+				 * - null respects the current runtime settings.
 				 * - In dev overlay you typically set this to E_ALL.
 				 */
-				// 'force_error_reporting' => null,
+				'force_error_reporting' => null, // Int mask that install() passes to error_reporting(); null keeps the current level.
 			],
 
 			'log' => [

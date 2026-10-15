@@ -247,7 +247,7 @@ final class TemplateEngine extends BaseService {
 		// over matching cfg->view values. Once normalized below, the original options bag is
 		// no longer needed and is cleared to avoid carrying redundant mutable state.
 
-		$viewCfg = $this->app->cfg->view ?? (object)[];
+		$viewCfg = $this->app->cfg->view;
 		$opt = $this->options;
 		$this->options = [];
 
@@ -273,7 +273,7 @@ final class TemplateEngine extends BaseService {
 		// containment checks happen when a concrete template is loaded, which keeps
 		// init() cheap and preserves valid symlink-based template roots.
 
-		foreach ($this->normalizeCfgMap($viewCfg->template_layers ?? []) as $layerKey => $path) {
+		foreach ($this->normalizeCfgMap($viewCfg->template_layers) as $layerKey => $path) {
 			$layer = (string)$layerKey;
 			if ($layer !== 'app' && !\preg_match('~^[a-z0-9._-]+/[a-z0-9._-]+$~i', $layer)) {
 				throw new \InvalidArgumentException("TemplateEngine: Invalid layer slug '{$layer}'.");
@@ -290,10 +290,10 @@ final class TemplateEngine extends BaseService {
 		// override cfg->view, and values are coerced once here so hot paths only read
 		// typed object properties.
 
-		$this->cacheEnabled = (bool)($opt['cache_enabled'] ?? $viewCfg->cache_enabled ?? false);
-		$this->trimWhitespace = (bool)($opt['trim_whitespace'] ?? $viewCfg->trim_whitespace ?? false);
-		$this->removeHtmlComments = (bool)($opt['remove_html_comments'] ?? $viewCfg->remove_html_comments ?? false);
-		$this->allowPhpTags = (bool)($opt['allow_php_tags'] ?? $viewCfg->allow_php_tags ?? true);
+		$this->cacheEnabled = (bool)($opt['cache_enabled'] ?? $viewCfg->cache_enabled);
+		$this->trimWhitespace = (bool)($opt['trim_whitespace'] ?? $viewCfg->trim_whitespace);
+		$this->removeHtmlComments = (bool)($opt['remove_html_comments'] ?? $viewCfg->remove_html_comments);
+		$this->allowPhpTags = (bool)($opt['allow_php_tags'] ?? $viewCfg->allow_php_tags);
 
 
 		// -- 4. Snapshot passthrough view configuration --------------------
@@ -304,8 +304,8 @@ final class TemplateEngine extends BaseService {
 		// Icons are intentionally NOT loaded here. $icon() delegates to the lazy
 		// Icon service, so requests that never render an icon pay no icon payload cost.
 
-		$this->assetVersion = (string)($opt['asset_version'] ?? $viewCfg->asset_version ?? '');
-		$this->marketingScripts = (string)($viewCfg->marketing_scripts ?? '');
+		$this->assetVersion = (string)($opt['asset_version'] ?? $viewCfg->asset_version);
+		$this->marketingScripts = (string)$viewCfg->marketing_scripts;
 
 
 		// -- 5. Precompile path-scoped variable definitions ---------------
@@ -327,7 +327,7 @@ final class TemplateEngine extends BaseService {
 		// include/exclude rules are compiled once now into anchored regexes so each
 		// render only performs preg_match() plus the provider call when applicable.
 
-		foreach ($this->normalizeCfgMap($viewCfg->vars ?? []) as $varName => $row) {
+		foreach ($this->normalizeCfgMap($viewCfg->vars) as $varName => $row) {
 			if (!\is_array($row) || $row === []) {
 				continue;
 			}
@@ -502,8 +502,10 @@ final class TemplateEngine extends BaseService {
 	 *
 	 * Notes:
 	 * - The result is memoized by buildFinalVars() for this TemplateEngine/App instance.
-	 * - `base_url` comes from `cfg->http->base_url` with `CITOMNI_PUBLIC_ROOT_URL` as fallback;
-	 *   `public_root_url` prefers the constant when defined.
+	 * - base_url comes from cfg http.base_url; when that is empty, from CITOMNI_PUBLIC_ROOT_URL
+	 *   if defined. public_root_url prefers the constant when defined.
+	 * - app_name, language and charset come from the app's identity.app_name, locale.language and
+	 *   locale.charset, with '', '' and 'UTF-8' when a key is not set.
 	 * - `$asset()` applies the configured asset version without discarding an existing query string.
 	 * - `$csrfField()` returns an empty string when the CSRF service is not registered.
 	 * - `$captchaField()` and `$captchaUrl()` return an empty string when the captcha service is not
@@ -519,8 +521,10 @@ final class TemplateEngine extends BaseService {
 
 		$cfg = $this->app->cfg;
 
-		$baseUrl = (string)($cfg->http->base_url
-			?? (\defined('CITOMNI_PUBLIC_ROOT_URL') ? \CITOMNI_PUBLIC_ROOT_URL : ''));
+		$baseUrl = (string)$cfg->http->base_url;
+		if ($baseUrl === '' && \defined('CITOMNI_PUBLIC_ROOT_URL')) {
+			$baseUrl = (string)\CITOMNI_PUBLIC_ROOT_URL;
+		}
 
 		$publicUrl = \defined('CITOMNI_PUBLIC_ROOT_URL')
 			? (string)\CITOMNI_PUBLIC_ROOT_URL
@@ -531,11 +535,11 @@ final class TemplateEngine extends BaseService {
 
 			// -- 2. Identity and locale scalars -------------------------------
 
-			'app_name'	=> (string)$cfg->identity->app_name,
+			'app_name'	=> (string)($cfg->identity->app_name ?? ''),
 			'base_url'	=> $baseUrl,
 			'public_root_url' => $publicUrl,
-			'language'	=> (string)$cfg->locale->language,
-			'charset'	=> (string)$cfg->locale->charset,
+			'language'	=> (string)($cfg->locale->language ?? ''),
+			'charset'	=> (string)($cfg->locale->charset ?? 'UTF-8'),
 
 
 			// -- 3. View passthroughs -----------------------------------------
@@ -545,7 +549,7 @@ final class TemplateEngine extends BaseService {
 
 			// -- 4. Security feature flags ------------------------------------
 
-			'csrf_protection'		=> (bool)($cfg->security->csrf->enabled ?? true),
+			'csrf_protection'		=> (bool)$cfg->security->csrf->enabled,
 			'honeypot_protection'	=> (bool)$cfg->security->honeypot_protection,
 			'form_action_switching'	=> (bool)$cfg->security->form_action_switching,
 			'captcha_protection'	=> (bool)$cfg->security->captcha_protection,

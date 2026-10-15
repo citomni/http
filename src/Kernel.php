@@ -122,7 +122,7 @@ use CitOmni\Kernel\Runtime;
  *
  *   // Non-DEV without absolute base_url:
  *   define('CITOMNI_ENVIRONMENT', 'prod');
- *   // Missing cfg.http.base_url -> \CitOmni\Http\Kernel::boot(...) throws \RuntimeException.
+ *   // Empty or relative cfg.http.base_url -> \CitOmni\Http\Kernel::boot(...) throws \RuntimeException.
  *
  *   // Invalid timezone (cfg.locale.timezone):
  *   // Runtime::configure() throws \RuntimeException.
@@ -288,10 +288,10 @@ final class Kernel {
 		self::definePublicRootUrl($app);
 
 		// 6) Wire http.trusted_proxies into Request service.
-		// If http.trusted_proxies is defined in the configuration, inject it into
-		// the Request service so client IP/URL resolution becomes proxy-aware
-		// behind load balancers or reverse proxies.
-		$tp = $app->cfg->http->trusted_proxies ?? null; // null|array
+		// A non-empty list is injected into the Request service so client IP/URL
+		// resolution becomes proxy-aware behind load balancers or reverse proxies.
+		// An empty list is a Cfg node, not an array, and leaves Request as it is.
+		$tp = $app->cfg->http->trusted_proxies;
 		if (\is_array($tp)) {
 			$app->request->setTrustedProxies($tp);
 		}
@@ -440,6 +440,11 @@ final class Kernel {
 	 * Proxy awareness:
 	 * - Honours cfg.http.trust_proxy during auto-detection (X-Forwarded-*).
 	 *
+	 * Notes:
+	 * - A missing http.base_url counts as empty. run() also serves the signed /_system/reset-cache
+	 *   webhook that rebuilds a compiled config, so a compiled config from before http.base_url
+	 *   had a baseline must not make every request fail.
+	 *
 	 * @param \CitOmni\Kernel\App $app Current application.
 	 * @throws \RuntimeException If no absolute base_url is configured in non-DEV env.
 	 * @return void
@@ -454,11 +459,11 @@ final class Kernel {
 		$cfg = $app->cfg;
 		$env = \defined('CITOMNI_ENVIRONMENT') ? (string)\CITOMNI_ENVIRONMENT : 'prod';
 
-		// Config base_url (trim trailing slash), or empty string if not set
+		// Config base_url (trim trailing slash); '' means not set. The ?? is deliberate, see Notes.
 		$cfgBase = \rtrim((string)($cfg->http->base_url ?? ''), '/');
 
 		// Whether to trust proxy headers (X-Forwarded-*) for URL detection
-		$trustProxy = (bool)($cfg->http->trust_proxy ?? false);
+		$trustProxy = (bool)$cfg->http->trust_proxy;
 
 		// Check if cfgBase is a fully qualified URL
 		$isAbsolute = ($cfgBase !== '' && \preg_match('#^https?://#i', $cfgBase) === 1);
