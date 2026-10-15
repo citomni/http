@@ -134,7 +134,6 @@ body:
         - citomni/cli
         - citomni/auth
         - citomni/infrastructure
-        - citomni/testing
         - citomni/admin
         - other/unknown
     validations:
