@@ -17,24 +17,38 @@ namespace CitOmni\Http\Enum;
 
 
 /**
- * CsrfFailureReason: Identifies which CSRF defense layer rejected the request.
+ * CsrfFailureReason: Enum of the CSRF defense checks that can reject a request.
  *
- * Used by CsrfVerificationException to communicate the specific failure point
- * without requiring exception-per-layer. The string value is safe for logging
- * and structured output (no PII, no secrets).
+ * Names the failure point within the three defense layers (Fetch Metadata, Origin with its
+ * Referer fallback, and the token), so one exception type can report every layer. The values
+ * are safe for logs and structured output: They carry no personal data and no secrets.
  *
- * Layer mapping:
- * - Fetch Metadata:  FetchMetadataRejected
- * - Origin/Referer:  OriginMismatch, OriginMissing, RefererMismatch, RefererMissing
- * - Token:           TokenMissing, TokenInvalid, TokenMismatch
+ * Rules:
+ * - A value is a contract once released. Never rename, reuse or reinterpret one.
  */
 enum CsrfFailureReason: string {
+
+	/** Sec-Fetch-Site reports a source that the Fetch Metadata policy does not allow, and the Origin is not trusted. */
 	case FetchMetadataRejected = 'fetch_metadata_rejected';
+
+	/** The Origin header is neither the request's own origin nor a trusted origin, or cannot be parsed. */
 	case OriginMismatch        = 'origin_mismatch';
+
+	/** No usable Origin header, and no enabled fallback applies to the request. */
 	case OriginMissing         = 'origin_missing';
+
+	/** Without a usable Origin, the Referer is neither the request's own origin nor a trusted one, or cannot be parsed. */
 	case RefererMismatch       = 'referer_mismatch';
+
+	/** Without a usable Origin, the Referer fallback found no Referer header. */
 	case RefererMissing        = 'referer_missing';
+
+	/** No token was submitted, or the session holds none. */
 	case TokenMissing          = 'token_missing';
+
+	/** The submitted token is not a string or not in the token format. */
 	case TokenInvalid          = 'token_invalid';
+
+	/** The submitted token differs from the session token. */
 	case TokenMismatch         = 'token_mismatch';
 }

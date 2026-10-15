@@ -455,14 +455,10 @@ final class Kernel {
 		$env = \defined('CITOMNI_ENVIRONMENT') ? (string)\CITOMNI_ENVIRONMENT : 'prod';
 
 		// Config base_url (trim trailing slash), or empty string if not set
-		$cfgBase = (
-			isset($cfg->http) && isset($cfg->http->base_url)
-		) ? \rtrim((string)$cfg->http->base_url, '/') : '';
+		$cfgBase = \rtrim((string)($cfg->http->base_url ?? ''), '/');
 
 		// Whether to trust proxy headers (X-Forwarded-*) for URL detection
-		$trustProxy = (
-			isset($cfg->http) && isset($cfg->http->trust_proxy)
-		) ? (bool)$cfg->http->trust_proxy : false;
+		$trustProxy = (bool)($cfg->http->trust_proxy ?? false);
 
 		// Check if cfgBase is a fully qualified URL
 		$isAbsolute = ($cfgBase !== '' && \preg_match('#^https?://#i', $cfgBase) === 1);

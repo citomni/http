@@ -39,7 +39,7 @@ final class Registry {
 	 * - /config/services_http.php has highest precedence in HTTP mode, followed by
 	 *   /config/services.php, providers, and the vendor baseline.
 	 */
-	public const MAP_HTTP = [
+	public const array MAP_HTTP = [
 
 		'errorHandler'	=> \CitOmni\Http\Service\ErrorHandler::class,
 		'request'		=> \CitOmni\Http\Service\Request::class,
@@ -91,7 +91,7 @@ final class Registry {
 	 * - Providers may extend or override this baseline, and the application layer
 	 *   remains the final authority.
 	 */
-	public const CFG_HTTP = [
+	public const array CFG_HTTP = [
 
 		/*
 		 *------------------------------------------------------------------
@@ -933,7 +933,7 @@ final class Registry {
 	 *   override or replace vendor/provider routes by path key.
 	 * - Empty arrays are ignored during merge.
 	 */
-	public const ROUTES_HTTP = [
+	public const array ROUTES_HTTP = [
 	
 		'/' => [
 			'controller' => \CitOmni\Http\Controller\PublicController::class,

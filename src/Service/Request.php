@@ -155,17 +155,11 @@ class Request extends BaseService {
 	 */
 	protected function init(): void {
 		// Seed trusted proxies from cfg if available (keeps setTrustedProxies() useful later).
-		/* 
-		$http = isset($this->app->cfg->http) ? $this->app->cfg->http->toArray() : [];
-		if (!empty($http['trusted_proxies']) && \is_array($http['trusted_proxies'])) {
-			$this->trustedProxies = $http['trusted_proxies'];
+		$proxies = $this->app->cfg->http->trusted_proxies ?? null;
+
+		if (\is_array($proxies)) {
+			$this->trustedProxies = $proxies;
 		}
-		*/
-		
-		$http = isset($this->app->cfg->http) ? $this->app->cfg->http : null;
-		if ($http !== null && isset($http->trusted_proxies) && \is_array($http->trusted_proxies)) {
-			$this->trustedProxies = $http->trusted_proxies;
-		}		
 	}
 
 
@@ -182,12 +176,7 @@ class Request extends BaseService {
 	 * Whether to trust proxy headers for scheme/IP.
 	 */
 	protected function trustProxy(): bool {
-		/* 
-		$http = isset($this->app->cfg->http) ? $this->app->cfg->http->toArray() : [];
-		return (bool)($http['trust_proxy'] ?? false);
-		*/
-		$http = isset($this->app->cfg->http) ? $this->app->cfg->http : null;
-		return (bool)($http !== null && isset($http->trust_proxy) ? $http->trust_proxy : false);		
+		return (bool)($this->app->cfg->http->trust_proxy ?? false);
 	}
 
 
@@ -896,15 +885,10 @@ class Request extends BaseService {
 			return \rtrim((string)\CITOMNI_PUBLIC_ROOT_URL, '/') . '/';
 		}
 		
-		/* 
-		$http = isset($this->app->cfg->http) ? $this->app->cfg->http->toArray() : [];
-		if (!empty($http['base_url'])) {
-			return \rtrim((string)$http['base_url'], '/') . '/';
-		}
-		*/		
-		$http = isset($this->app->cfg->http) ? $this->app->cfg->http : null;
-		if ($http !== null && isset($http->base_url) && $http->base_url !== '') {
-			return \rtrim((string)$http->base_url, '/') . '/';
+		$cfgBase = (string)($this->app->cfg->http->base_url ?? '');
+
+		if ($cfgBase !== '') {
+			return \rtrim($cfgBase, '/') . '/';
 		}
 		
 		// Fallback: scheme + host + (optional port) + detected webroot (shallow, but cheap)
