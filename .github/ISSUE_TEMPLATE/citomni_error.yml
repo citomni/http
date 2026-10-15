@@ -144,7 +144,7 @@ body:
     attributes:
       label: Versions
       description: "citomni/* packages and PHP version"
-      placeholder: "citomni/http 1.0.x; citomni/kernel 1.0.x; PHP 8.2.x"
+      placeholder: "citomni/http 1.0.5.5; citomni/kernel 1.0.2.8; PHP 8.5.x"
     validations:
       required: false
 
