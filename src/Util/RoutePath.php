@@ -16,34 +16,41 @@ declare(strict_types=1);
 namespace CitOmni\Http\Util;
 
 /**
- * Route path resolution shared by Router and pre-dispatch path rules.
+ * RoutePath: Util with the pure function that turns a request URI into the app's route path.
  *
- * Behavior:
- * - Drops the query string, then the mount path: the path of the public root URL or,
- *   when that is empty, the front controller's directory without a trailing "/public".
- *   With $caseInsensitive the mount path also matches in another letter case.
- * - Percent-decodes once, after the mount path is removed.
- * - Removes trailing slashes ("/" stays "/") and lowercases with $caseInsensitive.
+ * Keeps the meaning of a request path in one place, so routing and every pre-dispatch path
+ * rule see the same path. Reading the request values belongs to the caller.
  *
- * Notes:
- * - Pure: no globals, configuration or IO. Callers pass the request values.
- * - Dot segments and repeated slashes are kept as sent; Router matches them literally.
- * - Router and Policy\FetchMetadataPolicy both use it, so an exemption and the route
- *   that serves a request always see the same path.
- *
- * Typical usage:
- *   $path = RoutePath::resolve($_SERVER['REQUEST_URI'] ?? '/', \CITOMNI_PUBLIC_ROOT_URL, $_SERVER['SCRIPT_NAME'] ?? '/index.php', false);
+ * Rules:
+ * - Pure: Every result depends only on the arguments.
  */
 class RoutePath {
 
 	/**
-	 * Resolve the app-relative route path of a request.
+	 * Return the route path of a request: The path below the app's mount path, decoded.
+	 *
+	 * Behavior:
+	 * - Drops the query string, then the mount path. The mount path is the path of
+	 *   $publicRootUrl without trailing slashes or, when that is empty, the directory of
+	 *   $scriptName with backslashes as slashes and without a trailing "/public".
+	 * - The mount path is removed as a plain string prefix, also where the next character is
+	 *   not "/": Mount path "/app" turns "/apple" into "le". A path that does not start with
+	 *   it is kept whole.
+	 * - Percent-decodes once (rawurldecode(), so "+" stays "+"), after the mount path is
+	 *   removed, so an encoded "%2F" becomes a slash of the route path.
+	 * - Removes trailing slashes; an empty result becomes "/".
+	 * - With $caseInsensitive, the mount path matches in any letter case and the result is
+	 *   lowercased.
+	 * - Keeps dot segments, repeated slashes, control characters and non-ASCII bytes as sent.
+	 *
+	 * Typical usage:
+	 *   $path = RoutePath::resolve('/app/users/42/?tab=1', 'https://example.com/app', '/index.php', false); // '/users/42'
 	 *
 	 * @param  string  $requestUri       Raw request URI, query string included.
-	 * @param  string  $publicRootUrl    Public root URL, or '' when undefined.
-	 * @param  string  $scriptName       Front controller script name (mount path fallback).
-	 * @param  bool    $caseInsensitive  http.router_case_insensitive.
-	 * @return string  Decoded route path without trailing slashes, or '/'.
+	 * @param  string  $publicRootUrl    Public root URL, or '' to use $scriptName.
+	 * @param  string  $scriptName       Script path of the front controller, such as "/app/public/index.php".
+	 * @param  bool    $caseInsensitive  True for case-insensitive routing.
+	 * @return string  Path with a leading slash when the remainder has one, and no trailing slash except "/".
 	 */
 	public static function resolve(string $requestUri, string $publicRootUrl, string $scriptName, bool $caseInsensitive): string {
 		$query = \strpos($requestUri, '?');

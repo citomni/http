@@ -19,63 +19,40 @@ use CitOmni\Http\Exception\CaptchaConfigException;
 use CitOmni\Kernel\Service\BaseService;
 
 /**
- * Captcha: Session-backed captcha challenges for HTML forms.
+ * Captcha: Service for session-backed captcha challenges in HTML forms.
  *
- * A challenge is a code from the "captchaImage" service (citomni/image), kept
- * in the session under a random id until the form is posted. The page carries
- * the id in a hidden field and shows the image served by CaptchaController;
- * the form handler calls verify().
+ * Keeps each challenge, a code with a render seed, in the session under a random id until the
+ * form is posted, and gives it exactly one attempt. Drawing codes, drawing pictures and
+ * comparing answers belong to the captchaImage service of citomni/image; serving the picture
+ * belongs to CaptchaController.
  *
- * Behavior:
- * - issue() draws a code and a render seed, stores them in the session with
- *   an expiry, and returns the challenge id. current() issues once per
- *   request and returns that id afterwards, so htmlField() and imagePath()
- *   refer to the same challenge.
- * - image() renders a pending challenge with its stored seed, so every
- *   request for it returns the same picture and a reload gives no second
- *   distortion to compare.
- * - verify() reads the id and answer fields from the POST body;
- *   verifyAnswer() takes them as arguments. Both remove the challenge before
- *   comparing, so every challenge gets exactly one attempt, right or wrong.
- * - Expired challenges never match. At most security.captcha.max_pending
- *   challenges are kept per session (several tabs or forms); issuing beyond
- *   that drops the oldest.
- * - With security.captcha_protection off, verify() and verifyAnswer() return
- *   true, as Csrf::verify() does with CSRF protection off.
- *
- * Notes:
- * - image() and the verify methods return without starting a session when
- *   the request carries no session cookie. Such a request cannot hold a
- *   challenge, and starting a session would create server state for every
- *   cookieless request.
- * - Stored entries without the expected shape are discarded like expired
- *   ones. The state is short-lived, so a format from another version costs
- *   one failed challenge, not an error page.
- * - Codes, pictures and the comparison come from the "captchaImage" service.
- *   Without it, issuing or checking a challenge fails with
+ * Rules:
+ * - Never send a code to the client; only the id and the picture leave the server.
+ * - Remove a challenge from the session before its answer is compared, so a wrong answer uses
+ *   it up too.
+ * - Never start a session for a request without the session cookie, except to issue a
+ *   challenge: Such a request cannot hold one, and a session for it would create server state
+ *   for every cookieless request.
+ * - Check cfg values once, in init(), and report a wrong one with CaptchaConfigException.
+ * - Reach the captchaImage service only through images(), so a missing one is reported with
  *   CaptchaConfigException.
- * - The package registers no route for CaptchaController; an app opts in with
- *   one route entry in /config/citomni_http_routes.php.
- *
- * Config node: security.captcha_protection and security.captcha (see init()).
  *
  * Typical usage:
- *   // Template, inside the form:
- *   {{{ $captchaField() }}}
- *   <img src="{{ $captchaUrl() }}" width="200" height="64" alt="Security code">
- *   <input type="text" name="captcha" autocomplete="off" required>
+ *   // The page with the form: Both calls refer to the same challenge.
+ *   $field = $this->app->captcha->htmlField();
+ *   $imagePath = $this->app->captcha->imagePath();
  *
- *   // Form handler:
+ *   // The form's action:
  *   if (!$this->app->captcha->verify()) {
- *       // Wrong, expired or missing: show the form again with a new challenge.
+ *       // Wrong, expired or missing: Show the form again with a new challenge.
  *   }
  */
 class Captcha extends BaseService {
 
-	// Challenge ids: 8 random bytes as lowercase hex.
+	/** Pattern of a challenge id: 8 random bytes as 16 lowercase hex characters. */
 	private const ID_PATTERN = '/^[0-9a-f]{16}$/D';
 
-	/** Whether captcha protection is on (security.captcha_protection). */
+	/** Whether captcha protection is on (cfg security.captcha_protection). */
 	private bool $enabled;
 
 	/** Session key holding the pending challenges. */
@@ -84,7 +61,7 @@ class Captcha extends BaseService {
 	/** Seconds a challenge stays valid. */
 	private int $ttl;
 
-	/** Pending challenges kept per session. */
+	/** Maximum number of pending challenges per session. */
 	private int $maxPending;
 
 	/** POST field carrying the challenge id. */
@@ -93,10 +70,10 @@ class Captcha extends BaseService {
 	/** POST field carrying the answer. */
 	private string $answerField;
 
-	/** App path routed to CaptchaController::image. */
+	/** App path of the challenge image, without query. */
 	private string $imagePath;
 
-	/** Session cookie name: session.name, or PHP's default when that is empty. */
+	/** Session cookie name: cfg session.name, or PHP's session.name setting when cfg has no non-empty string. */
 	private string $cookieName;
 
 	/** Challenge issued by current() during this request. */
@@ -104,21 +81,18 @@ class Captcha extends BaseService {
 
 
 	/**
-	 * Read and validate the captcha configuration.
+	 * Read and check the captcha cfg once.
 	 *
 	 * Behavior:
-	 * - security.captcha_protection (bool): Whether verification is enforced.
-	 * - security.captcha.session_key (string): Session key for pending challenges.
-	 * - security.captcha.ttl (int >= 1): Seconds a challenge stays valid.
-	 * - security.captcha.max_pending (int >= 1): Pending challenges per session.
-	 * - security.captcha.id_field, answer_field (string): POST field names;
-	 *   they must differ.
-	 * - security.captcha.image_path (string): App path routed to
-	 *   CaptchaController::image, starting with "/", without query or fragment.
-	 * - No session, request or image service is touched here.
+	 * - Requires, under cfg security: captcha_protection a bool; captcha.session_key,
+	 *   captcha.id_field and captcha.answer_field non-empty strings, the two fields different;
+	 *   captcha.ttl and captcha.max_pending ints >= 1; captcha.image_path an app path that
+	 *   starts with "/" and has no query, fragment or whitespace.
+	 * - Touches no session, request or image service.
 	 *
 	 * @return void
-	 * @throws CaptchaConfigException When a value is invalid.
+	 * @throws \CitOmni\Http\Exception\CaptchaConfigException  When a value breaks these requirements.
+	 * @see \CitOmni\Kernel\Service\BaseService::__construct()  Calls it once per instance.
 	 */
 	protected function init(): void {
 		$security = $this->app->cfg->security;
@@ -155,9 +129,9 @@ class Captcha extends BaseService {
 	// ----------------------------------------------------------------
 
 	/**
-	 * Whether captcha protection is on.
+	 * Check whether captcha protection is on.
 	 *
-	 * @return bool Value of security.captcha_protection.
+	 * @return bool  Value of cfg security.captcha_protection.
 	 */
 	public function isEnabled(): bool {
 		return $this->enabled;
@@ -167,22 +141,24 @@ class Captcha extends BaseService {
 	/**
 	 * Issue a new challenge and return its id.
 	 *
+	 * Stores a new code from the captchaImage service with a random render seed and an expiry
+	 * among the session's pending challenges.
+	 *
 	 * Behavior:
-	 * - Draws a code with captchaImage->code() and a random render seed, and
-	 *   appends them with an expiry to the session's pending challenges.
-	 * - Drops expired entries, then the oldest beyond max_pending.
-	 * - Starts the session when needed. Works whether or not captcha
-	 *   protection is on; templates check isEnabled() first.
+	 * - The challenge stays valid for cfg security.captcha.ttl seconds.
+	 * - Drops expired challenges, then the oldest beyond cfg security.captcha.max_pending.
+	 * - Starts the session when none is active.
+	 * - Issues whether or not captcha protection is on.
 	 *
 	 * Notes:
-	 * - The session may only start while headers can still be sent, as with
-	 *   Csrf::token(). Call it before output, or rely on output buffering.
+	 * - A session can only start while headers can still be sent: Call it before output, or
+	 *   rely on output buffering.
 	 *
 	 * Typical usage:
 	 *   $id = $this->app->captcha->issue();
 	 *
-	 * @return string Challenge id (16 lowercase hex characters).
-	 * @throws CaptchaConfigException When the captchaImage service is not registered.
+	 * @return string  Challenge id: 16 lowercase hex characters.
+	 * @throws \CitOmni\Http\Exception\CaptchaConfigException  When the captchaImage service is not registered; the session is then left untouched.
 	 */
 	public function issue(): string {
 		$images = $this->images();
@@ -199,8 +175,13 @@ class Captcha extends BaseService {
 	/**
 	 * Return this request's challenge id, issuing it on the first call.
 	 *
-	 * @return string Challenge id.
-	 * @throws CaptchaConfigException When the captchaImage service is not registered.
+	 * Behavior:
+	 * - Every later call on the same instance returns the same id, so the hidden field and the
+	 *   image path of one page refer to one challenge.
+	 *
+	 * @return string  Challenge id.
+	 * @throws \CitOmni\Http\Exception\CaptchaConfigException  When the first call finds no captchaImage service.
+	 * @see \CitOmni\Http\Service\Captcha::issue()  What issuing stores.
 	 */
 	public function current(): string {
 		return $this->current ??= $this->issue();
@@ -208,12 +189,15 @@ class Captcha extends BaseService {
 
 
 	/**
-	 * Return a hidden input carrying this request's challenge id.
+	 * Return a hidden input that carries this request's challenge id.
 	 *
-	 * Output is HTML-escaped. Use triple braces in templates: {{{ $captchaField() }}}.
+	 * Behavior:
+	 * - The field name is cfg security.captcha.id_field. Name and value are HTML-escaped, so
+	 *   the element can be output without further escaping.
 	 *
-	 * @return string Full <input type="hidden"> element.
-	 * @throws CaptchaConfigException When the captchaImage service is not registered.
+	 * @return string  A complete hidden input element.
+	 * @throws \CitOmni\Http\Exception\CaptchaConfigException  When the captchaImage service is not registered.
+	 * @see \CitOmni\Http\Service\Captcha::current()  Which challenge the id belongs to.
 	 */
 	public function htmlField(): string {
 		return '<input type="hidden" name="' . self::escape($this->idField) . '" value="' . self::escape($this->current()) . '">';
@@ -223,8 +207,9 @@ class Captcha extends BaseService {
 	/**
 	 * Return the app path of this request's challenge image.
 	 *
-	 * @return string security.captcha.image_path with "?id=" and the challenge id.
-	 * @throws CaptchaConfigException When the captchaImage service is not registered.
+	 * @return string  Cfg security.captcha.image_path with "?id=" and the challenge id.
+	 * @throws \CitOmni\Http\Exception\CaptchaConfigException  When the captchaImage service is not registered.
+	 * @see \CitOmni\Http\Service\Captcha::current()  Which challenge the id belongs to.
 	 */
 	public function imagePath(): string {
 		return $this->imagePath . '?id=' . $this->current();
@@ -232,22 +217,23 @@ class Captcha extends BaseService {
 
 
 	/**
-	 * Render the image of a pending challenge.
+	 * Render the picture of a pending challenge.
 	 *
 	 * Behavior:
-	 * - Renders with the challenge's stored seed, so repeated requests return
-	 *   the same picture.
-	 * - Returns null for an id that is not a string, is malformed, unknown or
-	 *   expired, and for a request without a session cookie, which is answered
-	 *   without starting a session.
-	 * - Does not consume the challenge and does not write the session.
+	 * - Renders with the challenge's stored seed, so every call for one challenge returns the
+	 *   same picture and a reload gives no second distortion to compare.
+	 * - Returns null when the id is not a string, is malformed, unknown or expired, and when
+	 *   no session is active and the request carries no session cookie; no session is started
+	 *   then.
+	 * - Never consumes the challenge and never writes the session.
 	 *
 	 * Typical usage:
 	 *   $png = $this->app->captcha->image($this->app->request->get('id'));
 	 *
-	 * @param mixed $id Challenge id from the request; untrusted.
-	 * @return array{data:string, format:string, mime:string, width:int, height:int, bytes:int}|null PNG, or null.
-	 * @throws CaptchaConfigException When the captchaImage service is not registered.
+	 * @param  mixed  $id  Challenge id from the request; untrusted.
+	 * @return array{data:string,format:string,mime:string,width:int,height:int,bytes:int}|null  The picture, or null.
+	 * @throws \CitOmni\Http\Exception\CaptchaConfigException  When the id names a pending challenge but the captchaImage service is not registered.
+	 * @see \CitOmni\Image\Service\CaptchaImage::render()  The picture and the exceptions of rendering it.
 	 */
 	public function image(mixed $id): ?array {
 		if (!\is_string($id) || \preg_match(self::ID_PATTERN, $id) !== 1 || !$this->hasSession()) {
@@ -272,17 +258,18 @@ class Captcha extends BaseService {
 	 * Verify the answer posted with the current request.
 	 *
 	 * Behavior:
-	 * - Reads security.captcha.id_field and answer_field from the POST body;
-	 *   a field that is missing or not a string counts as empty.
-	 * - Otherwise as verifyAnswer().
+	 * - Returns true without reading the request when captcha protection is off.
+	 * - Reads the id and the answer from the POST fields that cfg security.captcha.id_field
+	 *   and answer_field name; a field that is missing or not a string counts as empty.
 	 *
 	 * Typical usage:
 	 *   if (!$this->app->captcha->verify()) {
 	 *       $this->app->flash->error('The code was wrong. Try the new one.');
 	 *   }
 	 *
-	 * @return bool True when protection is off, or the answer matches a pending challenge.
-	 * @throws CaptchaConfigException When a challenge matches but the captchaImage service is not registered.
+	 * @return bool  True when protection is off, or the answer matches the pending challenge.
+	 * @throws \CitOmni\Http\Exception\CaptchaConfigException  When the id names a pending challenge but the captchaImage service is not registered.
+	 * @see \CitOmni\Http\Service\Captcha::verifyAnswer()  How the answer is checked and the challenge used up.
 	 */
 	public function verify(): bool {
 		if (!$this->enabled) {
@@ -297,24 +284,27 @@ class Captcha extends BaseService {
 
 
 	/**
-	 * Verify an answer for a challenge id.
+	 * Verify an answer for a challenge id and use the challenge up.
+	 *
+	 * Each challenge gets exactly one attempt, right or wrong, so a solved or guessed picture
+	 * cannot be replayed.
 	 *
 	 * Behavior:
-	 * - Returns true without checking when captcha protection is off.
-	 * - Removes the challenge from the session first, so it never gets a
-	 *   second attempt; expired entries are dropped in the same write.
-	 * - Compares with captchaImage->verify(): ASCII case-insensitive,
-	 *   whitespace ignored, constant time.
-	 * - Returns false without starting a session when the request carries no
-	 *   session cookie.
+	 * - Returns true without reading the session when captcha protection is off.
+	 * - Returns false without starting a session when none is active and the request carries
+	 *   no session cookie.
+	 * - Otherwise removes the challenge from the session before comparing, and drops expired
+	 *   challenges in the same write; the session key is removed when nothing is left pending.
+	 * - Returns false for an unknown or expired id.
 	 *
 	 * Typical usage:
 	 *   $ok = $this->app->captcha->verifyAnswer($payload['captcha_id'], $payload['captcha']);
 	 *
-	 * @param string $id Challenge id from the request.
-	 * @param string $answer Answer from the request.
-	 * @return bool True when protection is off, or the answer matches the pending challenge.
-	 * @throws CaptchaConfigException When a challenge matches but the captchaImage service is not registered.
+	 * @param  string  $id  Challenge id from the request.
+	 * @param  string  $answer  Answer from the request.
+	 * @return bool  True when protection is off, or the answer matches the pending challenge.
+	 * @throws \CitOmni\Http\Exception\CaptchaConfigException  When the id names a pending challenge but the captchaImage service is not registered; the challenge is used up all the same.
+	 * @see \CitOmni\Image\Service\CaptchaImage::verify()  How the answer is compared with the code.
 	 */
 	public function verifyAnswer(string $id, string $answer): bool {
 		if (!$this->enabled) {
@@ -351,12 +341,18 @@ class Captcha extends BaseService {
 	// ----------------------------------------------------------------
 
 	/**
-	 * Pending, unexpired challenges from the session, oldest first.
+	 * Return the pending, unexpired challenges from the session, oldest first.
 	 *
-	 * Starts the session when needed. Entries without the expected shape are
-	 * left out.
+	 * Behavior:
+	 * - Never creates a session.
+	 * - Leaves out entries without the expected shape, like expired ones.
 	 *
-	 * @return list<array{0:string, 1:string, 2:int, 3:int}> Id, code, render seed, expiry (Unix time).
+	 * Notes:
+	 * - The state is short-lived, so an entry in a format from another version costs one
+	 *   failed challenge, not an error page.
+	 *
+	 * @return list<array{0:string,1:string,2:int,3:int}>  Id, code, render seed, expiry as Unix time.
+	 * @see \CitOmni\Http\Service\Session::get()  When a read resumes a session.
 	 */
 	private function pending(): array {
 		$stored = $this->app->session->get($this->sessionKey);
@@ -385,10 +381,9 @@ class Captcha extends BaseService {
 
 
 	/**
-	 * Whether the request can belong to a session: one is active, or the
-	 * request carries the session cookie.
+	 * Check whether the request can belong to a session.
 	 *
-	 * @return bool True when reading the session is worthwhile.
+	 * @return bool  True when a session is active or the request carries the session cookie.
 	 */
 	private function hasSession(): bool {
 		return $this->app->session->isActive() || $this->app->request->cookie($this->cookieName) !== null;
@@ -396,10 +391,10 @@ class Captcha extends BaseService {
 
 
 	/**
-	 * Return the captchaImage service from citomni/image.
+	 * Return the captchaImage service.
 	 *
-	 * @return object The service.
-	 * @throws CaptchaConfigException When it is not registered.
+	 * @return object  The service registered as captchaImage.
+	 * @throws \CitOmni\Http\Exception\CaptchaConfigException  When no captchaImage service is registered.
 	 */
 	private function images(): object {
 		if (!$this->app->hasService('captchaImage')) {
@@ -411,10 +406,10 @@ class Captcha extends BaseService {
 
 
 	/**
-	 * Escape a value for an HTML attribute.
+	 * Escape a value for a double- or single-quoted HTML attribute.
 	 *
-	 * @param string $value Value.
-	 * @return string Escaped value.
+	 * @param  string  $value  UTF-8 text; invalid sequences become U+FFFD.
+	 * @return string
 	 */
 	private static function escape(string $value): string {
 		return \htmlspecialchars($value, \ENT_QUOTES | \ENT_SUBSTITUTE, 'UTF-8');
@@ -422,12 +417,12 @@ class Captcha extends BaseService {
 
 
 	/**
-	 * Validate a non-empty string under security.captcha.
+	 * Check a cfg value under security.captcha that must be a non-empty string.
 	 *
-	 * @param mixed $value Raw value.
-	 * @param string $key Key below security.captcha.
-	 * @return string Value.
-	 * @throws CaptchaConfigException When invalid.
+	 * @param  mixed  $value  Raw cfg value.
+	 * @param  string  $key  Key below security.captcha, for the message.
+	 * @return string  The value, unchanged.
+	 * @throws \CitOmni\Http\Exception\CaptchaConfigException  When the value is not a non-empty string.
 	 */
 	private static function cfgString(mixed $value, string $key): string {
 		if (!\is_string($value) || $value === '') {
@@ -439,12 +434,12 @@ class Captcha extends BaseService {
 
 
 	/**
-	 * Validate a positive int under security.captcha.
+	 * Check a cfg value under security.captcha that must be an int >= 1.
 	 *
-	 * @param mixed $value Raw value.
-	 * @param string $key Key below security.captcha.
-	 * @return int Value.
-	 * @throws CaptchaConfigException When invalid.
+	 * @param  mixed  $value  Raw cfg value.
+	 * @param  string  $key  Key below security.captcha, for the message.
+	 * @return int  The value, unchanged.
+	 * @throws \CitOmni\Http\Exception\CaptchaConfigException  When the value is not an int >= 1.
 	 */
 	private static function cfgPositiveInt(mixed $value, string $key): int {
 		if (!\is_int($value) || $value < 1) {

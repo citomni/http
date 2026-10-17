@@ -16,15 +16,15 @@ declare(strict_types=1);
 namespace CitOmni\Http\Exception;
 
 /**
- * WebhooksAuthConfigException: Invalid configuration for the WebhooksAuth service.
+ * WebhooksAuthConfigException: Exception for webhook authentication settings that the host app set wrongly.
  *
- * Thrown during init() when:
- * - The secret file is missing, unreadable, or returns invalid data.
- * - Required scalar values (ttl_seconds, algo, header names) are out of range.
- * - The HMAC algorithm is unsupported.
+ * Marks a configuration error in the host app, such as an invalid webhooks cfg value or an
+ * unusable secret file, not a rejected request: Let it reach the global error handler, so a
+ * broken setup fails loudly instead of passing for a webhook that rejects every request.
+ * Fixing it belongs to the host app's cfg files or its secret file.
  *
- * This is a fail-fast condition: misconfiguration at boot must not silently
- * degrade to "auth always fails" - the application should refuse to start.
+ * Rules:
+ * - Name the cfg key or the secret file to fix in the message.
  */
 class WebhooksAuthConfigException extends WebhooksAuthException {
 }

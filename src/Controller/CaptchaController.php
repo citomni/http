@@ -18,38 +18,34 @@ namespace CitOmni\Http\Controller;
 use CitOmni\Kernel\Controller\BaseController;
 
 /**
- * CaptchaController: Serves the images of challenges issued by the captcha service.
+ * CaptchaController: HTTP adapter that serves the images of pending captcha challenges.
  *
- * Routing:
- * - Opt-in. This package registers no route for it, so apps that do not use
- *   captchas expose no endpoint. An app that does adds one entry to
- *   /config/citomni_http_routes.php, at the path in security.captcha.image_path:
+ * Gives the browser the picture of a challenge that the captcha service issued. It shapes the
+ * response; which challenges exist, and what they look like, belongs to the captcha service.
  *
- *     '/captcha.png' => [
- *         'controller' => \CitOmni\Http\Controller\CaptchaController::class,
- *         'action'     => 'image',
- *         'methods'    => ['GET'],
- *     ],
+ * Rules:
+ * - Read only: Never consume or change a challenge. Checking an answer belongs to the form's
+ *   own action.
  */
 class CaptchaController extends BaseController {
 
 	/**
-	 * GET {security.captcha.image_path}?id={challenge id}
+	 * Send the PNG of the pending challenge that query parameter id names.
 	 *
 	 * Behavior:
-	 * - Sends the PNG of a pending challenge with no-store caching and exits.
-	 *   A challenge always yields the same picture.
-	 * - Answers 404 without a body when captcha protection is off, and when the
-	 *   id is missing, malformed, unknown or expired. Nothing is logged: such
-	 *   requests are routine for bots.
+	 * - 200 with the image, its Content-Type and Content-Length, X-Content-Type-Options: nosniff
+	 *   and no-cache headers, then ends the request.
+	 * - 404 without a body and with no-cache headers when captcha protection is off, or when
+	 *   Captcha::image() has no picture for the id. Nothing is logged: Such requests are
+	 *   routine for bots.
 	 *
 	 * Notes:
-	 * - A request without a session cookie gets its 404 without a session
-	 *   being started.
-	 * - Each image costs a few milliseconds of CPU; rate-limit the route where
-	 *   that matters.
+	 * - Route it for GET at the app path that cfg security.captcha.image_path names, so the
+	 *   paths that Captcha::imagePath() returns reach it.
+	 * - Each image costs a few milliseconds of CPU; rate-limit the route where that matters.
 	 *
 	 * @return void
+	 * @see \CitOmni\Http\Service\Captcha::image()  Which ids have a picture, the same one on every request, and when no session is started.
 	 */
 	public function image(): void {
 		$captcha = $this->app->captcha;

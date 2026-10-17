@@ -19,160 +19,80 @@ use CitOmni\Http\Util\Url;
 use CitOmni\Kernel\Service\BaseService;
 
 /**
- * Response: Lean HTTP response utilities for CitOmni.
+ * Response: HTTP service that sends the status, headers and body of the response.
  *
- * Responsibilities:
- * - Emit deterministic HTTP responses:
- *   1) Redirects with CRLF-sanitized Location
- *   2) JSON, text, and HTML bodies with correct Content-Type
- *   3) RFC 7807 Problem Details payloads
- *   4) File downloads with safe headers and clean output buffers
- * - Provide opinionated, inline-friendly hardening headers for Admin/Member pages.
+ * Gives controllers and services one place to answer a request, so header injection,
+ * charset and the end of the request are handled the same way everywhere. What to answer
+ * belongs to the caller; rendering templates belongs to TemplateEngine.
  *
- * Collaborators:
- * - log (optional): Used for diagnostics when headers were already sent.
- * - cfg (read-only): Uses $this->app->cfg->locale->charset for Content-Type.
- *
- * Configuration keys:
- * - cfg.locale.charset (string) - Output charset for textual responses. Default defined by app cfg.
- *
- * Error handling:
- * - Fail fast: No blanket try/catch. Exceptions bubble to the global error handler.
- * - Mutating operations do nothing when headers were already sent and will be logged if log service exists.
- *
- * Typical usage:
- *
- *   // JSON OK
- *   $this->app->response->jsonStatus(['ok' => true], 200);
- *
- *   // Problem Details
- *   $this->app->response->jsonProblem('Not Found', 404, 'User is missing', 'https://docs.example.com/problems/user-missing');
- *
- *   // Admin page security headers (inline CSS/JS allowed)
- *   $this->app->response->adminHeaders();
- *
- *   // Safe download
- *   $this->app->response->download(CITOMNI_APP_PATH . '/var/backups/site.zip', 'backup.zip');
- *
- * Examples:
- *
- *   // Redirect to login, 302
- *   $this->app->response->redirect('/login');
- *
- *   // Member page: do not index, allow https CDNs in CSP
- *   $this->app->response->memberHeaders(true, true);
- *
- * Failure:
- *
- *   // Missing file causes RuntimeException which is logged by global handler
- *   $this->app->response->download('/nope/absent.bin');
- *
- * Standalone:
- *
- *   // This service is invoked via $this->app->response inside controllers or services.
- *   // No separate bootstrap is required beyond CitOmni app initialization.
+ * Rules:
+ * - Sanitize every header name and value that comes from an argument: No CR or LF may reach
+ *   a header.
+ * - Write a body only in a method that ends the request; such a method never returns.
+ * - Never throw because headers were already sent.
  */
 class Response extends BaseService {
 
-	/**
-	 * Service bootstrap hook.
-	 *
-	 * Behavior:
-	 * - Keep initialization minimal for cold-start performance.
-	 *
-	 * Notes:
-	 * - This service does not keep internal state; no warm-up required.
-	 *
-	 * Typical usage:
-	 *   // Nothing to call explicitly; the app constructs the service as needed.
-	 *
-	 * @return void
-	 */
-	/* 
-	protected function init(): void {
-		// Intentionally empty (lean boot).
-	}
-	*/
 
-
-
-
-/*
- *---------------------------------------------------------------
- * REDIRECTS & STATUS LINE
- *---------------------------------------------------------------
- * PURPOSE
- *   Emit HTTP status lines and redirects in a safe, predictable way.
- *
- * NOTES
- *   - Respect headers_sent(); log and return early when necessary.
- *   - Redirects sanitize header values to avoid injection and call exit.
- */
+	// ----------------------------------------------------------------
+	// Status and redirects
+	// ----------------------------------------------------------------
 
 
 	/**
-	 * Set the HTTP status code for the current response.
+	 * Set the status code of the response.
 	 *
 	 * Behavior:
-	 * - If headers are already sent, no status line can be emitted.
-	 *   Logs the situation (if a logger service exists) and returns early.
-	 * - Otherwise sets the status using PHP's native http_response_code().
+	 * - When headers are already sent, changes nothing and logs it through the log service,
+	 *   when registered.
 	 *
-	 * Notes:
-	 * - This method intentionally does not throw; it fails fast by returning
-	 *   when headers are sent, since emitting a status line is no longer possible.
-	 *
-	 * @param int $statusCode Valid HTTP status code (e.g., 200, 302, 404, 500).
+	 * @param  int  $statusCode  HTTP status code, such as 404.
 	 * @return void
 	 */
 	public function setStatus(int $statusCode): void {
 		
-		// If output (headers) has already begun, we cannot change the status code.
-		// We log for diagnostics and return without attempting to set it.
 		if (\headers_sent()) {
 			$this->logHeadersAlreadySent(__METHOD__, ['status' => $statusCode]);
 			return;
 		}
 
-		// Safe to set the HTTP status line.
 		\http_response_code($statusCode);
 	}
 		
 
 	/**
-	 * Send a redirect response and terminate execution.
+	 * Redirect the client and end the request.
 	 *
 	 * Behavior:
-	 * - Treats app-local paths (for example "/login.html") as public-root-relative
-	 *   and prefixes them with CITOMNI_PUBLIC_ROOT_URL.
-	 * - Removes CR/LF from the final Location value to prevent header injection.
-	 * - Sends the Location header with the supplied status code.
-	 * - Terminates execution deterministically.
+	 * - Sends a Location header with $statusCode and writes no body.
+	 * - A local path is prefixed with CITOMNI_PUBLIC_ROOT_URL without its trailing slash; any
+	 *   other URL is sent as given.
+	 * - Removes CR and LF from the Location value.
+	 * - When headers are already sent, sends nothing, logs it through the log service when
+	 *   registered, and still ends the request.
 	 *
 	 * Notes:
-	 * - Non-local URLs are sent as provided after header-value sanitization.
-	 * - If headers have already been sent, the method logs the situation when a
-	 *   log service exists and still terminates.
-	 * - In HTTP mode, CITOMNI_PUBLIC_ROOT_URL is expected to be defined by the
-	 *   kernel before this method is called.
+	 * - Does not guard against open redirects: Check a target taken from the request with
+	 *   Url::isLocal() before passing it.
+	 * - Assumes that CITOMNI_PUBLIC_ROOT_URL is defined when $url is a local path; without it,
+	 *   PHP throws \Error.
 	 *
 	 * Typical usage:
 	 *   $this->app->response->redirect('/login.html');
-	 *   $this->app->response->redirect('https://example.com/new', 301);
 	 *
-	 * @param string $url Redirect target. App-local paths are resolved against the public root.
-	 * @param int $statusCode HTTP status code to send with the redirect header.
+	 * @param  string  $url  Local path such as "/login.html", or an absolute URL.
+	 * @param  int  $statusCode  Redirect status, such as 301, 302 or 303.
 	 * @return never
+	 * @see \CitOmni\Http\Util\Url::isLocal()  What counts as a local path.
 	 */
 	public function redirect(string $url, int $statusCode = 302): never {
 		if (!\headers_sent()) {
 			
-			// Resolve app-local paths against the detected public root.
+			// A local path is relative to the app's public root, which may lie below a subpath.
 			if (Url::isLocal($url)) {
 				$url = \rtrim((string)\CITOMNI_PUBLIC_ROOT_URL, '/') . $url;
 			}
 
-			// Strip CR/LF before emitting the Location header.
 			$loc = $this->sanitizeHeaderValue($url);
 			\header('Location: ' . $loc, true, $statusCode);
 			
@@ -189,36 +109,27 @@ class Response extends BaseService {
 
 
 
-/*
- *---------------------------------------------------------------
- * GENERIC HEADERS - Low-level primitives
- *---------------------------------------------------------------
- * PURPOSE
- *   Set raw headers and caching directives without side effects.
- *
- * NOTES
- *   - Keep these focused: no body output, no exit.
- *   - Use as building blocks for higher-level responses.
- */
+	// ----------------------------------------------------------------
+	// Headers
+	// ----------------------------------------------------------------
 
 
 	/**
-	 * Send a single HTTP header line (CRLF-safe).
+	 * Send one response header.
 	 *
 	 * Behavior:
-	 * - Sanitizes header name and value to avoid injection.
-	 * - If $statusCode > 0, sets that status as part of the header call.
-	 *
-	 * Notes:
-	 * - No-op if headers were already sent; logs for diagnostics if log service exists.
+	 * - Every byte of the name other than an ASCII letter, a digit or "-" becomes "-"; CR and
+	 *   LF are removed from the value.
+	 * - When headers are already sent, sends nothing and logs it through the log service,
+	 *   when registered.
 	 *
 	 * Typical usage:
 	 *   $this->app->response->setHeader('X-Robots-Tag', 'noindex, noarchive');
 	 *
-	 * @param string $name Header name (token characters only).
-	 * @param string $value Header value.
-	 * @param bool $replace Replace previous header with same name (default true).
-	 * @param int $statusCode Optional status code to set (0 means none).
+	 * @param  string  $name  Header name.
+	 * @param  string  $value
+	 * @param  bool  $replace  Replace an earlier header of the same name; false adds another.
+	 * @param  int  $statusCode  Status code to set with the header; 0 or less leaves the status.
 	 * @return void
 	 */
 	public function setHeader(string $name, string $value, bool $replace = true, int $statusCode = 0): void {
@@ -238,16 +149,16 @@ class Response extends BaseService {
 
 
 	/**
-	 * Sends strict HTTP no-cache headers to the client (idempotent).
+	 * Forbid caching of the response.
 	 *
 	 * Behavior:
-	 * - Sends Cache-Control, Pragma, and Expires headers to prevent caching.
-	 *
-	 * Notes:
-	 * - Safe to call multiple times. No-ops and logs if headers already sent.
+	 * - Sends Cache-Control "no-store, no-cache, must-revalidate, max-age=0", Pragma
+	 *   "no-cache" and Expires "0", each replacing an earlier header of the same name.
+	 * - When headers are already sent, sends nothing and logs it through the log service,
+	 *   when registered.
 	 *
 	 * Typical usage:
-	 *   $this->app->response->noCache(); // before JSON or HTML
+	 *   $this->app->response->noCache();
 	 *
 	 * @return void
 	 */
@@ -263,18 +174,16 @@ class Response extends BaseService {
 
 
 	/**
-	 * Disallow indexing/snippets and apply conservative no-cache.
+	 * Ask search engines not to index or archive the response, and forbid caching.
 	 *
 	 * Behavior:
-	 * - Sends `X-Robots-Tag: noindex, noarchive` and a conservative Cache-Control.
-	 *
-	 * Notes:
-	 * - Safe to combine with noCache().
-	 *
-	 * Typical usage:
-	 *   $this->app->response->noIndex();
+	 * - Sends X-Robots-Tag "noindex, noarchive", Cache-Control "no-store, no-cache,
+	 *   must-revalidate, max-age=0", Pragma "no-cache" and Expires "0".
+	 * - Sends each header through setHeader(), so with headers already sent each one is
+	 *   logged.
 	 *
 	 * @return void
+	 * @see \CitOmni\Http\Service\Response::setHeader()  What happens when headers are already sent.
 	 */
 	public function noIndex(): void {
 		$this->setHeader('X-Robots-Tag', 'noindex, noarchive');
@@ -285,36 +194,31 @@ class Response extends BaseService {
 
 
 
-/*
- *---------------------------------------------------------------
- * SECURITY & POLICIES - Hardened response presets
- *---------------------------------------------------------------
- * PURPOSE
- *   Emit security-related headers (CSP, XFO, HSTS, etc.) for member/admin UIs.
- *
- * NOTES
- *   - `memberHeaders()` optionally allows external CDNs.
- *   - `adminHeaders()` is stricter; adds HSTS when HTTPS is detected.
- */
+	// ----------------------------------------------------------------
+	// Security header presets
+	// ----------------------------------------------------------------
 
 
 	/**
-	 * Recommended headers for authenticated member pages.
+	 * Send the cache, robots and security headers for a page behind a member login.
 	 *
 	 * Behavior:
-	 * - Applies strict no-cache.
-	 * - Optionally sends robots noindex/nofollow/noarchive/nosnippet.
-	 * - Applies inline-friendly CSP with optional https: allowance.
-	 * - Adds basic hardening headers (X-Frame-Options, X-Content-Type-Options, Referrer-Policy).
-	 *
-	 * Notes:
-	 * - Idempotent and safe to call early. Logs if headers were already sent.
+	 * - Sends the cache headers of noCache().
+	 * - With $noIndex, X-Robots-Tag "noindex, nofollow, noarchive, nosnippet".
+	 * - X-Frame-Options "SAMEORIGIN", X-Content-Type-Options "nosniff", Referrer-Policy
+	 *   "strict-origin-when-cross-origin" and Permissions-Policy "browsing-topics=()".
+	 * - Content-Security-Policy: default-src, base-uri, frame-ancestors, img-src, style-src,
+	 *   script-src and connect-src allow 'self', and object-src is 'none'. img-src also allows
+	 *   data: and blob:; style-src and script-src also allow 'unsafe-inline'. With
+	 *   $allowExternal, img-src, style-src, script-src and connect-src also allow https:.
+	 * - When headers are already sent, sends nothing and logs it through the log service,
+	 *   when registered.
 	 *
 	 * Typical usage:
-	 *   $this->app->response->memberHeaders(true, true);
+	 *   $this->app->response->memberHeaders();
 	 *
-	 * @param bool $noIndex Send X-Robots-Tag noindex (default true).
-	 * @param bool $allowExternal Allow https: sources in CSP (default true).
+	 * @param  bool  $noIndex  Send the X-Robots-Tag header.
+	 * @param  bool  $allowExternal  Allow https: sources in the Content-Security-Policy.
 	 * @return void
 	 */
 	public function memberHeaders(bool $noIndex = true, bool $allowExternal = true): void {
@@ -324,20 +228,17 @@ class Response extends BaseService {
 		}
 
 		
-		// Freshness + privacy
 		$this->noCache();
 		if ($noIndex) {
 			$this->setHeader('X-Robots-Tag', 'noindex, nofollow, noarchive, nosnippet');
 		}
 
-		// Security hardening
 		$this->setHeader('X-Frame-Options', 'SAMEORIGIN');
 		$this->setHeader('X-Content-Type-Options', 'nosniff');
 		$this->setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
-		// $this->setHeader('Permissions-Policy', 'interest-cohort=()'); // Deprecated?
 		$this->setHeader('Permissions-Policy', 'browsing-topics=()');
 
-		// CSP: Inline-friendly (as in inline CSS/JS), optionally allow HTTPS CDNs/APIs
+		// Inline styles and scripts stay allowed: Member pages may use inline CSS and JS without nonces.
 		$https = $allowExternal ? ' https:' : '';
 		$this->setHeader(
 			'Content-Security-Policy',
@@ -352,21 +253,31 @@ class Response extends BaseService {
 
 
 	/**
-	 * Recommended headers for Admin pages (inline-friendly CSP).
+	 * Send the cache, robots and security headers for a page behind an admin login.
 	 *
 	 * Behavior:
-	 * - Applies strict no-cache and robots noindex/nofollow/noarchive/nosnippet.
-	 * - Applies inline-friendly CSP restricted to self.
-	 * - Sends basic hardening headers and HSTS if HTTPS is detected.
+	 * - Sends the cache headers of noCache().
+	 * - X-Robots-Tag "noindex, nofollow, noarchive, nosnippet", X-Frame-Options "SAMEORIGIN",
+	 *   X-Content-Type-Options "nosniff", Referrer-Policy "strict-origin-when-cross-origin"
+	 *   and Permissions-Policy "browsing-topics=()".
+	 * - Content-Security-Policy: default-src, base-uri, frame-ancestors, img-src, style-src,
+	 *   script-src and connect-src allow 'self', and object-src is 'none'. img-src also allows
+	 *   data: and blob:; style-src and script-src also allow 'unsafe-inline'. No external
+	 *   source is allowed.
+	 * - Over HTTPS, as isHttps() of the request service decides, also Strict-Transport-Security
+	 *   "max-age=15552000; includeSubDomains; preload".
+	 * - When headers are already sent, sends nothing and logs it through the log service,
+	 *   when registered.
 	 *
 	 * Notes:
-	 * - Prefer server-level HSTS, but header here is acceptable if needed.
-	 * - Logs if headers already sent.
+	 * - HSTS with includeSubDomains and preload binds every subdomain of the host to HTTPS
+	 *   for 180 days. Prefer HSTS from the web server where that is not wanted.
 	 *
 	 * Typical usage:
 	 *   $this->app->response->adminHeaders();
 	 *
 	 * @return void
+	 * @see \CitOmni\Http\Service\Request::isHttps()  When the request counts as HTTPS.
 	 */
 	public function adminHeaders(): void {
 		if (\headers_sent()) {
@@ -374,21 +285,17 @@ class Response extends BaseService {
 			return;
 		}
 
-		// Cache & robots
 		$this->noCache();
 		
-		// Stricter than noIndex(): also prevents snippets/follow
 		$this->setHeader('X-Robots-Tag', 'noindex, nofollow, noarchive, nosnippet');
 		
-		// Security hardening
 		$this->setHeader('X-Frame-Options', 'SAMEORIGIN');
 		$this->setHeader('X-Content-Type-Options', 'nosniff');
 		$this->setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
-		// $this->setHeader('Permissions-Policy', 'interest-cohort=()');  // Deprecated?
 		$this->setHeader('Permissions-Policy', 'browsing-topics=()');
 
 		
-		// CSP: allow inline since Admin theme is inline; tighten later with nonces if possible
+		// Inline styles and scripts stay allowed: Assumes admin pages use inline CSS and JS without nonces. Tighten once they carry nonces.
 		$this->setHeader(
 			'Content-Security-Policy',
 			"default-src 'self'; " .
@@ -399,7 +306,6 @@ class Response extends BaseService {
 			"connect-src 'self'"
 		);
 
-		// HSTS only when this connection is HTTPS (prefer server-level, but fine here if needed).
 		// Transport, not site policy: Browsers ignore HSTS received over plain HTTP.
 		if ($this->app->request->isHttps()) {
 			$this->setHeader('Strict-Transport-Security', 'max-age=15552000; includeSubDomains; preload');
@@ -410,42 +316,26 @@ class Response extends BaseService {
 
 
 
-/*
- *---------------------------------------------------------------
- * JSON RESPONSES - APIs & AJAX (incl. Problem Details)
- *---------------------------------------------------------------
- * PURPOSE
- *   Serialize arrays to JSON and emit proper status + headers.
- *
- * NOTES
- *   - Content-Type: application/json; charset=<cfg.locale.charset>.
- *   - Uses JSON_THROW_ON_ERROR; fail fast on encoding errors.
- *   - Methods echo the payload and call exit to avoid extra output.
- *   - *NoCache* variants add no-store/no-cache directives.
- *   - Problem Details (RFC 7807): payload shape (type,title,status,detail,...).
- *     For strict media type, set `application/problem+json` explicitly if needed.
- */
+	// ----------------------------------------------------------------
+	// JSON responses
+	// ----------------------------------------------------------------
 
 
 	/**
-	 * Sends a JSON 200 OK and immediately terminates the script.
-	 * Sets the appropriate Content-Type header, encodes the data array as JSON,
-	 * outputs the result, and stops further script execution.
+	 * Write data as a JSON body and end the request.
 	 *
 	 * Behavior:
-	 * - Sends Content-Type and echoes JSON-encoded payload with strict flags.
-	 * - Optional pretty-print for developer inspection when $di === true.
-	 *
-	 * Notes:
-	 * - Deterministic termination. Use jsonStatus() to set a custom status code.
+	 * - Sends Content-Type "application/json; charset=" with cfg locale.charset, or UTF-8
+	 *   without it, and writes $data as JSON without escaped slashes or Unicode.
+	 * - Keeps the status set before the call; use jsonStatus() to set one.
+	 * - When headers are already sent, writes the body without Content-Type.
 	 *
 	 * Typical usage:
-	 *   $this->app->response->json(['ok' => true], true); // pretty JSON in dev
+	 *   $this->app->response->json(['ok' => true]);
 	 *
-	 * @param array $data JSON-serializable payload.
-	 * @param bool  $di   Developer-inspect: when true, adds JSON_PRETTY_PRINT (default: false).
+	 * @param  array<mixed>  $data  Data to encode.
+	 * @param  bool  $di  Pretty-print the JSON.
 	 * @return never
-	 * @throws \JsonException When payload cannot be encoded.
 	 */
 	public function json(array $data, bool $di = false): never {
 		if (!\headers_sent()) {
@@ -461,19 +351,16 @@ class Response extends BaseService {
 
 
 	/**
-	 * Sends a JSON 200 OK with strict no-cache and terminates the script.
-	 * Emits no-store/no-cache headers before delegating to json().
-	 *
-	 * Behavior:
-	 * - Sets no-cache headers and outputs JSON.
-	 * - Optional pretty-print for developer inspection when $di === true.
+	 * Forbid caching, then write data as a JSON body and end the request.
 	 *
 	 * Typical usage:
-	 *   $this->app->response->jsonNoCache(['fresh' => true], true);
+	 *   $this->app->response->jsonNoCache(['ok' => true]);
 	 *
-	 * @param array $data JSON-serializable payload.
-	 * @param bool  $di   Developer-inspect: when true, adds JSON_PRETTY_PRINT (default: false).
-	 * @return void
+	 * @param  array<mixed>  $data  Data to encode.
+	 * @param  bool  $di  Pretty-print the JSON.
+	 * @return void  Never returns: json() ends the request.
+	 * @see \CitOmni\Http\Service\Response::noCache()  The cache headers.
+	 * @see \CitOmni\Http\Service\Response::json()  The body and the end of the request.
 	 */
 	public function jsonNoCache(array $data, bool $di = false): void {
 		$this->noCache();
@@ -482,21 +369,22 @@ class Response extends BaseService {
 	
 
 	/**
-	 * Sends a JSON response with a custom HTTP status and terminates the script.
-	 * Sets the status code, Content-Type header, encodes the data, and exits.
+	 * Set the status, write data as a JSON body and end the request.
 	 *
 	 * Behavior:
-	 * - Deterministic termination after emitting JSON body and status.
-	 * - Optional pretty-print for developer inspection when $di === true.
+	 * - Sets the status through setStatus(), sends Content-Type "application/json; charset="
+	 *   with cfg locale.charset, or UTF-8 without it, and writes $data as JSON without escaped
+	 *   slashes or Unicode.
+	 * - When headers are already sent, writes the body without status or Content-Type.
 	 *
 	 * Typical usage:
-	 *   $this->app->response->jsonStatus(['ok' => true], 201, true);
+	 *   $this->app->response->jsonStatus(['ok' => false, 'error' => 'invalid_input'], 422);
 	 *
-	 * @param array $data       JSON-serializable payload.
-	 * @param int   $statusCode HTTP status code (e.g., 200, 201, 400).
-	 * @param bool  $di         Developer-inspect: when true, adds JSON_PRETTY_PRINT (default: false).
+	 * @param  array<mixed>  $data  Data to encode.
+	 * @param  int  $statusCode  HTTP status code.
+	 * @param  bool  $di  Pretty-print the JSON.
 	 * @return never
-	 * @throws \JsonException When payload cannot be encoded.
+	 * @see \CitOmni\Http\Service\Response::setStatus()  What happens when headers are already sent.
 	 */
 	public function jsonStatus(array $data, int $statusCode = 200, bool $di = false): never {
 		$this->setStatus($statusCode);
@@ -513,20 +401,17 @@ class Response extends BaseService {
 
 
 	/**
-	 * Sends a JSON response with a custom HTTP status and strict no-cache.
-	 * Emits no-store/no-cache headers and delegates to jsonStatus().
-	 *
-	 * Behavior:
-	 * - Sets status+no-cache and outputs JSON.
-	 * - Optional pretty-print for developer inspection when $di === true.
+	 * Forbid caching, then set the status, write data as a JSON body and end the request.
 	 *
 	 * Typical usage:
-	 *   $this->app->response->jsonStatusNoCache(['ok' => true], 200, true);
+	 *   $this->app->response->jsonStatusNoCache(['ok' => true], 200);
 	 *
-	 * @param array $data       JSON-serializable payload.
-	 * @param int   $statusCode HTTP status code.
-	 * @param bool  $di         Developer-inspect: when true, adds JSON_PRETTY_PRINT (default: false).
-	 * @return void
+	 * @param  array<mixed>  $data  Data to encode.
+	 * @param  int  $statusCode  HTTP status code.
+	 * @param  bool  $di  Pretty-print the JSON.
+	 * @return void  Never returns: jsonStatus() ends the request.
+	 * @see \CitOmni\Http\Service\Response::noCache()  The cache headers.
+	 * @see \CitOmni\Http\Service\Response::jsonStatus()  The status, the body and the end of the request.
 	 */
 	public function jsonStatusNoCache(array $data, int $statusCode = 200, bool $di = false): void {
 		$this->noCache();
@@ -535,47 +420,32 @@ class Response extends BaseService {
 
 
 	/**
-	 * Sends an RFC 7807 Problem Details JSON response (production-ready).
-	 *
-	 * Sends `application/problem+json` and terminates execution. Core fields
-	 * (`type`, `title`, `status`, `detail`, and `instance` when available) are
-	 * protected from being overridden by `$extra` to keep invariants intact.
+	 * Answer with an RFC 7807 problem details body and end the request.
 	 *
 	 * Behavior:
-	 * - Sets HTTP status code first, then headers (if not already sent).
-	 * - Uses `$extra` only to add *additional* members; base keys win on conflict.
-	 * - Adds `instance` from the current request URI when the Request service exists.
-	 * - Uses JSON_THROW_ON_ERROR for deterministic failures.
-	 * - Calls `exit;` to prevent partial responses (fail fast).
-	 * - Optional pretty-print for developer inspection when `$di === true`.
-	 *
-	 * Notes:
-	 * - Choose an appropriate 4xx/5xx `$status`.
-	 * - If headers are already sent, the body is still emitted without content-type.
-	 * - Caching policy is caller's choice; call `$this->noCache()` beforehand if needed.
+	 * - Sets the status through setStatus() and sends Content-Type "application/problem+json;
+	 *   charset=" with cfg locale.charset, or UTF-8 without it, and X-Content-Type-Options
+	 *   "nosniff".
+	 * - The body has type, title, status and detail, and instance with the request URI when
+	 *   the request service is registered. Members of $extra follow; one whose name is already
+	 *   in the body is dropped.
+	 * - Sends no cache headers; call noCache() first when needed.
+	 * - When headers are already sent, writes the body without status or headers.
 	 *
 	 * Typical usage:
-	 *   $this->jsonProblem(
-	 *     'Validation failed',
-	 *     422,
-	 *     'Email is required',
-	 *     'https://example.com/probs/validation',
-	 *     ['invalid_params' => [['name' => 'email', 'reason' => 'missing']]],
-	 *     true // pretty JSON in dev
-	 *   );
+	 *   $this->app->response->jsonProblem('Validation failed', 422, 'Email is required.');
 	 *
-	 * @param string $title   Short, human-readable summary of the problem.
-	 * @param int    $status  HTTP status code (e.g., 400, 404, 422, 500).
-	 * @param string $detail  Longer explanation specific to this occurrence (optional).
-	 * @param string $type    URI identifying the problem type, or 'about:blank'.
-	 * @param array  $extra   Additional members to include (ignored on key collisions with core fields).
-	 * @param bool   $di      Developer-inspect: when true, adds JSON_PRETTY_PRINT (default: false).
+	 * @param  string  $title  Short summary of the problem type.
+	 * @param  int  $status  HTTP status code, also written as the status member.
+	 * @param  string  $detail  Explanation of this occurrence; "" for none.
+	 * @param  string  $type  URI that identifies the problem type, or "about:blank".
+	 * @param  array<string,mixed>  $extra  Extension members.
+	 * @param  bool  $di  Pretty-print the JSON.
 	 * @return never
-	 * @throws \JsonException If JSON encoding fails.
+	 * @see \CitOmni\Http\Service\Request::uri()  The value of instance.
 	 */
 	public function jsonProblem(string $title, int $status, string $detail = '', string $type = 'about:blank', array $extra = [], bool $di = false): never {
 		
-		// Base RFC 7807 members; defaults are explicit and immutable vs $extra.
 		$base = [
 			'type'   => $type,
 			'title'  => $title,
@@ -583,18 +453,15 @@ class Response extends BaseService {
 			'detail' => $detail,
 		];
 
-		// Include 'instance' if we can resolve the current request URI.
 		if ($this->app->hasService('request')) {
 			$base['instance'] = $this->app->request->uri();
 		}
 
-		// Extras extend the payload but cannot override base keys (left operand wins).
+		// The left operand wins, so $extra cannot replace a standard member.
 		$payload = $base + $extra;
 
-		// Ensure the HTTP status code is applied before emitting headers/body.
 		$this->setStatus($status);
 
-		// Harden content type (no MIME sniffing) and advertise the RFC 7807 media type.
 		if (!\headers_sent()) {
 			\header('X-Content-Type-Options: nosniff');
 			\header('Content-Type: application/problem+json; charset=' . (string)($this->app->cfg->locale->charset ?? 'UTF-8'));
@@ -614,33 +481,24 @@ class Response extends BaseService {
 
 
 
-/*
- *---------------------------------------------------------------
- * TEXT & HTML RESPONSES - Simple body writers
- *---------------------------------------------------------------
- * PURPOSE
- *   Output text or HTML with charset and status.
- *
- * NOTES
- *   - These write the body and then exit.
- */
+	// ----------------------------------------------------------------
+	// Text and HTML responses
+	// ----------------------------------------------------------------
 
 
 	/**
-	 * Sends a plain text response and terminates execution.
-	 * Minimal helper for low-level probes and diagnostics.
+	 * Set the status, write a plain text body and end the request.
 	 *
 	 * Behavior:
-	 * - Sets status, sends Content-Type text/plain, echoes body.
-	 *
-	 * Notes:
-	 * - For diagnostics or simple health checks.
+	 * - Sets the status through setStatus() and sends Content-Type "text/plain; charset="
+	 *   with cfg locale.charset, or UTF-8 without it.
+	 * - When headers are already sent, writes the body without status or Content-Type.
 	 *
 	 * Typical usage:
-	 *   $this->app->response->text('pong', 200);
+	 *   $this->app->response->text('pong');
 	 *
-	 * @param string $body
-	 * @param int $statusCode
+	 * @param  string  $body  Written as given.
+	 * @param  int  $statusCode  HTTP status code.
 	 * @return never
 	 */
 	public function text(string $body, int $statusCode = 200): never {
@@ -654,17 +512,21 @@ class Response extends BaseService {
 
 
 	/**
-	 * Sends HTML body and terminate.
-	 * Useful for tiny inline pages (maintenance fallback, smoke screens, etc.)
+	 * Set the status, write an HTML body and end the request.
 	 *
 	 * Behavior:
-	 * - Sets status, sends Content-Type text/html, echoes markup.
+	 * - Sets the status through setStatus() and sends Content-Type "text/html; charset="
+	 *   with cfg locale.charset, or UTF-8 without it.
+	 * - When headers are already sent, writes the body without status or Content-Type.
+	 *
+	 * Notes:
+	 * - Writes $html unescaped: Escape every value from the request before it goes in.
 	 *
 	 * Typical usage:
-	 *   $this->app->response->html('<h1>Hi</h1>', 200);
+	 *   $this->app->response->html($markup, 503);
 	 *
-	 * @param string $html
-	 * @param int $statusCode
+	 * @param  string  $html  Markup, written as given.
+	 * @param  int  $statusCode  HTTP status code.
 	 * @return never
 	 */
 	public function html(string $html, int $statusCode = 200): never {
@@ -681,50 +543,44 @@ class Response extends BaseService {
 
 
 
-/*
- *---------------------------------------------------------------
- * FILE TRANSFERS - Downloads & streaming
- *---------------------------------------------------------------
- * PURPOSE
- *   Serve files safely with correct headers and filename handling.
- *
- * NOTES
- *   - Clears output buffers; sets content-length (when determinable).
- *   - Uses RFC 5987 filename* for UTF-8; exits after streaming.
- */
+	// ----------------------------------------------------------------
+	// File downloads
+	// ----------------------------------------------------------------
 
 
 	/**
-	 * Streams a local file to the client as a download and terminates execution.
+	 * Send a file as a download and end the request.
 	 *
 	 * Behavior:
-	 * - Validates existence and readability.
-	 * - Clears output buffers to avoid corruption, sets Content-Type, Content-Disposition,
-	 *   optional Content-Length, and Cache-Control private. Disables range support.
-	 * - Streams file and terminates.
-	 *
-	 * Sends Content-Type (best effort), Content-Length (if resolvable), and a
-	 * safe Content-Disposition. Throws \RuntimeException if the file is missing
-	 * or unreadable, letting your global error handler log it.
+	 * - Discards all buffered output first, so the body is the file alone.
+	 * - Answers 200 with X-Content-Type-Options "nosniff", Cache-Control "private",
+	 *   Accept-Ranges "none", Content-Length when the size is known, and Content-Type from
+	 *   mime_content_type(), or "application/octet-stream" when that function is missing or
+	 *   detects nothing.
+	 * - Content-Disposition is "attachment" with two names (RFC 6266): filename, in which
+	 *   every byte other than an ASCII letter, a digit, ".", "_" or "-" becomes "_", and
+	 *   filename* with the full name in UTF-8.
+	 * - Keeps sending when the client disconnects.
 	 *
 	 * Notes:
-	 * - Throws RuntimeException if file is missing or unopened; bubbles to global handler.
-	 * - Uses RFC 6266/5987 filename encoding with ASCII fallback.
+	 * - Goes on when headers were already sent: setStatus() logs it, PHP warns for each other
+	 *   header, and the file is appended to the output already sent.
+	 * - Sends any readable file the process can read: Never pass a path built from request
+	 *   input without checking it.
 	 *
 	 * Typical usage:
 	 *   $this->app->response->download(CITOMNI_APP_PATH . '/var/export/report.csv', 'report.csv');
 	 *
-	 * @param string $path Absolute filesystem path.
-	 * @param string|null $downloadName Suggested filename for the client.
+	 * @param  string  $path  Filesystem path of the file.
+	 * @param  string|null  $downloadName  File name for the client; null or "" for the name in $path.
 	 * @return never
-	 * @throws \RuntimeException If the file does not exist or cannot be read/opened.
+	 * @throws \RuntimeException  When $path is not a readable file, before anything is sent; or when it cannot be opened after the headers are sent.
 	 */
 	public function download(string $path, ?string $downloadName = null): never {
 		if (!\is_file($path) || !\is_readable($path)) {
 			throw new \RuntimeException('Download source not found or unreadable: ' . $path);
 		}
 
-		// Ensure clean wire format: remove any buffered output.
 		while (\ob_get_level() > 0) {
 			\ob_end_clean();
 		}
@@ -734,7 +590,7 @@ class Response extends BaseService {
 		$size = @\filesize($path);
 		$name = $downloadName ?: \basename($path);
 
-		// RFC 6266 / 5987 filename handling
+		// RFC 6266 / 5987: An ASCII fallback for old clients, the full UTF-8 name in filename*.
 		$fallback = \preg_replace('/[^A-Za-z0-9._-]/', '_', $name);
 		$disposition = "attachment; filename=\"{$fallback}\"; filename*=UTF-8''" . \rawurlencode($name);
 
@@ -746,7 +602,6 @@ class Response extends BaseService {
 			}
 		}
 
-		// Send headers
 		$this->setStatus(200);
 		\header('X-Content-Type-Options: nosniff');
 		\header('Content-Type: ' . $mime);
@@ -754,10 +609,9 @@ class Response extends BaseService {
 		if (\is_int($size) && $size >= 0) {
 			\header('Content-Length: ' . $size);
 		}
-		\header('Cache-Control: private');  // downloads are typically private
+		\header('Cache-Control: private');
 		\header('Accept-Ranges: none');
 
-		// Stream file
 		$fh = \fopen($path, 'rb');
 		if ($fh === false) {
 			throw new \RuntimeException('Failed to open download source: ' . $path);
@@ -771,22 +625,15 @@ class Response extends BaseService {
 
 
 
-/*
- *---------------------------------------------------------------
- * INTERNAL UTILITIES - Keep it tidy
- *---------------------------------------------------------------
- * PURPOSE
- *   Helpers for header safety and diagnostics.
- *
- * NOTES
- *   - Private-only; no side effects beyond logging/sanitization.
- */
+	// ----------------------------------------------------------------
+	// Internals
+	// ----------------------------------------------------------------
  
 
 	/**
-	 * Strip CR and LF to prevent header injection.
+	 * Remove CR and LF from a header value, so it cannot start another header.
 	 *
-	 * @param string $value
+	 * @param  string  $value
 	 * @return string
 	 */
 	private function sanitizeHeaderValue(string $value): string {
@@ -795,13 +642,10 @@ class Response extends BaseService {
 
 
 	/**
-	 * Sanitize header name to token chars.
+	 * Replace every byte of a header name other than an ASCII letter, a digit or "-" with "-".
 	 *
-	 * Notes:
-	 * - Defensive: replaces non-token chars with '-'.
-	 *
-	 * @param string $name
-	 * @return string
+	 * @param  string  $name
+	 * @return string  "X-Invalid-Header" when the replacement fails.
 	 */
 	private function sanitizeHeaderName(string $name): string {
 		return \preg_replace('/[^A-Za-z0-9\-]/', '-', $name) ?? 'X-Invalid-Header';
@@ -809,10 +653,18 @@ class Response extends BaseService {
 
 
 	/**
-	 * Log a headers-sent condition, if log service is mapped.
+	 * Log that a method could not send headers because they were already sent.
 	 *
-	 * @param string $method Calling method.
-	 * @param array $context Extra context for diagnostics.
+	 * Behavior:
+	 * - Writes one error record to response_errors.json through the log service, with
+	 *   $context and the first four call frames, without arguments.
+	 * - Does nothing when the log service is not registered.
+	 *
+	 * Notes:
+	 * - Does not catch a failure of the log service itself.
+	 *
+	 * @param  string  $method  Name of the calling method, such as __METHOD__.
+	 * @param  array<string,mixed>  $context  Values that identify what was not sent.
 	 * @return void
 	 */
 	private function logHeadersAlreadySent(string $method, array $context = []): void {

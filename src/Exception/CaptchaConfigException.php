@@ -16,17 +16,16 @@ declare(strict_types=1);
 namespace CitOmni\Http\Exception;
 
 /**
- * CaptchaConfigException: The captcha service is misconfigured.
+ * CaptchaConfigException: Exception for captcha settings that the host app set up wrongly.
  *
- * Thrown when:
- * - A security.captcha_protection or security.captcha.* value is invalid
- *   (at construction).
- * - A challenge is issued or verified while the "captchaImage" service from
- *   citomni/image is not registered.
+ * Marks a configuration error in the host app, such as an invalid captcha cfg value or a
+ * missing captchaImage service, not a wrong answer: Let it reach the global error handler.
+ * Fixing it belongs to the host app's cfg and provider files.
  *
- * Notes:
- * - Wrong, expired or missing answers are not exceptions; verify() returns
- *   false for them.
+ * Rules:
+ * - Name the cfg key or the missing service to fix in the message.
+ * - Never use it for a wrong, expired or missing answer: That is a failed verification, not
+ *   an exception.
  */
 class CaptchaConfigException extends \RuntimeException {
 }

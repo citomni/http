@@ -15,44 +15,38 @@ declare(strict_types=1);
 namespace CitOmni\Http\Util;
 
 /**
- * Pure URL and path helpers for HTTP context.
+ * Url: Util with pure functions over URLs and paths.
  *
- * Centralizes small, deterministic rules related to URL and path handling in
- * the HTTP layer.
+ * Keeps URL rules in one place, so every caller applies them the same way. Building URLs from
+ * cfg or the request belongs to the services that read them.
  *
- * Behavior:
- * - Provides pure helper methods with no dependency on App or service state.
- * - Contains structural checks only; does not perform IO, routing, or path resolution.
- * - Intended for shared low-level rules such as local-path detection.
- *
- * Notes:
- * - This class is deliberately kept small.
- * - Methods in this class must remain pure and deterministic.
- * - Framework- or app-specific URL assembly belongs elsewhere unless it can be
- *   implemented without App, config, or mutable runtime state.
+ * Rules:
+ * - Pure: Every result depends only on the arguments.
+ * - Structural checks only: Never resolve, normalize or fetch a URL.
  */
 class Url {
 
 
 	/**
-	 * Check whether a string is a local path.
+	 * Check whether a string is a path on this site, safe as a redirect target.
 	 *
-	 * A local path starts with exactly one forward slash. Strings starting
-	 * with "//" or "/\" are rejected because some clients interpret them
-	 * as protocol-relative or slash-equivalent external targets.
+	 * Guards user-supplied redirect targets against open redirects. It checks the structure
+	 * only; whether the path exists, or is well-formed beyond that, is not checked.
 	 *
-	 * Strings containing control characters (U+0000 to U+001F, U+007F) are
-	 * rejected too. Browsers remove tab and newline characters from a URL
-	 * before parsing it, so "/\t/evil.com" would be read as "//evil.com".
+	 * Behavior:
+	 * - True when the string starts with "/", its second character is neither "/" nor "\",
+	 *   and it contains no control character (bytes 0x00 to 0x1F and 0x7F).
+	 * - False for "", relative paths, absolute URLs and anything with leading whitespace.
+	 * - False for "//host" and "/\host": Browsers read both as a URL on another host.
+	 * - False for "/\t/host" and other control characters: Browsers drop tab and newline
+	 *   before parsing, which would turn it into "//host".
+	 * - Percent-encoded text is not decoded: "/%2F%2Fhost" is local.
 	 *
-	 * This method is intended for low-level locality checks such as
-	 * guarding user-supplied redirect targets against open-redirect abuse.
+	 * Typical usage:
+	 *   $target = Url::isLocal($next) ? $next : '/';
 	 *
-	 * This is a structural check only. It does not validate path syntax,
-	 * normalize the path, resolve it, or confirm that the target exists.
-	 *
-	 * @param string $path The path to check.
-	 * @return bool True when the string is a local path.
+	 * @param  string  $path  Candidate path, as received.
+	 * @return bool
 	 */
 	public static function isLocal(string $path): bool {
 		if ($path === '' || $path[0] !== '/') {

@@ -19,88 +19,45 @@ use CitOmni\Kernel\Controller\BaseController;
 
 
 /**
- * PublicController: Public-facing pages (home, legal pages).
+ * PublicController: HTTP adapter for the default public pages of an app.
  *
- * Routing:
- * - A route in $app->routes points at this controller + action.
- * - The Router resolves that route and injects its config into $this->routeConfig
- *   before calling the action. The controller never reads $app->cfg->routes.
+ * Gives every app public pages that need no code of its own, such as a welcome page and a
+ * website content license. It decides what a page says; who operates the site belongs to the
+ * app's cfg, and the look of a rendered page to the route's template.
  *
- * Templates:
- * - We expect each route entry to define 'template_file' and 'template_layer'.
- *   Example:
- *     [
- *       'controller'      => \CitOmni\Http\Controller\PublicController::class,
- *       'action'          => 'index',
- *       'template_file'   => 'public/welcome.html',
- *       'template_layer'  => 'citomni/http',
- *       'methods'         => ['GET'],
- *     ]
- *
- * Config vs Routes:
- * - Brand / owner / locale / etc. come from $this->app->cfg (deep read-only Cfg).
- * - The final HTTP route table is exposed separately as $this->app->routes (plain array),
- *   assembled by \CitOmni\Kernel\App using vendor baseline + providers + app overrides.
- *
- * Performance policy:
- * - Keep controller logic lean. Heavy lifting (DB, mail, auth, etc.) lives in services.
- * - No global state, no static singletons.
+ * Rules:
+ * - Serve only what every visitor may see. A page that needs access control belongs in
+ *   another controller.
+ * - Escape every value that goes into HTML built in this class.
  */
 class PublicController extends BaseController {
-	
-	
-
-/*
- *------------------------------------------------------------------
- * BASIC START-UP
- *------------------------------------------------------------------
- * The common fundamentals that are required for all public pages. 
- * 
- */
-
 
 	/**
-	 * Lightweight per-request bootstrap for public routes.
+	 * Run setup and guards that every action needs.
 	 *
-	 * Runs before each action on this controller.
-	 * Keep this fast and side-effect free. Do not perform expensive I/O here;
-	 * push that work into dedicated services and call them lazily in the action
-	 * that actually needs them.
+	 * Notes:
+	 * - Holds no access guard, so each action is exactly as exposed as its route. A guard added
+	 *   here applies to every action.
 	 *
 	 * @return void
+	 * @see \CitOmni\Kernel\Controller\BaseController::__construct()  Calls it before every action.
 	 */
 	protected function init(): void {
-		// Cheap pre-action setup (if any)
 	}
 
 
-
-
-
-/*
- *------------------------------------------------------------------
- * PUBLIC PAGES
- *------------------------------------------------------------------
- * 
- */
-
-
 	/**
-	 * GET /
+	 * Render the welcome page of a new installation.
 	 *
-	 * Renders the public home page.
+	 * Behavior:
+	 * - Renders the route's template with the page texts and links, CITOMNI_PUBLIC_ROOT_URL as
+	 *   canonical, the request method and URI, and details_preformatted: Pretty-printed JSON
+	 *   with the mode, the environment, the elapsed time in seconds, the current and peak
+	 *   memory use in KB, and two OPcache settings.
 	 *
-	 * Data flow:
-	 * - Route match has already happened. Router injected the matched route
-	 *   definition into $this->routeConfig. That definition tells us which
-	 *   template file + template layer to render.
-	 *
-	 * - We DO NOT look up routes in $this->app->cfg (routes don't live there).
-	 *   $this->app->cfg is now purely settings / identity / locale / etc.
-	 *
-	 * View model:
-	 * - We pass a small diagnostic block ($details) with runtime/env info.
-	 * - We also pass SEO-ish metadata (canonical URL, title/description, robot hint).
+	 * Notes:
+	 * - Requires template_file and template_layer on its route, and the constants
+	 *   CITOMNI_ENVIRONMENT and CITOMNI_PUBLIC_ROOT_URL.
 	 *
 	 * @return void
 	 */
@@ -113,7 +70,6 @@ class PublicController extends BaseController {
 				],
 				'metrics' => [
 					'time_s' => ((float) \sprintf('%.3f', ((($nowNs=\hrtime(true))) - (\defined('CITOMNI_START_NS') ? (int)\CITOMNI_START_NS : $nowNs)) / 1_000_000_000)),
-					// 'mem_peak_kb' => (int)\round(\memory_get_peak_usage(true) / 1024),
 					'memory_usage_current_kb:' => (int)\round(\memory_get_usage() / 1024),
 					'memory_usage_peak_kb' => (int)\round(\memory_get_peak_usage() / 1024),
 				],
@@ -123,23 +79,15 @@ class PublicController extends BaseController {
 				],
 			], \JSON_PRETTY_PRINT | \JSON_UNESCAPED_SLASHES);
 
-
-		// Render the home page
 		$this->app->tplEngine->render($this->routeConfig["template_file"] . "@" . $this->routeConfig["template_layer"], [
-		
-			// Controls whether to add <meta name="robots" content="noindex"> in the template (1 = add, 0 = do not add)
 			'noindex' 				=> 0,
-			
-			// Canonical URL
 			'canonical' 			=> \CITOMNI_PUBLIC_ROOT_URL,
-			
 			'meta_title'       		=> 'Installed successfully',
 			'meta_description' 		=> 'CitOmni HTTP is installed and running. You are seeing the default welcome page.',
 			'badge_text'       		=> 'READY',
-			'badge_variant'    		=> 'badge--success', // green
+			'badge_variant'    		=> 'badge--success',
 			'title'            		=> 'Installation complete',
 			'subtitle'         		=> 'CitOmni HTTP is up and running.',
-			// 'lead_text'        		=> 'You are all set. CitOmni is ready for your development. Update your routes to get started.',
 			'lead_text'        		=> 'Green lights across the board. Wire up your routes and let’s make something fast!',
 			'status_code'      		=> '200',
 			'status_text'      		=> 'OK',
@@ -153,7 +101,7 @@ class PublicController extends BaseController {
 		    'secondary_target'		=> '_blank',
 		    'secondary_label'       => 'Changelog',
 		    'tertiary_href'			=> 'https://github.com/citomni/http/issues/new/choose',
-		    'tertiary_target'		=> '_blank', // _self
+		    'tertiary_target'		=> '_blank',
 		    'tertiary_label'		=> 'Report issue',
 		    'year'                  => date('Y'),
 		    'owner'                 => 'CitOmni.com',
@@ -166,22 +114,23 @@ class PublicController extends BaseController {
 
 
 	/**
-	 * GET /legal/website-license/
+	 * Answer the website content license page as HTML.
 	 *
-	 * Outputs the application's "Website Content License" page.
+	 * The page names the site's operator from cfg identity and separates content that the
+	 * operator holds rights to from third-party content and from the CitOmni license, without
+	 * claiming ownership of third-party content.
 	 *
 	 * Behavior:
-	 * - Pulls application, operator, and public contact identity from $this->app->cfg->identity.
-	 * - Identifies the application operator without implying ownership of third-party content.
-	 * - Uses public_contact.email for permission requests, falling back to operator.email.
-	 * - Distinguishes operator-controlled content, third-party content, and CitOmni licensing.
-	 * - Sends "noindex" and no-cache headers using Response::noIndex().
-	 * - If CITOMNI_PUBLIC_ROOT_URL is defined, emits a canonical Link header.
+	 * - 200 with a self-contained HTML page, with the headers of Response::noIndex().
+	 * - The operator is cfg identity.operator.name, or identity.app_name when operator.name is
+	 *   not set. identity.operator.url is linked when it is not empty.
+	 * - Permission requests go to identity.public_contact.email, or identity.operator.email when
+	 *   public_contact.email is not set. Without either, the page refers to the rights holders.
+	 * - When CITOMNI_PUBLIC_ROOT_URL is defined, a Link header names /legal/website-license/
+	 *   under it as canonical. The page's route must serve that path.
 	 *
 	 * @return void
-	 *
-	 * @throws \RuntimeException When neither identity.operator.name nor
-	 *                           identity.app_name is configured.
+	 * @throws \RuntimeException  When the operator name resolves to an empty string.
 	 */
 	public function websiteLicense(): void {
 		$cfg = $this->app->cfg;
@@ -198,10 +147,8 @@ class PublicController extends BaseController {
 			throw new \RuntimeException('Missing identity.operator.name (or identity.app_name) in configuration.');
 		}
 
-		// Robots + no-cache; also safe for member-only pages.
 		$this->app->response->noIndex();
 
-		// Optionally advertise canonical URL if root URL is known.
 		if (\defined('CITOMNI_PUBLIC_ROOT_URL')) {
 			$this->app->response->setHeader(
 				'Link',
@@ -268,17 +215,20 @@ class PublicController extends BaseController {
 
 		$html .= '</footer></article></main></body></html>';
 
-		// Emits Content-Type and exits.
 		$this->app->response->html($html, 200);
 	}
 
 
 	/**
-	 * 301 redirect helper for alternate license URLs to the canonical one.
+	 * Redirect permanently to the website content license page.
 	 *
-	 * Assumes CITOMNI_PUBLIC_ROOT_URL is defined in the runtime environment
-	 * (typical for stage/prod). If it's not defined in your app, consider
-	 * overriding this action.
+	 * Behavior:
+	 * - 301 to /legal/website-license/ under CITOMNI_PUBLIC_ROOT_URL.
+	 *
+	 * Notes:
+	 * - Requires the constant CITOMNI_PUBLIC_ROOT_URL.
+	 * - Never route it on the target path, with or without the trailing slash, or it redirects
+	 *   to itself.
 	 *
 	 * @return never
 	 */

@@ -20,65 +20,58 @@ use CitOmni\Http\Exception\IconNotFoundException;
 use CitOmni\Kernel\Service\BaseService;
 
 /**
- * Layer-aware icon service.
+ * Icon: Service that resolves icon ids to inline SVG markup from layered icon files.
  *
- * Resolves symbolic icon ids to trusted inline SVG markup from layer-owned
- * PHP icon files. Icon files return associative arrays with id => SVG string.
+ * Lets the app and every package ship their own icons, each in PHP files under its own
+ * assets/icons, and lets callers reach them by id, file and layer. The icons themselves
+ * belong to the layer that ships them; placing the markup in a page belongs to the template.
  *
- * Behavior:
- * - Resolves icon files from either the app layer or a vendor/package layer:
- *   1) app:              <CITOMNI_APP_PATH>/assets/icons/{file}.php
- *   2) vendor/package:   <CITOMNI_APP_PATH>/vendor/{layer}/assets/icons/{file}.php
- * - Loads icon files lazily on first access.
- * - Caches each loaded file by absolute path for the current request/process.
- * - Fails fast on missing files, missing ids, invalid payloads, and invalid SVG values.
- *
- * Notes:
- * - Icons are trusted view assets, not config and not language strings.
- * - SVG markup is not sanitized. Never place user-controlled data in icon files.
- * - Templates must render the returned value as raw trusted markup.
- * - The default file is "icons"; the default layer is "citomni/http".
- *
- * Typical usage:
- *   $svg = $this->app->icon->get('home');
- *   $svg = $this->app->icon->get('mfa_totp', 'icons', 'citomni/authenticate');
- *   $svg = $this->app->icon->get('logo', 'brand', 'app');
- *
- * @see \CitOmni\Kernel\Service\BaseService
+ * Rules:
+ * - Treat icon files as trusted code: They are included as PHP, and their SVG is returned
+ *   unsanitized. Never put user-controlled data in an icon file.
+ * - Validate id, file and layer with the assertValid* methods before they reach a path.
+ * - Load an icon file only through loadFileData(), so a valid file is included once per instance.
+ * - Report a missing file or id with IconNotFoundException, and a malformed file or value
+ *   with IconConfigException.
  */
 class Icon extends BaseService {
 
+	/** Icon file, without .php, when a call gives none. */
 	private const DEFAULT_FILE = 'icons';
+
+	/** Layer when a call gives none. */
 	private const DEFAULT_LAYER = 'citomni/http';
+
+	/** Layer name of the app itself, as opposed to a vendor/package layer. */
 	private const APP_LAYER = 'app';
 
+	/** Directory of the app layer's icon files. */
 	private const APP_ICONS_PATH = \CITOMNI_APP_PATH . '/assets/icons';
+
+	/** Composer vendor directory, under which a vendor/package layer keeps assets/icons. */
 	private const VENDOR_PATH = \CITOMNI_APP_PATH . '/vendor';
 
+	/** Valid icon id: Letters, digits, _ and -, starting and ending with a letter or digit. */
 	private const ID_PATTERN = '~^[A-Za-z0-9](?:[A-Za-z0-9_-]*[A-Za-z0-9])?$~';
+
+	/** Valid icon file name without .php: As ID_PATTERN, with / for subdirectories. */
 	private const FILE_PATTERN = '~^[A-Za-z0-9](?:[A-Za-z0-9/_-]*[A-Za-z0-9])?$~';
+
+	/** Valid vendor/package layer: Two segments of letters, digits, ., _ and -. */
 	private const LAYER_PATTERN = '~^[a-z0-9._-]+/[a-z0-9._-]+$~i';
 
 
-	/**
-	 * Cached icon payloads keyed by absolute file path.
-	 *
-	 * Array shape:
-	 * - <absolute-file-path> => array<string, mixed>
-	 *
-	 * @var array<string, array<string, mixed>>
-	 */
+	/** @var array<string,array<array-key,mixed>> Payload of each loaded icon file, by absolute path. */
 	private array $cache = [];
 
 
 	/**
-	 * Initialize the service.
+	 * Discard the service options.
 	 *
-	 * Behavior:
-	 * - Clears construction-time options because this service is intentionally
-	 *   convention-based and does not consume service options.
+	 * The service takes no options; its paths come from CITOMNI_APP_PATH and the layer.
 	 *
 	 * @return void
+	 * @see \CitOmni\Kernel\Service\BaseService::__construct()  Calls it once per instance.
 	 */
 	protected function init(): void {
 		$this->options = [];
@@ -94,26 +87,28 @@ class Icon extends BaseService {
 	// ----------------------------------------------------------------
 
 	/**
-	 * Resolve an icon id to inline SVG markup.
+	 * Return the inline SVG markup of one icon.
 	 *
 	 * Behavior:
-	 * - Validates id, file, and layer.
-	 * - Loads the requested icon file on first access.
-	 * - Returns trimmed inline SVG markup.
-	 * - Throws on missing files, missing ids, invalid payloads, or non-SVG values.
+	 * - Reads assets/icons/{file}.php of the layer: Under CITOMNI_APP_PATH for the app layer,
+	 *   under CITOMNI_APP_PATH/vendor/{layer} for a vendor/package layer.
+	 * - Returns the value as normalizeIconValue() accepts it: Trimmed, starting with an svg
+	 *   tag, unsanitized.
+	 *
+	 * Notes:
+	 * - The markup is trusted and unescaped: A template must output it raw.
 	 *
 	 * Typical usage:
-	 *   $svg = $this->app->icon->get('home');
 	 *   $svg = $this->app->icon->get('mfa_totp', 'icons', 'citomni/authenticate');
-	 *   $svg = $this->app->icon->get('logo', 'brand', 'app');
 	 *
-	 * @param string $id Icon id, e.g. "home" or "arrow-right".
-	 * @param string $file Icon file name without ".php"; slashes allow subdirectories.
-	 * @param string $layer Layer identifier: "app" or "vendor/package".
-	 * @return string Trusted inline SVG markup.
-	 * @throws \InvalidArgumentException When id, file, or layer is invalid.
-	 * @throws IconNotFoundException When the icon file or icon id does not exist.
-	 * @throws IconConfigException When the file payload or icon value is invalid.
+	 * @param  string  $id  Icon id, such as home or arrow-right.
+	 * @param  string  $file  Icon file name without .php; slashes select subdirectories.
+	 * @param  string  $layer  "app", or a vendor/package name such as citomni/http.
+	 * @return string
+	 * @throws \InvalidArgumentException  When the id, the file name or the layer is invalid.
+	 * @throws \CitOmni\Http\Exception\IconNotFoundException  When the icon file does not exist or does not define the id.
+	 * @throws \CitOmni\Http\Exception\IconConfigException  When the icon file returns no array or the value is not inline SVG.
+	 * @see \CitOmni\Http\Service\Icon::normalizeIconValue()  Which values are accepted.
 	 */
 	public function get(string $id, string $file = self::DEFAULT_FILE, string $layer = self::DEFAULT_LAYER): string {
 		$this->assertValidId($id);
@@ -138,25 +133,22 @@ class Icon extends BaseService {
 
 
 	/**
-	 * Check whether an icon id exists in an icon file.
+	 * Check whether an icon file defines an icon id.
 	 *
 	 * Behavior:
-	 * - Returns false when the file or id is missing.
-	 * - Still validates caller input and throws on invalid id, file, or layer.
-	 * - Still fails fast if an existing icon file has an invalid payload.
-	 * - Does not validate the specific icon value beyond file payload shape.
+	 * - False when the icon file does not exist or does not define the id.
+	 * - True when the file defines the id, whatever its value: get() may still reject it.
 	 *
 	 * Typical usage:
-	 *   if ($this->app->icon->has('logo', 'brand', 'app')) {
-	 *       $svg = $this->app->icon->get('logo', 'brand', 'app');
-	 *   }
+	 *   if ($this->app->icon->has('logo', 'brand', 'app')) { ... }
 	 *
-	 * @param string $id Icon id to check.
-	 * @param string $file Icon file name without ".php".
-	 * @param string $layer Layer identifier: "app" or "vendor/package".
-	 * @return bool True when the icon id exists in the requested file.
-	 * @throws \InvalidArgumentException When id, file, or layer is invalid.
-	 * @throws IconConfigException When an existing file returns an invalid payload.
+	 * @param  string  $id  Icon id.
+	 * @param  string  $file  Icon file name without .php; slashes select subdirectories.
+	 * @param  string  $layer  "app", or a vendor/package name such as citomni/http.
+	 * @return bool
+	 * @throws \InvalidArgumentException  When the id, the file name or the layer is invalid.
+	 * @throws \CitOmni\Http\Exception\IconConfigException  When the icon file exists but returns no array.
+	 * @see \CitOmni\Http\Service\Icon::get()  Where the icon file is looked up.
 	 */
 	public function has(string $id, string $file = self::DEFAULT_FILE, string $layer = self::DEFAULT_LAYER): bool {
 		$this->assertValidId($id);
@@ -176,23 +168,22 @@ class Icon extends BaseService {
 
 
 	/**
-	 * Return all icon ids defined by an icon file.
+	 * List the icon ids that an icon file defines.
 	 *
 	 * Behavior:
-	 * - Loads the requested icon file on first access.
-	 * - Returns ids in the order defined by the file.
-	 * - Fails fast if the file is missing or invalid.
-	 * - Does not validate every SVG value; use get() to resolve a specific icon.
+	 * - Returns the keys in the order of the file, without checking the values: get() may
+	 *   still reject one.
 	 *
 	 * Typical usage:
 	 *   $ids = $this->app->icon->ids('icons', 'citomni/http');
 	 *
-	 * @param string $file Icon file name without ".php".
-	 * @param string $layer Layer identifier: "app" or "vendor/package".
-	 * @return array<int, string> Icon ids defined by the file.
-	 * @throws \InvalidArgumentException When file or layer is invalid.
-	 * @throws IconNotFoundException When the icon file does not exist.
-	 * @throws IconConfigException When the file payload is invalid.
+	 * @param  string  $file  Icon file name without .php; slashes select subdirectories.
+	 * @param  string  $layer  "app", or a vendor/package name such as citomni/http.
+	 * @return list<array-key>  The keys of the file's array; PHP turns a decimal key such as "123" into an int.
+	 * @throws \InvalidArgumentException  When the file name or the layer is invalid.
+	 * @throws \CitOmni\Http\Exception\IconNotFoundException  When the icon file does not exist.
+	 * @throws \CitOmni\Http\Exception\IconConfigException  When the icon file returns no array.
+	 * @see \CitOmni\Http\Service\Icon::get()  Where the icon file is looked up.
 	 */
 	public function ids(string $file = self::DEFAULT_FILE, string $layer = self::DEFAULT_LAYER): array {
 		$this->assertValidFile($file);
@@ -214,11 +205,11 @@ class Icon extends BaseService {
 	// ----------------------------------------------------------------
 
 	/**
-	 * Build the absolute file path for an icon file and layer.
+	 * Build the path of an icon file.
 	 *
-	 * @param string $file Validated icon file name without ".php".
-	 * @param string $layer Validated layer identifier.
-	 * @return string Absolute path to the icon file.
+	 * @param  string  $file  Icon file name without .php, already validated.
+	 * @param  string  $layer  Layer, already validated.
+	 * @return string  Absolute path, assuming CITOMNI_APP_PATH is absolute.
 	 */
 	private function buildFilePath(string $file, string $layer): string {
 		if ($layer === self::APP_LAYER) {
@@ -239,19 +230,18 @@ class Icon extends BaseService {
 	// ----------------------------------------------------------------
 
 	/**
-	 * Load and cache an icon file payload.
+	 * Return the array that an icon file returns, cached by path.
 	 *
 	 * Behavior:
-	 * - Requires the file only once per absolute path.
-	 * - Caches valid payloads for the current request/process.
-	 * - Throws on missing files and invalid payloads.
+	 * - Later calls for the same path return the cached array without touching the file.
+	 * - A file that returns no array is not cached, so every call includes it again.
 	 *
-	 * @param string $filePath Absolute icon file path.
-	 * @param string $file Relative icon file name without ".php".
-	 * @param string $layer Layer identifier for diagnostics.
-	 * @return array<string, mixed> Raw icon payload.
-	 * @throws IconNotFoundException When the file does not exist.
-	 * @throws IconConfigException When the file does not return an array.
+	 * @param  string  $filePath  Absolute path of the icon file.
+	 * @param  string  $file  Icon file name, for the message.
+	 * @param  string  $layer  Layer, for the message.
+	 * @return array<array-key,mixed>  Icon values by id, unchecked.
+	 * @throws \CitOmni\Http\Exception\IconNotFoundException  When the file does not exist.
+	 * @throws \CitOmni\Http\Exception\IconConfigException  When the file returns no array.
 	 */
 	private function loadFileData(string $filePath, string $file, string $layer): array {
 		if (isset($this->cache[$filePath])) {
@@ -294,20 +284,18 @@ class Icon extends BaseService {
 	// ----------------------------------------------------------------
 
 	/**
-	 * Validate and normalize one resolved icon value.
+	 * Check one icon value and return it trimmed.
 	 *
 	 * Behavior:
-	 * - Requires the value to be a string.
-	 * - Trims surrounding whitespace for deterministic inline output.
-	 * - Rejects XML declarations and DOCTYPE payloads.
-	 * - Requires the final value to start with an inline <svg tag.
+	 * - Accepts a string that, after trimming, starts with "<svg" in any letter case.
+	 * - Checks only the start: The rest of the markup is returned as it is.
 	 *
-	 * @param mixed $value Raw value from the icon file.
-	 * @param string $id Icon id for diagnostics.
-	 * @param string $file Icon file for diagnostics.
-	 * @param string $layer Layer identifier for diagnostics.
-	 * @return string Trimmed inline SVG markup.
-	 * @throws IconConfigException When the value is not valid inline SVG markup.
+	 * @param  mixed  $value  Value from the icon file.
+	 * @param  string  $id  Icon id, for the message.
+	 * @param  string  $file  Icon file name, for the message.
+	 * @param  string  $layer  Layer, for the message.
+	 * @return string
+	 * @throws \CitOmni\Http\Exception\IconConfigException  When the value is not a string, is empty after trimming, starts with an XML declaration or a DOCTYPE, or does not start with "<svg".
 	 */
 	private function normalizeIconValue(mixed $value, string $id, string $file, string $layer): string {
 		if (!\is_string($value)) {
@@ -363,11 +351,11 @@ class Icon extends BaseService {
 	// ----------------------------------------------------------------
 
 	/**
-	 * Validate the icon id format.
+	 * Check an icon id against ID_PATTERN.
 	 *
-	 * @param string $id Icon id.
+	 * @param  string  $id
 	 * @return void
-	 * @throws \InvalidArgumentException When the id is empty or unsafe.
+	 * @throws \InvalidArgumentException  When the id does not match ID_PATTERN.
 	 */
 	private function assertValidId(string $id): void {
 		if (
@@ -381,14 +369,14 @@ class Icon extends BaseService {
 
 
 	/**
-	 * Validate the icon file identifier.
+	 * Check an icon file name against FILE_PATTERN.
 	 *
-	 * Slashes are allowed for explicit subdirectories below assets/icons, but
-	 * traversal and repeated slashes are rejected.
+	 * Slashes select subdirectories below assets/icons; .. and repeated slashes are rejected,
+	 * so the name cannot leave that directory.
 	 *
-	 * @param string $file Relative icon file name without ".php".
+	 * @param  string  $file  Icon file name without .php.
 	 * @return void
-	 * @throws \InvalidArgumentException When the file name is empty or unsafe.
+	 * @throws \InvalidArgumentException  When the name contains .. or // or does not match FILE_PATTERN.
 	 */
 	private function assertValidFile(string $file): void {
 		if (
@@ -403,11 +391,11 @@ class Icon extends BaseService {
 
 
 	/**
-	 * Validate the icon layer identifier.
+	 * Check a layer: "app", or a vendor/package name that matches LAYER_PATTERN.
 	 *
-	 * @param string $layer Layer identifier. Use "app" or "vendor/package".
+	 * @param  string  $layer
 	 * @return void
-	 * @throws \InvalidArgumentException When the layer is empty or unsafe.
+	 * @throws \InvalidArgumentException  When the layer is neither "app" nor matches LAYER_PATTERN.
 	 */
 	private function assertValidLayer(string $layer): void {
 		if ($layer === self::APP_LAYER) {

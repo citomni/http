@@ -16,21 +16,15 @@ declare(strict_types=1);
 namespace CitOmni\Http\Exception;
 
 /**
- * IconConfigException: Invalid icon file or icon payload.
+ * IconConfigException: Exception for an icon file or icon value that exists but is malformed.
  *
- * Thrown when an icon file exists, but its contents do not satisfy the
- * expected CitOmni icon contract.
+ * Lets a caller tell a malformed icon from a missing one. It marks a mistake in a trusted
+ * icon file, not in the request: Let it reach the global error handler. Fixing it belongs to
+ * the layer that ships the icon file.
  *
- * Behavior:
- * - Used for developer/configuration errors in trusted icon files.
- * - Indicates that the requested resource exists, but is malformed.
- *
- * Notes:
- * - Typical causes are files not returning arrays, non-string icon values,
- *   empty values, XML declarations, DOCTYPE payloads, or non-SVG markup.
- *
- * Typical usage:
- *   throw new IconConfigException('Icon file must return an array.');
+ * Rules:
+ * - Never use it for a missing icon file or id: That is IconNotFoundException.
+ * - Name the icon file and the layer in the message, so it points at the file to fix.
  */
 class IconConfigException extends \RuntimeException {
 }

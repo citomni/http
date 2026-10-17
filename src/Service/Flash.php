@@ -18,118 +18,64 @@ namespace CitOmni\Http\Service;
 use CitOmni\Kernel\Service\BaseService;
 
 /**
- * Flash: Tiny one-request session flash bag for PRG flows.
+ * Flash: Service that carries messages, old input and field errors across one redirect.
  *
- * Provides deterministic, low-overhead flash storage across a single redirect
- * boundary (POST -> Redirect -> GET). Uses the Session service exclusively and
- * keeps init() side-effect free for predictable boot cost.
+ * Carries what a form post leaves for the page it redirects to (Post/Redirect/Get): Message
+ * buckets by name, the old input and field errors. The data stays in the session until a read
+ * clears it. Storage, and starting or resuming the session with its failures, belong to
+ * Session; what a message says, and how it is shown, belong to the callers.
  *
- * Data lives in Session and survives exactly one redirect boundary unless
- * you call keep(). Designed for predictable UX after validation failures,
- * login attempts, etc.
- *
- * Behavior:
- * - Session keys:
- *   1) _flash.msg  : array<string, string|array>              (message buckets by key)
- *   2) _flash.old  : array<string, mixed>                     (old input bag)
- *   3) _flash.err  : array<string, array<int, string>>        (field error bag)
- *   4) _flash.keep : bool                                     (single-shot keep flag)
- * - Limits (fail fast):
- *   1) MAX_MSG_KEYS      : max distinct message buckets
- *   2) MAX_MSG_LIST_SIZE : max list size per bucket or field error list (append; evict oldest)
- *   3) MAX_OLD_KEYS      : max distinct old-input keys and field-error keys
- *   4) MAX_MSG_STRLEN    : byte cap for string payloads (UTF-8 safe trim)
- * - Read semantics:
- *   1) take($key) clears only that message bucket
- *   2) pullAll() clears all bags unless keep() has been set
- *
- * Notes:
- * - Messages can be either strings or arrays; arrays are accepted as-is.
- * - Field errors are stored as array<string, list<string>>.
- * - All interaction with session state goes through the Session service API.
- * - Reads never create a session: In a request without one, every bag is empty and
- *   pullAll(), peek(), take(), clear() and the other readers send no session cookie.
- *   The first write (set(), add(), old(), fieldErrors(), keep()) starts the session.
- *   Calls that change nothing, such as old([]) or forgetOld() of absent keys, write
- *   nothing.
- * - No catch-all exception handling; failures bubble to global ErrorHandler.
- *
- * Validation notes:
- * - add() appends to a bucket and auto-promotes single strings to list form.
- * - fieldErrors() normalizes single strings to one-item lists, trims strings,
- *   skips empty field names, and discards unusable values.
- * - error()/success()/info()/warning() are convenience wrappers around add().
- *
- * Safety / limits:
- * - Hard caps on number of buckets, number of items per bucket, and byte length
- *   of each string payload (UTF-8 safe trim).
- * - Old input and field errors are capped on number of distinct keys.
- *
- * Lifecycle:
- * - pullAll():
- *     returns ['msg'=>..., 'old'=>..., 'err'=>...]
- *     clears all bags, unless keep() had been set (then it just consumes keep()).
- * - keep():
- *     tells Flash "do not clear on the next pullAll(); clear on the one after".
- *
- * Zero coupling:
- * - This service does not depend on $app->cfg or $app->routes.
- * - Only depends on $app->session.
+ * Rules:
+ * - Reach session state only through the Session service, under the KEY_* keys.
+ * - Create no session on a read or on a call that changes nothing: Only a call that stores
+ *   something may create one.
+ * - Cap the keys of every bag by MAX_MSG_KEYS or MAX_OLD_KEYS, and throw when a call would
+ *   exceed the cap.
  *
  * Typical usage:
- *   // POST handler
- *   $this->app->flash->error('Invalid login');
- *   $this->app->flash->old(['username' => 'alice']);
- *   $this->app->flash->fieldErrors([
- *   	'username' => ['Username is required.'],
- *   ]);
- *   $this->app->response->redirect('login.html');
+ *   // POST: Store, then redirect.
+ *   $this->app->flash->error('Invalid login.');
+ *   $this->app->flash->old(['username' => $username]);
+ *   $this->app->response->redirect('/login.html', 303);
  *
- *   // GET page
- *   $flash = $this->app->flash->pullAll(); // read+clear (unless keep() set)
- *   $error = $flash['msg']['error'] ?? null;
- *   $old   = $flash['old'] ?? [];
- *   $err   = $flash['err'] ?? [];
+ *   // GET: Read and clear.
+ *   $flash = $this->app->flash->pullAll();
  */
 class Flash extends BaseService {
 	
-	/** @var string Session key for message buckets. */
+	/** Session key of the message buckets, by bucket name. */
 	private const KEY_MSG  = '_flash.msg';
 
-	/** @var string Session key for old-input bag. */
+	/** Session key of the old input, by field name. */
 	private const KEY_OLD  = '_flash.old';
 
-	/** @var string Session key for field-error bag. */
+	/** Session key of the field errors: A list of messages by field name. */
 	private const KEY_ERR  = '_flash.err';
 
-	/** @var string Session key for single-shot keep flag. */
+	/** Session key of the flag that makes the next pullAll() keep the bags. */
 	private const KEY_KEEP = '_flash.keep';
 
 
-	/** @var int Max distinct message buckets allowed. */
+	/** Maximum number of message buckets. */
 	private const MAX_MSG_KEYS      = 32;
 
-	/** @var int Max list size per bucket or field-error list (oldest evicted on overflow). */
+	/** Maximum number of messages kept in one list: A bucket that add() grows, or the errors of one field. */
 	private const MAX_MSG_LIST_SIZE = 16;
 
-	/** @var int Max distinct keys in old-input bag and field-error bag. */
+	/** Maximum number of fields in the old input, and of fields in the field errors. */
 	private const MAX_OLD_KEYS      = 64;
 
-	/** @var int Max bytes for string message payload (UTF-8 safe). */
+	/** Maximum length in bytes of a message or field error that is given as a string. */
 	private const MAX_MSG_STRLEN    = 2048;
 
 
 	/**
-	 * One-time initialization. Intentionally side-effect free.
-	 *
-	 * Behavior:
-	 * - Does not start the session.
-	 * - Does not pre-create bags; a missing bag reads as empty.
+	 * Set up nothing: Resolving the service must not touch the session.
 	 *
 	 * @return void
+	 * @see \CitOmni\Kernel\Service\BaseService::__construct()  Calls it once per instance.
 	 */
 	protected function init(): void {
-		// Intentionally empty; keep resolution cheap and deterministic.
 	}
 
 
@@ -141,50 +87,49 @@ class Flash extends BaseService {
 	// ----------------------------------------------------------------
 
 	/**
-	 * Set/replace a message bucket with a string or array payload.
+	 * Store a message bucket, replacing any payload under the same name.
+	 *
+	 * add() appends to a bucket instead.
+	 *
+	 * Behavior:
+	 * - A string payload is cut to MAX_MSG_STRLEN bytes; an array payload is stored as given.
 	 *
 	 * Typical usage:
-	 *   $this->app->flash->set('error', 'Invalid credentials');
+	 *   $this->app->flash->set('error', 'Invalid credentials.');
 	 *
-	 * Failure:
-	 * - Throws \RuntimeException if MAX_MSG_KEYS would be exceeded.
-	 *
-	 * @param string              $key Logical bucket (e.g., 'success', 'error').
-	 * @param string|array<mixed> $message String or structured payload.
+	 * @param  string  $key  Bucket name, such as success or error.
+	 * @param  string|array<mixed>  $message
 	 * @return void
-	 *
-	 * @throws \RuntimeException If message key cap is reached.
+	 * @throws \RuntimeException  When the bucket is new and MAX_MSG_KEYS buckets exist.
+	 * @see \CitOmni\Http\Service\Flash::trimString()  How a string is cut.
 	 */
 	public function set(string $key, string|array $message): void {
-		// Retrieve current buckets; enforce key cap on new bucket creation.
 		$msg = (array)$this->app->session->get(self::KEY_MSG);
 		if (!\array_key_exists($key, $msg) && \count($msg) >= self::MAX_MSG_KEYS) {
 			throw new \RuntimeException('Flash message key cap reached (' . self::MAX_MSG_KEYS . ').');
 		}
 
-		// Store string (trimmed by byte cap) or array as-is.
 		$msg[$key] = \is_string($message) ? $this->trimString($message) : $message;
 		$this->app->session->set(self::KEY_MSG, $msg);
 	}
 
 
 	/**
-	 * Append a message to a bucket (promotes string bucket to list).
-	 * Oldest elements are evicted on overflow.
+	 * Append a message to a bucket, keeping its newest MAX_MSG_LIST_SIZE items.
+	 *
+	 * A new bucket becomes a one-item list, a string bucket becomes a list with the string first,
+	 * and an array bucket gets the message appended. On overflow the oldest items are dropped.
+	 *
+	 * Behavior:
+	 * - A string message is cut to MAX_MSG_STRLEN bytes; an array message is appended as one item.
 	 *
 	 * Typical usage:
-	 *   $this->app->flash->add('info', 'Step 1 done');
-	 *   $this->app->flash->add('info', 'Step 2 done');
+	 *   $this->app->flash->add('info', 'Step 1 done.');
 	 *
-	 * Failure:
-	 * - Throws \RuntimeException if MAX_MSG_KEYS would be exceeded.
-	 * - Throws \RuntimeException if existing bucket is neither string nor array.
-	 *
-	 * @param string              $key
-	 * @param string|array<mixed> $message
+	 * @param  string  $key  Bucket name.
+	 * @param  string|array<mixed>  $message
 	 * @return void
-	 *
-	 * @throws \RuntimeException On key cap or invalid bucket type.
+	 * @throws \RuntimeException  When the bucket is new and MAX_MSG_KEYS buckets exist, or the bucket holds neither a string nor an array.
 	 */
 	public function add(string $key, string|array $message): void {
 		$msg = (array)$this->app->session->get(self::KEY_MSG);
@@ -195,23 +140,20 @@ class Flash extends BaseService {
 		$item = \is_string($message) ? $this->trimString($message) : $message;
 
 		if (!\array_key_exists($key, $msg)) {
-			// First item creates a list bucket.
 			$msg[$key] = [$item];
 		} else {
 			$cur = $msg[$key];
 
-			// Promote string bucket to list; validate custom payload types.
+			// set() may have stored a string; it becomes the first item.
 			if (\is_string($cur)) {
 				$cur = [$cur];
 			} elseif (!\is_array($cur)) {
 				throw new \RuntimeException('Flash bucket must be string or array.');
 			}
 
-			// Append, then evict oldest items on overflow.
 			$cur[] = $item;
 			$excess = \count($cur) - self::MAX_MSG_LIST_SIZE;
 			if ($excess > 0) {
-				// Keep the newest MAX_MSG_LIST_SIZE items.
 				$cur = \array_slice($cur, $excess);
 			}
 			$msg[$key] = $cur;
@@ -221,16 +163,52 @@ class Flash extends BaseService {
 	}
 
 
-	/** @return void */
+	/**
+	 * Append a message to the success bucket.
+	 *
+	 * A shorthand for add('success', $message).
+	 *
+	 * @param  string  $message
+	 * @return void
+	 * @throws \RuntimeException  When add() refuses the message.
+	 * @see \CitOmni\Http\Service\Flash::add()  How the bucket grows.
+	 */
 	public function success(string $message): void { $this->add('success', $message); }
 	
-	/** @return void */
+	/**
+	 * Append a message to the info bucket.
+	 *
+	 * A shorthand for add('info', $message).
+	 *
+	 * @param  string  $message
+	 * @return void
+	 * @throws \RuntimeException  When add() refuses the message.
+	 * @see \CitOmni\Http\Service\Flash::add()  How the bucket grows.
+	 */
 	public function info(string $message): void { $this->add('info', $message); }
 	
-	/** @return void */
+	/**
+	 * Append a message to the warning bucket.
+	 *
+	 * A shorthand for add('warning', $message).
+	 *
+	 * @param  string  $message
+	 * @return void
+	 * @throws \RuntimeException  When add() refuses the message.
+	 * @see \CitOmni\Http\Service\Flash::add()  How the bucket grows.
+	 */
 	public function warning(string $message): void { $this->add('warning', $message); }
 	
-	/** @return void */
+	/**
+	 * Append a message to the error bucket.
+	 *
+	 * A shorthand for add('error', $message).
+	 *
+	 * @param  string  $message
+	 * @return void
+	 * @throws \RuntimeException  When add() refuses the message.
+	 * @see \CitOmni\Http\Service\Flash::add()  How the bucket grows.
+	 */
 	public function error(string $message): void { $this->add('error', $message); }
 
 
@@ -243,18 +221,20 @@ class Flash extends BaseService {
 	// ----------------------------------------------------------------
 
 	/**
-	 * Merge "old input" for the next request (left-biased: new overrides).
+	 * Store old input for the next request, merged over the old input already stored.
+	 *
+	 * A new value replaces the stored value of the same field; other fields stay. Values are
+	 * stored as given.
+	 *
+	 * Behavior:
+	 * - An empty $fields changes nothing.
 	 *
 	 * Typical usage:
 	 *   $this->app->flash->old($this->app->request->only(['username', 'email']));
 	 *
-	 * Failure:
-	 * - Throws \RuntimeException if MAX_OLD_KEYS would be exceeded.
-	 *
-	 * @param array<string, mixed> $fields Key-value pairs to persist for next request.
+	 * @param  array<string,mixed>  $fields  Values by field name.
 	 * @return void
-	 *
-	 * @throws \RuntimeException If old-input key cap would be exceeded.
+	 * @throws \RuntimeException  When the old input would hold more than MAX_OLD_KEYS fields.
 	 */
 	public function old(array $fields): void {
 		if ($fields === []) {
@@ -274,40 +254,31 @@ class Flash extends BaseService {
 
 
 	/**
-	 * Store field-specific validation errors for the next request.
+	 * Store field errors for the next request, replacing the stored errors of the same fields.
+	 *
+	 * Errors of other fields stay. Each field gets a list of messages.
 	 *
 	 * Behavior:
-	 * - Accepts field => string|array shapes.
-	 * - Normalizes a single string to a one-item list.
-	 * - Trims all stored strings by MAX_MSG_STRLEN.
-	 * - Skips empty field names and unusable values.
-	 * - Replaces existing entries for the same field.
+	 * - A field name is trimmed of whitespace; an empty name is skipped.
+	 * - The messages of a field are a string or the strings of an array, each cut to
+	 *   MAX_MSG_STRLEN bytes. Empty strings and other values are dropped, and the newest
+	 *   MAX_MSG_LIST_SIZE stay. A field without a message left is skipped.
+	 * - Changes nothing when no field is left.
 	 *
 	 * Typical usage:
-	 *   $this->app->flash->fieldErrors([
-	 *   	'email' => ['Email address is invalid.'],
-	 *   	'password' => [
-	 *   		'Password must be at least 12 characters long.',
-	 *   		'Password must contain a non-space character.',
-	 *   	],
-	 *   ]);
+	 *   $this->app->flash->fieldErrors(['email' => 'Email address is invalid.']);
 	 *
-	 * Failure:
-	 * - Throws \RuntimeException if MAX_OLD_KEYS would be exceeded.
-	 *
-	 * @param array<string|int, mixed> $errors Field error map.
+	 * @param  array<string|int,mixed>  $errors  Messages by field name: A string or a list of strings.
 	 * @return void
-	 *
-	 * @throws \RuntimeException If field-error key cap would be exceeded.
+	 * @throws \RuntimeException  When the field errors would hold more than MAX_OLD_KEYS fields.
 	 */
 	public function fieldErrors(array $errors): void {
-		// -- 1. Fast-exit on empty input --------------------------------
 		if ($errors === []) {
 			return;
 		}
 
 
-		// -- 2. Normalize incoming field errors -------------------------
+		// -- 1. Normalize the field errors -------------------------------
 		$cur = (array)$this->app->session->get(self::KEY_ERR);
 		$normalized = [];
 
@@ -330,7 +301,7 @@ class Flash extends BaseService {
 		}
 
 
-		// -- 3. Enforce caps and persist --------------------------------
+		// -- 2. Check the cap and store ----------------------------------
 		$newKeys = \array_diff(\array_keys($normalized), \array_keys($cur));
 		if ((\count($cur) + \count($newKeys)) > self::MAX_OLD_KEYS) {
 			throw new \RuntimeException('Flash field-error key cap reached (' . self::MAX_OLD_KEYS . ').');
@@ -341,10 +312,10 @@ class Flash extends BaseService {
 
 
 	/**
-	 * Read a single old-input value without clearing.
+	 * Return one old-input value without removing it.
 	 *
-	 * @param string     $key
-	 * @param mixed|null $default Returned when key is absent.
+	 * @param  string  $key  Field name.
+	 * @param  mixed  $default  Returned when the field is absent or its value is null.
 	 * @return mixed
 	 */
 	public function oldValue(string $key, mixed $default = null): mixed {
@@ -354,9 +325,9 @@ class Flash extends BaseService {
 
 
 	/**
-	 * Check presence of an old-input key.
+	 * Check whether the old input has a field, also when its value is null.
 	 *
-	 * @param string $key
+	 * @param  string  $key  Field name.
 	 * @return bool
 	 */
 	public function hasOld(string $key): bool {
@@ -365,11 +336,19 @@ class Flash extends BaseService {
 	}
 
 
+
+
+	// ----------------------------------------------------------------
+	// Read and clear
+	// ----------------------------------------------------------------
+
 	/**
-	 * Read and clear a single message bucket.
+	 * Return one message bucket and remove it.
 	 *
-	 * @param string $key
-	 * @return string|array<mixed>|null Message payload, or null if absent.
+	 * Removes only this bucket; the other buckets and bags stay.
+	 *
+	 * @param  string  $key  Bucket name.
+	 * @return string|array<mixed>|null  The payload, or null when the bucket is absent.
 	 */
 	public function take(string $key): string|array|null {
 		$msg = (array)$this->app->session->get(self::KEY_MSG);
@@ -385,10 +364,10 @@ class Flash extends BaseService {
 
 
 	/**
-	 * Read a single message bucket without clearing.
+	 * Return one message bucket without removing it.
 	 *
-	 * @param string $key
-	 * @return string|array<mixed>|null
+	 * @param  string  $key  Bucket name.
+	 * @return string|array<mixed>|null  The payload, or null when the bucket is absent.
 	 */
 	public function peek(string $key): string|array|null {
 		$msg = (array)$this->app->session->get(self::KEY_MSG);
@@ -397,13 +376,9 @@ class Flash extends BaseService {
 
 
 	/**
-	 * Peek all bags without clearing.
+	 * Return all bags without clearing them.
 	 *
-	 * @return array{
-	 * 	msg: array<string, string|array<mixed>>,
-	 * 	old: array<string, mixed>,
-	 * 	err: array<string, array<int, string>>
-	 * }
+	 * @return array{msg:array<string,string|array<mixed>>,old:array<string,mixed>,err:array<string,list<string>>}
 	 */
 	public function peekAll(): array {
 		return [
@@ -415,18 +390,21 @@ class Flash extends BaseService {
 
 
 	/**
-	 * Pull (read) all and clear all bags unless keep() was set.
-	 * If keep() was set prior to this call, bags are preserved and the keep
-	 * flag is consumed (single-shot).
+	 * Return all bags and clear them, unless keep() asked to keep them once.
 	 *
-	 * @return array{
-	 * 	msg: array<string, string|array<mixed>>,
-	 * 	old: array<string, mixed>,
-	 * 	err: array<string, array<int, string>>
-	 * }
+	 * The read side of Post/Redirect/Get: Clearing what it returns keeps a reload of the page from
+	 * showing the same data again.
+	 *
+	 * Behavior:
+	 * - Without the keep flag, removes every bag and the flag.
+	 * - With the keep flag, removes only the flag, so the bags stay for the next pullAll().
+	 *
+	 * Typical usage:
+	 *   $flash = $this->app->flash->pullAll();
+	 *
+	 * @return array{msg:array<string,string|array<mixed>>,old:array<string,mixed>,err:array<string,list<string>>}
 	 */
 	public function pullAll(): array {
-		// -- 1. Load current flash state --------------------------------
 		$msg  = (array)$this->app->session->get(self::KEY_MSG);
 		$old  = (array)$this->app->session->get(self::KEY_OLD);
 		$err  = (array)$this->app->session->get(self::KEY_ERR);
@@ -438,14 +416,12 @@ class Flash extends BaseService {
 			'err' => $err,
 		];
 
-		// -- 2. Preserve once when keep() was requested -----------------
 		// The bags stay in the session as they are; only the flag is consumed.
 		if ($keep) {
 			$this->app->session->remove(self::KEY_KEEP);
 			return $out;
 		}
 
-		// -- 3. Clear bags after normal pull ----------------------------
 		$this->app->session->remove(self::KEY_MSG);
 		$this->app->session->remove(self::KEY_OLD);
 		$this->app->session->remove(self::KEY_ERR);
@@ -456,14 +432,15 @@ class Flash extends BaseService {
 
 
 	/**
-	 * Mark current flash data to persist across the next pullAll().
-	 * Pass false to cancel a prior keep() call within the same request.
+	 * Make the next pullAll() keep the bags, or remove that request.
+	 *
+	 * The flag is single-shot: The next pullAll() consumes it and keeps the bags, and the one after
+	 * clears them.
 	 *
 	 * Typical usage:
-	 *   $this->app->flash->keep();      // persist once
-	 *   $this->app->flash->keep(false); // cancel within same request
+	 *   $this->app->flash->keep();
 	 *
-	 * @param bool $enable When true, enables keep; when false, clears it.
+	 * @param  bool  $enable  False removes the flag.
 	 * @return void
 	 */
 	public function keep(bool $enable = true): void {
@@ -476,7 +453,9 @@ class Flash extends BaseService {
 
 
 	/**
-	 * Clear all bags and the keep flag.
+	 * Remove every bag and the keep flag.
+	 *
+	 * Discards all flash data, also data that an earlier request stored for this one.
 	 *
 	 * @return void
 	 */
@@ -489,9 +468,11 @@ class Flash extends BaseService {
 
 
 	/**
-	 * Remove a single message bucket (no-op if absent).
+	 * Remove one message bucket.
 	 *
-	 * @param string $key
+	 * Changes nothing when the bucket is absent.
+	 *
+	 * @param  string  $key  Bucket name.
 	 * @return void
 	 */
 	public function forgetMsg(string $key): void {
@@ -504,9 +485,11 @@ class Flash extends BaseService {
 
 
 	/**
-	 * Remove one or more old-input keys (no-op for missing keys).
+	 * Remove fields from the old input.
 	 *
-	 * @param array<int, string> $keys
+	 * Absent fields are ignored, and the old input is stored again only when a field was removed.
+	 *
+	 * @param  list<string>  $keys  Field names.
 	 * @return void
 	 */
 	public function forgetOld(array $keys): void {
@@ -534,16 +517,16 @@ class Flash extends BaseService {
 	// ----------------------------------------------------------------
 
 	/**
-	 * Normalize one field's error payload to a compact list of strings.
+	 * Normalize the errors of one field to a list of non-empty strings.
 	 *
 	 * Behavior:
-	 * - Accepts a single string or an array of message-like values.
-	 * - Trims strings by MAX_MSG_STRLEN.
-	 * - Discards empty strings after trim.
-	 * - Keeps only the newest MAX_MSG_LIST_SIZE items.
+	 * - A string becomes a one-item list. An array keeps its strings in order and drops other
+	 *   values. Any other value gives an empty list.
+	 * - Each string is cut to MAX_MSG_STRLEN bytes; empty strings are dropped.
+	 * - Keeps the newest MAX_MSG_LIST_SIZE items.
 	 *
-	 * @param mixed $messages Raw field error payload.
-	 * @return array<int, string> Normalized list of messages.
+	 * @param  mixed  $messages  A string or an array of messages.
+	 * @return list<string>
 	 */
 	private function normalizeFieldErrorMessages(mixed $messages): array {
 		if (\is_string($messages)) {
@@ -580,11 +563,15 @@ class Flash extends BaseService {
 
 
 	/**
-	 * UTF-8 safe tail-truncation by bytes. If the cut lands mid-sequence,
-	 * back off to the last valid boundary to preserve valid UTF-8.
+	 * Cut a string to at most MAX_MSG_STRLEN bytes without ending inside a UTF-8 sequence.
 	 *
-	 * @param string $s Input string to cap by bytes.
-	 * @return string String not exceeding MAX_MSG_STRLEN bytes, valid UTF-8.
+	 * Behavior:
+	 * - Returns a string within the limit unchanged, whether or not it is valid UTF-8.
+	 * - Cuts a longer string to the longest prefix within the limit that is valid UTF-8. When an
+	 *   invalid byte comes before the limit, the result ends before it and may be empty.
+	 *
+	 * @param  string  $s
+	 * @return string
 	 */
 	private function trimString(string $s): string {
 		if (\strlen($s) <= self::MAX_MSG_STRLEN) {
@@ -593,7 +580,7 @@ class Flash extends BaseService {
 
 		$cut = \substr($s, 0, self::MAX_MSG_STRLEN);
 
-		// If $cut breaks a UTF-8 sequence, back off until it is valid UTF-8.
+		// Drop bytes from the end until $cut is valid UTF-8.
 		if (!\preg_match('//u', $cut)) {
 			while ($cut !== '' && !\preg_match('//u', $cut)) {
 				$cut = \substr($cut, 0, -1);

@@ -18,21 +18,21 @@ namespace CitOmni\Http\Exception;
 use CitOmni\Http\Enum\WebhooksAuthFailureReason;
 
 /**
- * WebhooksAuthVerificationException: Thrown when a webhook request fails authentication.
+ * WebhooksAuthVerificationException: Exception for a webhook request that failed authentication.
  *
- * Carries a WebhooksAuthFailureReason enum identifying the exact verification
- * stage that failed. The reason is available for logging, problem-detail
- * responses, and structured error handling without parsing message strings.
- *
- * Typical usage:
- *   try {
- *       $body = $this->app->webhooksAuth->requireValid();
- *   } catch (WebhooksAuthVerificationException $e) {
- *       // $e->reason === WebhooksAuthFailureReason::NonceRejected, etc.
- *   }
+ * Tells the caller which check rejected the request as a WebhooksAuthFailureReason, so an
+ * adapter can log it or map it to a response without parsing the message.
  */
 class WebhooksAuthVerificationException extends WebhooksAuthException {
-	
+
+	/**
+	 * Create the exception with the reason for the rejection.
+	 *
+	 * @param  WebhooksAuthFailureReason  $reason  Why the request failed authentication.
+	 * @param  string  $message  Human-readable message; empty for "Webhook authentication failed: " and the reason's value.
+	 * @param  int  $code  Exception code.
+	 * @param  \Throwable|null  $previous  Lower-layer cause, when translated.
+	 */
 	public function __construct(public readonly WebhooksAuthFailureReason $reason, string $message = '', int $code = 0, ?\Throwable $previous = null) {
 		parent::__construct(
 			$message !== '' ? $message : 'Webhook authentication failed: ' . $reason->value,

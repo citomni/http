@@ -16,38 +16,36 @@ declare(strict_types=1);
 namespace CitOmni\Http\Enum;
 
 /**
- * WebhooksAuthFailureReason: Structured reasons for webhook authentication failures.
+ * WebhooksAuthFailureReason: Enum of why a webhook request failed authentication.
  *
- * Each case represents a distinct failure mode in the webhook verification
- * pipeline. The fine-grained distinction (e.g. SignatureMalformed vs
- * SignatureMismatch) enables precise logging, debugging, and testing without
- * parsing free-form error strings.
+ * Gives each failure mode one machine-readable value, so logs, tests and adapters tell the
+ * modes apart without parsing messages. Which checks run, and in which order, belongs to
+ * WebhooksAuth.
  *
- * Notes:
- * - Values are stable identifiers safe to log and assert against in tests.
- * - Order roughly mirrors the verification pipeline (cheapest checks first).
+ * Rules:
+ * - Never rename or remove a backing value: The values are logged and asserted against.
  */
 enum WebhooksAuthFailureReason: string {
 
-	/** Service is configured as disabled - no requests can authenticate. */
+	/** Webhook authentication is disabled, so no request can authenticate. */
 	case Disabled = 'disabled';
 
-	/** Source IP not present in non-empty allow-list. */
+	/** The source IP matches no entry of a non-empty allow-list. */
 	case IpNotAllowed = 'ip_not_allowed';
 
-	/** One or more required authentication headers were missing or empty. */
+	/** A required authentication header is missing or empty. */
 	case HeadersMissing = 'headers_missing';
 
-	/** Signature header has wrong length or contains non-hex characters. */
+	/** The signature has the wrong length or a character that is not hex. */
 	case SignatureMalformed = 'signature_malformed';
 
-	/** Timestamp is too old, in the future beyond clock skew, or non-positive. */
+	/** The timestamp is not positive, too old, or further ahead than the clock skew allows. */
 	case TimestampOutOfWindow = 'timestamp_out_of_window';
 
-	/** Nonce was already used (replay) or storage failed. */
+	/** The nonce ledger refused to claim the nonce, such as for a replay. */
 	case NonceRejected = 'nonce_rejected';
 
-	/** HMAC signature did not match the canonical base string. */
+	/** The HMAC signature does not match the canonical base string. */
 	case SignatureMismatch = 'signature_mismatch';
 
 }

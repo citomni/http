@@ -16,10 +16,14 @@ declare(strict_types=1);
 namespace CitOmni\Http\Exception;
 
 /**
- * CsrfException: Base exception for the CSRF service.
+ * CsrfException: Base exception for CSRF failures.
  *
- * Catch this to handle all CSRF-related failures in a single branch.
- * CsrfVerificationException extends this for verification-specific failures.
+ * Lets callers catch every CSRF failure in one branch. Thrown as this class, it marks a
+ * failure on the server's side, such as invalid cfg or a corrupted session token, not a
+ * rejected request: Let it reach the global error handler.
+ *
+ * Rules:
+ * - A rejected request gets a subclass, so callers can tell it from a server-side failure.
  */
 class CsrfException extends \RuntimeException {
 }

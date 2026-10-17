@@ -19,58 +19,56 @@ use CitOmni\Kernel\Cfg;
 use CitOmni\Kernel\Service\BaseService;
 
 /**
- * Slugger: Deterministic slug generation, normalization, validation, and uniqueness helpers.
+ * Slugger: Service that makes, checks and deduplicates URL slugs.
  *
- * Intent:
- * - Provide a single, predictable pipeline for human-friendly, URL-safe slugs across apps.
- * - No I/O and no storage assumptions; uniqueness is delegated via callback.
+ * Gives every caller the same slug policy, chosen once from the service options and cfg. It
+ * decides what a slug looks like; whether a slug is already taken belongs to the caller, which
+ * answers through a callback.
  *
- * Behavior:
- * - Immutable config read at init(): options > cfg http.slug (fail fast on invalid).
- * - Transliteration uses iconv if available; includes a tiny ASCII fallback map for common cases (e.g., Danish).
- * - Final slugs respect allowedPattern, separator collapsing, casing policy, and max length.
- *
- * Notes:
- * - Keep allocations low; operate on strings in-place where possible.
- * - Deterministic truncation prefers cutting at separator boundaries.
+ * Rules:
+ * - Derive the policy only in init(); public methods never change it.
+ * - Reach no storage: Ask the caller's callback whenever a fact about stored slugs is needed.
+ * - Measure slug lengths in bytes.
  *
  * Typical usage:
  *   $base = $this->app->slugger->slugify($title);
- *   $this->app->slugger->validate($base);
- *   $slug = $this->app->slugger->ensureUnique(fn($s) => $repo->slugExists($s), $base);
- *
- * @throws \InvalidArgumentException On invalid inputs or config.
+ *   $slug = $this->app->slugger->ensureUnique(fn(string $s): bool => $repo->slugExists($s), $base);
  */
 class Slugger extends BaseService {
 	
-	/** @var string */
+	/** Text that replaces disallowed characters and joins a numeric suffix; never empty. */
 	private string $separator = '-';
 	
-	/** @var bool */
+	/** Whether slugs must be lowercase. */
 	private bool $lowercase = true;
 	
-	/** @var int */
+	/** Maximum slug length in bytes, at least 1. */
 	private int $maxLength = 140;
 	
-	/** @var bool */
+	/** Whether text is transliterated to ASCII before disallowed characters are replaced. */
 	private bool $transliterate = true;
 	
-	/** @var array<int, string> */
+	/** @var list<int|string> Reserved slugs, lowercased and unique. */
 	private array $reserved = [];
 	
-	/** @var string PCRE pattern describing characters that are NOT allowed (used for replacement step) */
+	/** PCRE that matches the characters a slug must not contain. */
 	private string $notAllowedPattern = '/[^a-z0-9\-]+/i';
 
 
 	/**
-	 * One-time initialization. Read cfg, merge options, pre-validate, and store as immutable scalars.
+	 * Read and check the slug policy once.
+	 *
+	 * Behavior:
+	 * - Each service option wins over the key of the same name in cfg http.slug.
+	 * - Lowercases the reserved slugs and drops entries that are not non-empty strings.
 	 *
 	 * @return void
+	 * @throws \InvalidArgumentException  When separator is not a non-empty string, maxLength is not an integer >= 1, reserved is not an array, or allowedPattern is not a non-empty string.
+	 * @see \CitOmni\Kernel\Service\BaseService::__construct()  Calls it once per instance.
 	 */
 	protected function init(): void {
 		$cfg = $this->app->cfg->http->slug;
 
-		// Options override cfg
 		$opt = $this->options;
 		$this->options = [];
 
@@ -87,7 +85,6 @@ class Slugger extends BaseService {
 		if (!\is_array($reserved)) {
 			throw new \InvalidArgumentException('slug.reserved must be an array of strings.');
 		}
-		// Normalize reserved list (lowercase + unique)
 		$norm = [];
 		foreach ($reserved as $w) {
 			if (!\is_string($w) || $w === '') {
@@ -101,23 +98,29 @@ class Slugger extends BaseService {
 		if (!\is_string($allowedPattern) || $allowedPattern === '') {
 			throw new \InvalidArgumentException('slug.allowedPattern must be a non-empty PCRE string.');
 		}
-		// We store NOT-allowed pattern to use replace() directly.
+		// Despite its name, allowedPattern matches the disallowed characters, so it is stored as is.
 		$this->notAllowedPattern = $allowedPattern;
 	}
 
 
 	/**
-	 * Create a slug from arbitrary source text.
+	 * Make a slug from any text.
 	 *
-	 * Pipeline:
-	 *  1) Transliterate to ASCII if enabled (iconv if available; else minimal map fallback).
-	 *  2) Replace NOT-allowed characters with the configured separator.
-	 *  3) Collapse repeated separators and trim at both ends.
-	 *  4) Lowercase if configured.
-	 *  5) Enforce max length deterministically (prefer cut at separator).
+	 * Behavior:
+	 * - Transliterates the trimmed text to ASCII first when transliterate is on.
+	 * - Replaces disallowed characters with the separator, collapses repeated separators and
+	 *   trims them from both ends.
+	 * - Lowercases when lowercase is on.
+	 * - Shortens a result longer than maxLength bytes with enforceLength().
+	 * - Returns '' when no allowed character is left.
+	 * - Does not check the reserved slugs; validate() does.
 	 *
-	 * @param string $source Source text (can be any UTF-8 string).
-	 * @return string Deterministic, URL-safe slug. May be empty if source cannot yield any allowed characters.
+	 * Notes:
+	 * - Collapsing and trimming repeat only the separator's last character, so they are exact
+	 *   only for a one-character separator.
+	 *
+	 * @param  string  $source  UTF-8 text, such as a title.
+	 * @return string
 	 */
 	public function slugify(string $source): string {
 		$s = \trim($source);
@@ -130,24 +133,19 @@ class Slugger extends BaseService {
 			return '';
 		}
 
-		// Replace NOT-allowed chars with separator
 		$s = (string)\preg_replace($this->notAllowedPattern, $this->separator, $s);
 
-		// Collapse repeated separators
 		if ($this->separator !== '') {
 			$quotedSep = \preg_quote($this->separator, '/');
 			$s = (string)\preg_replace('/' . $quotedSep . '+/u', $this->separator, $s);
 		}
 
-		// Trim separator at both ends
 		$s = $this->trimSeparators($s);
 
-		// Lowercase
 		if ($this->lowercase) {
 			$s = \strtolower($s);
 		}
 
-		// Enforce length
 		if ($this->maxLength > 0 && \strlen($s) > $this->maxLength) {
 			$s = $this->enforceLength($s, $this->maxLength);
 		}
@@ -157,11 +155,18 @@ class Slugger extends BaseService {
 
 
 	/**
-	 * Validate a slug against current policy.
+	 * Check a slug against the policy.
 	 *
-	 * @param string $slug Non-empty slug candidate.
+	 * Behavior:
+	 * - Checks the trimmed slug, so surrounding whitespace is accepted.
+	 *
+	 * Notes:
+	 * - The repeated-separator check repeats only the separator's last character, so it is
+	 *   exact only for a one-character separator.
+	 *
+	 * @param  string  $slug
 	 * @return void
-	 * @throws \InvalidArgumentException If invalid or reserved.
+	 * @throws \InvalidArgumentException  When the slug is empty, has a disallowed character, has ASCII uppercase while lowercase is on, is longer than maxLength bytes, is reserved, starts or ends with the separator, or repeats it.
 	 */
 	public function validate(string $slug): void {
 		$s = \trim($slug);
@@ -170,7 +175,6 @@ class Slugger extends BaseService {
 			throw new \InvalidArgumentException('Slug cannot be empty.');
 		}
 
-		// Allowed-pattern validation: if we remove NOT-allowed chars and change the string, it's invalid.
 		if (\preg_match($this->notAllowedPattern, $s) === 1) {
 			throw new \InvalidArgumentException('Slug contains invalid characters.');
 		}
@@ -187,7 +191,6 @@ class Slugger extends BaseService {
 			throw new \InvalidArgumentException('Slug is reserved.');
 		}
 
-		// Separator edge cases (no leading/trailing, no doubles)
 		if ($this->separator !== '') {
 			$sep = \preg_quote($this->separator, '/');
 			if (\preg_match('/(^' . $sep . ')|(' . $sep . '$)/', $s) === 1) {
@@ -201,11 +204,21 @@ class Slugger extends BaseService {
 
 
 	/**
-	 * Deterministically enforce a maximum length; prefers cutting at the last separator before the limit.
+	 * Shorten a slug to at most $max bytes.
 	 *
-	 * @param string $slug Input slug (already normalized).
-	 * @param int $max Positive max length (bytes).
-	 * @return string Shortened slug (never longer than $max).
+	 * Behavior:
+	 * - Returns '' when $max is below 1, and the slug unchanged when it fits.
+	 * - Otherwise cuts at the last separator within the first $max bytes when its 0-based offset
+	 *   is at least floor(0.6 * $max), else at $max bytes, and trims separators from both ends
+	 *   of the cut.
+	 * - Falls back to the first $max bytes, untrimmed, when trimming leaves nothing.
+	 *
+	 * Notes:
+	 * - Cuts bytes, so a slug with multibyte characters can be cut inside one.
+	 *
+	 * @param  string  $slug  Normalized slug.
+	 * @param  int  $max  Maximum length in bytes.
+	 * @return string  At most $max bytes.
 	 */
 	public function enforceLength(string $slug, int $max): string {
 		if ($max <= 0) {
@@ -229,10 +242,13 @@ class Slugger extends BaseService {
 
 
 	/**
-	 * Check if the slug is on the reserved list (case-insensitive).
+	 * Check whether a slug is reserved, ignoring ASCII case.
 	 *
-	 * @param string $slug Candidate slug.
-	 * @return bool True if reserved.
+	 * Notes:
+	 * - A reserved slug that PHP turns into an int key, such as 404, never matches.
+	 *
+	 * @param  string  $slug
+	 * @return bool
 	 */
 	public function isReserved(string $slug): bool {
 		return \in_array(\strtolower($slug), $this->reserved, true);
@@ -240,10 +256,19 @@ class Slugger extends BaseService {
 
 
 	/**
-	 * Normalize for canonical comparison (lowercase if configured, collapse/trim separators).
+	 * Normalize a slug-like string without transliterating or shortening it.
 	 *
-	 * @param string $slug Raw slug-ish string.
-	 * @return string Canonicalized slug string.
+	 * Behavior:
+	 * - Replaces disallowed characters in the trimmed string with the separator, collapses
+	 *   repeated separators, trims them from both ends and lowercases when lowercase is on.
+	 * - Returns '' when no allowed character is left.
+	 *
+	 * Notes:
+	 * - Collapsing and trimming repeat only the separator's last character, so they are exact
+	 *   only for a one-character separator.
+	 *
+	 * @param  string  $slug
+	 * @return string
 	 */
 	public function normalize(string $slug): string {
 		$s = \trim($slug);
@@ -251,7 +276,6 @@ class Slugger extends BaseService {
 			return '';
 		}
 
-		// Replace NOT-allowed with separator for a fair normalization pass
 		$s = (string)\preg_replace($this->notAllowedPattern, $this->separator, $s);
 
 		if ($this->separator !== '') {
@@ -268,16 +292,25 @@ class Slugger extends BaseService {
 
 
 	/**
-	 * Ensure uniqueness using a user-supplied existence callback.
+	 * Return the first free slug among a base slug and its numbered variants.
 	 *
-	 * Strategy:
-	 *   base, base-2, base-3, ... base-N (N <= maxAttempts)
+	 * Asks the caller whether each candidate is taken, in order: The normalized base, then base,
+	 * separator and 2, 3 and so on up to $maxAttempts + 1. A numbered candidate longer than
+	 * maxLength bytes keeps its number and loses the end of the base.
 	 *
-	 * @param callable $existsFn fn(string $candidate): bool  Returns true if slug already exists.
-	 * @param string $baseSlug Base slug to test first (will be validated/normalized implicitly).
-	 * @param int $maxAttempts Maximum number of numeric suffix attempts (>= 1).
-	 * @return string First available candidate.
-	 * @throws \InvalidArgumentException If inputs are invalid or no candidate found.
+	 * Behavior:
+	 * - Calls $existsFn at most $maxAttempts + 1 times.
+	 *
+	 * Notes:
+	 * - The check and the caller's later write are not atomic. Under concurrent writers, only a
+	 *   unique constraint in storage prevents a duplicate.
+	 *
+	 * @param  callable(string):bool  $existsFn  Returns true when the candidate is already taken.
+	 * @param  string  $baseSlug  Normalized with normalize() before use; make it with slugify() from raw text.
+	 * @param  int  $maxAttempts  Number of numbered candidates to try, at least 1.
+	 * @return string
+	 * @throws \InvalidArgumentException  When $maxAttempts is below 1, the base is empty after normalizing, the base or a tried candidate fails validate(), or every candidate is taken.
+	 * @see \CitOmni\Http\Service\Slugger::validate()  The checks every candidate must pass.
 	 */
 	public function ensureUnique(callable $existsFn, string $baseSlug, int $maxAttempts = 50): string {
 		if ($maxAttempts < 1) {
@@ -288,7 +321,6 @@ class Slugger extends BaseService {
 		if ($base === '') {
 			throw new \InvalidArgumentException('Base slug cannot be empty after normalization.');
 		}
-		// Enforce final policies on the base
 		$this->validate($base);
 
 		if (!$existsFn($base)) {
@@ -297,11 +329,9 @@ class Slugger extends BaseService {
 
 		for ($i = 2; $i <= $maxAttempts + 1; $i++) {
 			$candidate = $base . $this->separator . (string)$i;
-			// Enforce max length (keep numeric suffix)
 			if ($this->maxLength > 0 && \strlen($candidate) > $this->maxLength) {
 				$candidate = $this->enforceLengthWithSuffix($base, (string)$i);
 			}
-			// validate structure and policy (throws on bad cases)
 			$this->validate($candidate);
 
 			if (!$existsFn($candidate)) {
@@ -314,13 +344,21 @@ class Slugger extends BaseService {
 
 
 	/**
-	 * Transliterate Unicode to ASCII using iconv when available; falls back to a minimal map.
+	 * Transliterate UTF-8 text to ASCII, best effort.
 	 *
-	 * @param string $s UTF-8 input.
-	 * @return string ASCII-ish output (best effort).
+	 * Behavior:
+	 * - Uses iconv when it is available and returns a non-empty result.
+	 * - Otherwise replaces a fixed set of Danish, German and accented Latin letters; other
+	 *   non-ASCII characters stay.
+	 *
+	 * Notes:
+	 * - The iconv result depends on the platform's iconv implementation and the current locale.
+	 *
+	 * @param  string  $s  UTF-8 text.
+	 * @return string
 	 */
 	private function toAscii(string $s): string {
-		// iconv path (fast + broad coverage)
+		// iconv first: Fast and broad coverage.
 		if (\function_exists('iconv')) {
 			$out = @\iconv('UTF-8', 'ASCII//TRANSLIT//IGNORE', $s);
 			if (\is_string($out) && $out !== '') {
@@ -328,7 +366,7 @@ class Slugger extends BaseService {
 			}
 		}
 
-		// Tiny fallback map for common letters (keep cheap)
+		// Fallback for the most common letters only, to keep it cheap.
 		$map = [
 			'Æ' => 'AE', 'Ø' => 'OE', 'Å' => 'AA',
 			'æ' => 'ae', 'ø' => 'oe', 'å' => 'aa',
@@ -346,9 +384,9 @@ class Slugger extends BaseService {
 
 
 	/**
-	 * Trim separator from both ends.
+	 * Trim every separator from both ends.
 	 *
-	 * @param string $s
+	 * @param  string  $s
 	 * @return string
 	 */
 	private function trimSeparators(string $s): string {
@@ -361,11 +399,15 @@ class Slugger extends BaseService {
 
 
 	/**
-	 * Enforce length while preserving a numeric suffix.
+	 * Join a base and a numbered suffix within maxLength bytes.
 	 *
-	 * @param string $base Base part without suffix.
-	 * @param string $suffix Numeric suffix (e.g., "2").
-	 * @return string Shortened candidate including suffix.
+	 * Behavior:
+	 * - Shortens the base with enforceLength() so that base, separator and suffix fit.
+	 * - Returns the suffix alone when no part of the base fits.
+	 *
+	 * @param  string  $base  Slug without the suffix.
+	 * @param  string  $suffix  Number, such as "2".
+	 * @return string
 	 */
 	private function enforceLengthWithSuffix(string $base, string $suffix): string {
 		$suffixWithSep = $this->separator . $suffix;
@@ -377,12 +419,12 @@ class Slugger extends BaseService {
 
 
 	/**
-	 * Validate a positive integer (bytes) from mixed input.
+	 * Return a policy value that must be an integer >= 1.
 	 *
-	 * @param mixed $v
-	 * @param string $name
+	 * @param  mixed  $v
+	 * @param  string  $name  Policy key, used in the exception message.
 	 * @return int
-	 * @throws \InvalidArgumentException
+	 * @throws \InvalidArgumentException  When $v is not an integer >= 1.
 	 */
 	private static function pickPositiveInt(mixed $v, string $name): int {
 		if (!\is_int($v) || $v < 1) {
@@ -393,12 +435,12 @@ class Slugger extends BaseService {
 
 
 	/**
-	 * Validate a non-empty string from mixed input.
+	 * Return a policy value that must be a non-empty string.
 	 *
-	 * @param mixed $v
-	 * @param string $name
+	 * @param  mixed  $v
+	 * @param  string  $name  Policy key, used in the exception message.
 	 * @return string
-	 * @throws \InvalidArgumentException
+	 * @throws \InvalidArgumentException  When $v is not a non-empty string.
 	 */
 	private static function pickString(mixed $v, string $name): string {
 		if (!\is_string($v) || $v === '') {

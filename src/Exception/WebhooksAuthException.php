@@ -16,12 +16,13 @@ declare(strict_types=1);
 namespace CitOmni\Http\Exception;
 
 /**
- * WebhooksAuthException: Base exception for the WebhooksAuth service.
+ * WebhooksAuthException: Base exception for webhook authentication failures.
  *
- * Catch this to handle all webhook-auth-related failures in a single branch.
- * Subtypes:
- * - WebhooksAuthConfigException - invalid configuration discovered at init time.
- * - WebhooksAuthVerificationException - request failed authentication checks.
+ * Lets a caller handle every webhook authentication failure, a configuration error as well as
+ * a rejected request, in one catch.
+ *
+ * Rules:
+ * - Throw a subclass: Each kind of failure has its own.
  */
 class WebhooksAuthException extends \RuntimeException {
 }

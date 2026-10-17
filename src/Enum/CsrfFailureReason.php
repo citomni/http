@@ -17,18 +17,19 @@ namespace CitOmni\Http\Enum;
 
 
 /**
- * CsrfFailureReason: Enum of the CSRF defense checks that can reject a request.
+ * CsrfFailureReason: Enum of the reasons a CSRF check rejects a request.
  *
- * Names the failure point within the three defense layers (Fetch Metadata, Origin with its
- * Referer fallback, and the token), so one exception type can report every layer. The values
- * are safe for logs and structured output: They carry no personal data and no secrets.
+ * The one vocabulary for why a request failed CSRF verification, so one exception type and
+ * one log field can report every check. Which check produces which reason belongs to the Csrf
+ * service.
  *
  * Rules:
  * - A value is a contract once released. Never rename, reuse or reinterpret one.
+ * - Keep every value free of personal data and secrets, so it is safe in logs and responses.
  */
 enum CsrfFailureReason: string {
 
-	/** Sec-Fetch-Site reports a source that the Fetch Metadata policy does not allow, and the Origin is not trusted. */
+	/** Sec-Fetch-Site names a context that the CSRF Sec-Fetch-Site check does not allow, and the Origin is not trusted. */
 	case FetchMetadataRejected = 'fetch_metadata_rejected';
 
 	/** The Origin header is neither the request's own origin nor a trusted origin, or cannot be parsed. */

@@ -20,58 +20,50 @@ use CitOmni\Kernel\App;
 use CitOmni\Kernel\Cfg;
 
 /**
- * Fetch Metadata resource-isolation rule for requests that are not same-origin.
+ * FetchMetadataPolicy: Policy that decides whether a request from another context may reach the app.
  *
- * Kernel::run() consults this policy before maintenance and routing when
- * security.fetch_metadata.enabled is true and Sec-Fetch-Site is neither
- * "same-origin" nor "none". The policy only decides; the 403 stays with the Kernel.
+ * Holds the Fetch Metadata resource-isolation rule in one place: Which requests that are not
+ * same-origin may proceed, and which paths are exempt. It only decides; enforcing the
+ * decision, and answering a refusal, belong to the caller.
  *
- * Behavior:
- * - Missing or unrecognized Sec-Fetch-Site: allowed when allow_missing is true,
- *   otherwise only a matching exemption admits the request.
- * - "same-site": allowed when allow_same_site is true, otherwise handled like
- *   "cross-site".
- * - "cross-site" and untrusted "same-site": GET/HEAD top-level navigations
- *   (Sec-Fetch-Mode "navigate", Sec-Fetch-Dest "document") are allowed. Every other
- *   context needs an exemption that matches both path and method.
- * - Exemptions (security.fetch_metadata.exempt) are a map of named rules, so provider
- *   and app entries merge: ['path' => '/x', 'match' => 'exact'|'prefix',
- *   'methods' => ['GET', ...]]. false removes an inherited rule by name. Other keys
- *   in a rule are ignored.
- * - Paths are compared with the route path from Util\RoutePath, so mount path,
- *   decoding, trailing slashes and http.router_case_insensitive follow Router.
- *   "exact" matches the path itself; "prefix" also matches every path below it
- *   ("/a" covers "/a" and "/a/b", never "/ab"). A prefix of "/" covers every path.
- *
- * Notes:
- * - Header values are compared case-insensitively, as in Csrf::checkFetchMetadata().
- * - Every rule is validated whenever the exemptions are consulted, so an invalid rule
- *   fails instead of being skipped. Invalid means it cannot match as written: a path
- *   that is not a decoded app path (no leading slash; %, ?, #, backslash, space,
- *   control or non-ASCII bytes; // or dot segments), an unknown match mode, or
- *   methods that are not a non-empty list of uppercase method names.
- * - An exemption only bypasses this policy. Routing, method negotiation,
- *   authentication and CSRF verification still apply.
- *
- * Typical usage (Kernel::run()):
- *   if (!(new FetchMetadataPolicy($app))->allows($site)) {
- *       $app->errorHandler->httpError(403, [...]);
- *   }
+ * Rules:
+ * - Compare paths only as RoutePath::resolve() returns them, so an exemption matches the
+ *   path that the Router routes.
+ * - Fail on a cfg value that cannot be used as written; never skip it.
+ * - An exemption bypasses only this rule, never routing, authentication or CSRF verification.
  */
 class FetchMetadataPolicy {
 
 	/**
-	 * @param App $app Booted HTTP application.
+	 * Create the Policy for one app.
+	 *
+	 * @param  App  $app  Booted HTTP app whose cfg holds security.fetch_metadata.
 	 */
 	public function __construct(private readonly App $app) {}
 
 
 	/**
-	 * Decide whether a request that is not same-origin or user-initiated may be dispatched.
+	 * Decide whether a request that is not same-origin or user-initiated may proceed.
 	 *
-	 * @param  string  $site  Lowercased Sec-Fetch-Site value; '' when the header is absent.
-	 * @return bool  True when the request may continue to maintenance and routing.
-	 * @throws \RuntimeException  When a consulted configuration value is invalid.
+	 * Behavior:
+	 * - Any $site other than cross-site and same-site, '' included: True when cfg
+	 *   security.fetch_metadata.allow_missing is true; otherwise only an exemption admits it.
+	 * - same-site: True when cfg security.fetch_metadata.allow_same_site is true; otherwise
+	 *   decided like cross-site.
+	 * - cross-site: True for a GET or HEAD top-level navigation, with Sec-Fetch-Mode navigate
+	 *   and Sec-Fetch-Dest document in any letter case; otherwise only an exemption admits it.
+	 * - An exemption admits the request when its path and its methods match.
+	 *
+	 * Notes:
+	 * - Admit same-origin and none before calling: Here they count as unrecognized values.
+	 *
+	 * Typical usage:
+	 *   $allowed = (new FetchMetadataPolicy($app))->allows($site);
+	 *
+	 * @param  string  $site  Sec-Fetch-Site in lowercase; '' when the header is absent.
+	 * @return bool
+	 * @throws \RuntimeException  When a flag that the decision reads is not a boolean, or when the exemptions are consulted and are not a map or hold an invalid rule.
+	 * @see \CitOmni\Http\Policy\FetchMetadataPolicy::exempted()  How exemptions match.
 	 */
 	public function allows(string $site): bool {
 		$cfg = $this->app->cfg->security->fetch_metadata;
@@ -99,12 +91,25 @@ class FetchMetadataPolicy {
 
 
 	/**
-	 * Whether a valid exemption matches the request path and method.
+	 * Check whether an exemption matches the request path and method.
+	 *
+	 * Behavior:
+	 * - The exemptions are a map of named rules: ['path' => '/x', 'match' => 'exact' or
+	 *   'prefix', 'methods' => ['GET', ...]]. A rule set to false is skipped, which lets an
+	 *   app remove an inherited rule by name. Other keys in a rule are ignored. An empty map
+	 *   matches nothing.
+	 * - exact matches the path itself. prefix also matches every path below it: "/a" covers
+	 *   "/a" and "/a/b", never "/ab". A prefix of "/" covers every path.
+	 * - A trailing slash in a rule path is ignored. With cfg http.router_case_insensitive true,
+	 *   paths match in any letter case.
+	 * - Every rule is validated, also after one has matched, so an invalid rule fails on every
+	 *   consulted request.
 	 *
 	 * @param  string  $method  Uppercase request method.
-	 * @param  mixed   $exempt  security.fetch_metadata.exempt.
+	 * @param  mixed   $exempt  Cfg security.fetch_metadata.exempt.
 	 * @return bool
-	 * @throws \RuntimeException  When the map or one of its rules is invalid.
+	 * @throws \RuntimeException  When $exempt is not a map or a rule is invalid.
+	 * @see \CitOmni\Http\Policy\FetchMetadataPolicy::rule()  What makes a rule invalid.
 	 */
 	private function exempted(string $method, mixed $exempt): bool {
 		$rules = $exempt instanceof Cfg ? $exempt->toArray() : $exempt;
@@ -140,13 +145,22 @@ class FetchMetadataPolicy {
 
 
 	/**
-	 * Validate one exemption rule.
+	 * Validate one exemption rule and return it in comparable form.
 	 *
-	 * @param  int|string  $name             Rule name (map key).
+	 * Behavior:
+	 * - Invalid, because it cannot match as written:
+	 *     - A name that is not a non-empty string.
+	 *     - A rule that is not an array with path, match and methods.
+	 *     - A path that is not a string or not a decoded app path: No leading slash; a %, ?,
+	 *       #, backslash, space, control or non-ASCII byte; "//"; or a "." or ".." segment.
+	 *     - A match other than exact and prefix.
+	 *     - methods that are not a non-empty list of uppercase letter-only names.
+	 *
+	 * @param  int|string  $name             Rule name, the map key.
 	 * @param  mixed       $rule             Rule definition.
-	 * @param  bool        $caseInsensitive  http.router_case_insensitive.
-	 * @return array{0: string, 1: bool, 2: list<string>}  [route path, is prefix, methods].
-	 * @throws \RuntimeException  When the rule cannot match as written.
+	 * @param  bool        $caseInsensitive  Cfg http.router_case_insensitive; true lowercases the path.
+	 * @return array{0:string,1:bool,2:list<string>}  Path without trailing slash ("/" stays), whether it is a prefix, and the methods.
+	 * @throws \RuntimeException  When the rule is invalid; the message names its cfg path.
 	 */
 	private static function rule(int|string $name, mixed $rule, bool $caseInsensitive): array {
 		if (!\is_string($name) || $name === '') {
@@ -184,9 +198,9 @@ class FetchMetadataPolicy {
 
 
 	/**
-	 * Read a boolean policy flag.
+	 * Return a security.fetch_metadata flag, or throw when it is not a boolean.
 	 *
-	 * @param  mixed   $value  Configured value.
+	 * @param  mixed   $value  The cfg value.
 	 * @param  string  $name   Key below security.fetch_metadata, for the message.
 	 * @return bool
 	 * @throws \RuntimeException  When the value is not a boolean.

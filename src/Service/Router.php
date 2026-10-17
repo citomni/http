@@ -20,123 +20,21 @@ use CitOmni\Kernel\Service\BaseService;
 
 
 /**
- * Router: Deterministic HTTP routing with subdir-safe path resolution and method policy.
+ * Router: Service that matches the request path to a route and dispatches its controller action.
  *
- * Responsibilities:
- * - Resolve the HTTP method and a normalized, subdir-safe request path through
- *   \CitOmni\Http\Util\RoutePath (shared with Policy\FetchMetadataPolicy).
- *   1) Prefer CITOMNI_PUBLIC_ROOT_URL to compute a base prefix.
- *   2) Fallback to SCRIPT_NAME derivation; strip trailing "/public".
- *   3) Decode percent-escapes after trimming; enforce ASCII-only path.
- * - Match routes deterministically:
- *   1) Exact map lookup: $routes["/path"] => route array.
- *   2) Regex map lookup via placeholder compilation (e.g., "/user/{id}").
- *   3) Fallback to 404.
- * - Dispatch controller actions with method constraints and negotiation:
- *   1) HEAD is auto-allowed when GET is allowed.
- *   2) OPTIONS always allowed for matched resources (sends 204 + Allow).
- *   3) 405 for disallowed methods (sends Allow).
- * - Provide robust error dispatching via the HTTP ErrorHandler:
- *   1) Router delegates all 404/405/5xx conditions to \CitOmni\Http\Service\ErrorHandler::httpError() 
- *   (logging + rendering, no-blank guarantee; for 405 the mandatory 'Allow' header is set before delegation).
- *   2) Router never renders itself; re-entrancy and nested failures are handled inside the ErrorHandler.
+ * Turns the route table into at most one controller call per request, with method
+ * negotiation. Building the route table belongs to App, resolving the path to RoutePath, and
+ * logging and rendering every 404, 405 and 500 to ErrorHandler::httpError().
  *
- * Collaborators:
- * - $this->app->routes  (read): The merged route table (see Route declarations).
- * - $this->app->cfg     (read): The http.router_case_insensitive toggle.
- * - Controllers (FQCN): Instantiated as new $controller($this->app, $options).
- * - PHP SAPI globals    (read): $_SERVER for method and URI.
- *
- * Route declarations (route table shape):
- * - Routes are not cfg. The kernel merges them (last wins) from the vendor baseline
- *   \CitOmni\Http\Boot\Registry::ROUTES_HTTP, the providers' ROUTES_HTTP,
- *   /config/citomni_http_routes.php and /config/citomni_http_routes.{ENV}.php,
- *   and exposes the result as $this->app->routes.
- * - Exact routes:
- *   '/' => [
- *   	'controller'     => \App\Http\Controller\HomeController::class,
- *   	'action'         => 'index',
- *   	'methods'        => ['GET'],        // optional; defaults to GET/HEAD/OPTIONS
- *   	'template_file'  => 'home.html',    // optional
- *   	'template_layer' => 'app',          // optional
- *   ],
- *
- * - Regex routes (with placeholders):
- *   'regex' => [
- *   	'/user/{id}' => [
- *   		'controller' => \App\Http\Controller\UserController::class,
- *   		'action'     => 'show',
- *   		'methods'    => ['GET'],
- *   	],
- *   ],
- *
- * Placeholder rules (built-ins; unknown placeholders match a single segment):
- * - {id}    => [0-9]+
- * - {email} => [a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}
- * - {slug}  => [a-zA-Z0-9-_]+
- * - {code}  => [a-zA-Z0-9]+
- *
- * Method policy:
- * - When 'methods' is provided, it is normalized and intersected with:
- *   [GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS].
- * - GET implies HEAD; OPTIONS is always added for negotiation.
- * - If 'methods' is absent/empty, the default is GET/HEAD/OPTIONS.
- *
- * Error handling:
- * - 404: No route matched (exact or regex).
- * - 405: Route matched but the method is not allowed (sends Allow header).
- * - 500: Missing controller class or missing action method.
- * - Router delegates all error rendering/logging to Http\Service\ErrorHandler 
- *   to guarantee no-blank responses.
- *
- * Performance & determinism:
- * - Exact-match fast path before regex evaluation.
- * - Placeholder compilation is done per request evaluation; patterns are anchored (#^...$#).
- * - No reflection scans or namespace guessing; controllers must be FQCN strings.
- *
- * Typical usage:
- *   // Front controller (public/index.php)
- *   // define('CITOMNI_ENVIRONMENT', 'prod');
- *   // define('CITOMNI_PUBLIC_PATH', __DIR__);
- *   // define('CITOMNI_APP_PATH', \dirname(__DIR__));
- *   // require CITOMNI_APP_PATH . '/vendor/autoload.php';
- *   // $app = new \CitOmni\Kernel\App(...);
- *   $app->router->run(); // resolves path, matches route, dispatches controller
- *
- * Examples:
- *   // Exact route to a static page (in /config/citomni_http_routes.php)
- *   '/about' => [
- *   	'controller'     => \App\Http\Controller\PageController::class,
- *   	'action'         => 'about',
- *   	'methods'        => ['GET'],
- *   	'template_file'  => 'public/about.html',
- *   	'template_layer' => 'app',
- *   ],
- *
- *   // Regex route with a slug and explicit method set
- *   'regex' => [
- *   	'/blog/{slug}' => [
- *   		'controller'     => \App\Http\Controller\BlogController::class,
- *   		'action'         => 'show',
- *   		'methods'        => ['GET'],
- *   		'template_file'  => 'public/blogpost.html',
- *   		'template_layer' => 'app',
- *   	],
- *   ],
- *
- * Failure:
- *   // Method not allowed
- *   // Request: POST /about    Route allows only GET
- *   // Result: 405 with "Allow: GET, HEAD, OPTIONS" and error dispatch.
- *
- * Notes:
- * - Routes are read from $this->app->routes, never from cfg (see Route declarations).
- * - Controllers are constructed with ($app, ['template_file' => ..., 'template_layer' => ...]).
- * - ASCII-only guard is defense-in-depth; non-ASCII paths get a 404.
+ * Rules:
+ * - Never write a response body. Answer every HTTP error through ErrorHandler::httpError().
+ * - Resolve the path only through RoutePath::resolve(), so pre-dispatch path rules see the
+ *   path that routing sees.
+ * - Create a controller only from the FQCN in its route.
  */
 class Router extends BaseService {
 
-	/** Validation rules for dynamic placeholders like {id}, {email}, etc. */
+	/** Pattern of each built-in placeholder; any other placeholder matches one path segment. */
 	private const PARAM_RULES = [
 		'id'    => '[0-9]+',
 		'email' => '[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}',
@@ -146,16 +44,31 @@ class Router extends BaseService {
 	
 
 	/**
-	 * Entry point. Call from your front controller: $app->router->run();
+	 * Match the current request to a route and dispatch it.
 	 *
-	 * Steps:
-	 *  1) Resolve HTTP method and subdir-safe path
-	 *  2) Try exact route; then regex routes
-	 *  3) Fallback to 404
+	 * Reads the route table from App::routes, which must have this shape:
+	 * - Every top-level key except 'regex' is an exact path, with a leading slash and no
+	 *   trailing slash ("/" for the front page), and maps to a route entry.
+	 * - 'regex' maps placeholder paths, such as "/user/{id}", to route entries. Each
+	 *   placeholder captures one value: {id}, {email}, {slug} and {code} by PARAM_RULES, any
+	 *   other name one non-empty path segment. Every other character matches literally.
+	 * - A route entry has controller (FQCN), and optionally action (method name, default
+	 *   "index"), methods (list of HTTP methods), template_file and template_layer.
+	 *
+	 * Behavior:
+	 * - Matches the path that RoutePath::resolve() returns for REQUEST_URI. With cfg
+	 *   http.router_case_insensitive true, paths match in any letter case, and placeholder
+	 *   captures arrive lowercased.
+	 * - An exact route wins over placeholder routes. Placeholder routes are tried in table
+	 *   order, and the first match wins.
+	 * - 404 through httpError() when the path contains a non-ASCII byte or no route matches.
+	 *
+	 * @return void
+	 * @see \CitOmni\Http\Service\Router::dispatch()  What happens with the matched route.
+	 * @see \CitOmni\Kernel\App  How the route table is merged.
 	 */
 	public function run(): void {
 
-		// 1) Resolve method & path (subdir-safe)
 		$method = \strtoupper($_SERVER['REQUEST_METHOD'] ?? 'GET');
 
 		// Share the exact path interpretation with pre-dispatch security checks.
@@ -167,7 +80,7 @@ class Router extends BaseService {
 			$caseInsensitive
 		);
 
-		// 1a) ASCII-only guard (defense-in-depth)
+		// Defense in depth: A non-ASCII path is refused before any route is matched.
 		if (\preg_match('/[^\x00-\x7F]/', $uri)) {
 			$this->app->errorHandler->httpError(404, [
 				'path'   => $uri,
@@ -177,13 +90,13 @@ class Router extends BaseService {
 			return;
 		}
 
-		// 2) Load routes (must be array)
 		$routes = $this->app->routes ?? null;
 		if (!\is_array($routes)) {
 			throw new \RuntimeException('App routes must be an array.');
 		}
 
-		// 2a) If case-insensitive, build a lowered exact-route map (leave 'regex' as-is)
+		// RoutePath lowercased the path, so the exact keys are lowered to match. Placeholder
+		// paths keep their case; toRegex() makes them case-insensitive instead.
 		if ($caseInsensitive) {
 			$lowerExact = [];
 			foreach ($routes as $k => $v) {
@@ -192,40 +105,26 @@ class Router extends BaseService {
 					$lowerExact[\strtolower($k)] = $v;
 				}
 			}
-			// Keep original regex bucket
 			$routes = $lowerExact + ['regex' => ($routes['regex'] ?? [])];
 		}		
 
-		// 3) Exact match fast-path (works for both normal and lowered maps)
 		if (isset($routes[$uri]) && \is_array($routes[$uri])) {
 			$this->dispatch($routes[$uri], $method);
 			return;
 		}
 
-		// 4) Regex routes (placeholder patterns like /user/{id})
-		// if (isset($routes['regex']) && \is_array($routes['regex'])) {
-			// foreach ($routes['regex'] as $path => $route) {
-				// $pattern = self::toRegex((string)$path);
-				// if (\preg_match($pattern, $uri, $matches)) {
-					// \array_shift($matches); // drop full match, keep captures
-					// $this->dispatch((array)$route, $method, $matches);
-					// return;
-				// }
-			// }
-		// }
 		if (isset($routes['regex']) && \is_array($routes['regex'])) {
 			foreach ($routes['regex'] as $path => $route) {
 				$pattern = self::toRegex((string)$path, $caseInsensitive);
 				if (\preg_match($pattern, $uri, $matches)) {
+					// Drop the full match; the captures are the action's arguments.
 					\array_shift($matches);
 					$this->dispatch((array)$route, $method, $matches);
 					return;
 				}
 			}
 		}
-		
 
-		// 5) 404 when no routes matched
 		$this->app->errorHandler->httpError(404, [
 			'path'   => $uri,
 			'method' => $method,
@@ -236,31 +135,29 @@ class Router extends BaseService {
 
 
 	/**
-	 * Compile a placeholder path (e.g., "/user/{id}") into a safe regex.
+	 * Compile a placeholder path such as "/user/{id}" into an anchored pattern.
 	 *
 	 * Behavior:
-	 * - All literal characters are escaped via preg_quote().
-	 * - Placeholders ({id}, {slug}, etc.) are substituted with pre-defined
-	 *   PARAM_RULES (defaults to [^/]+ if unknown).
-	 * - The resulting pattern is anchored (#^...$#).
+	 * - Every character outside a placeholder matches literally, "." included.
+	 * - Each {name} becomes one capture group with its PARAM_RULES pattern, or [^/]+ for an
+	 *   unknown name. Braces around anything but letters, digits and underscores stay literal.
 	 *
 	 * Notes:
-	 * - This approach prevents '.' or other regex metacharacters in route
-	 *   strings from being interpreted as special; they match literally.
-	 * - Each placeholder is temporarily tokenized before escaping,
-	 *   then replaced back into the escaped string.
+	 * - The pattern ends in "$" without the D modifier, so a path with one trailing newline,
+	 *   such as a decoded "%0A", also matches.
 	 *
-	 * @param string $path Route path with optional {placeholders}.
-	 * @return string Compiled PCRE pattern, anchored and delimited with '#'.
+	 * @param  string  $path             Route path with optional placeholders.
+	 * @param  bool    $caseInsensitive  True adds the i modifier.
+	 * @return string  PCRE pattern delimited with "#".
 	 */
 	private static function toRegex(string $path, bool $caseInsensitive = false): string {
 		$tokens = [];
 
-		// 1) Replace placeholders with unique tokens and remember rules
+		// Placeholders become random markers first, so preg_quote() escapes only the literal
+		// characters around them.
 		$tokenized = \preg_replace_callback(
 			'/\{(\w+)\}/',
 			static function (array $m) use (&$tokens): string {
-				// Unique marker to survive preg_quote
 				$token = '%PH_' . \strtoupper($m[1]) . '_' . \bin2hex(\random_bytes(2)) . '%';
 				$tokens[$token] = self::PARAM_RULES[$m[1]] ?? '[^/]+';
 				return $token;
@@ -268,95 +165,98 @@ class Router extends BaseService {
 			$path
 		);
 
-		// 2) Escape all literal characters
 		$quoted = \preg_quote($tokenized, '#');
 
-		// 3) Replace back the tokens with regex capture groups
 		foreach ($tokens as $token => $rule) {
 			$quoted = \str_replace(\preg_quote($token, '#'), '(' . $rule . ')', $quoted);
 		}
 
-		// 4) Anchor pattern (add 'i' for case-insensitive match when requested)
 		return $caseInsensitive ? ('#^' . $quoted . '$#i') : ('#^' . $quoted . '$#');
 	}
 
 
 	/**
-	 * Controller dispatcher with HTTP method handling.
+	 * Negotiate the method for one matched route and call its controller action.
 	 *
-	 * Quality-of-life:
-	 * - HEAD auto-allowed when GET is allowed (note: controller may still emit body).
-	 * - OPTIONS always allowed for matched resources (204 + Allow).
-	 * - 405 on disallowed methods (with Allow header).
+	 * Turns a matched route into exactly one outcome: A negotiation answer, an error through
+	 * the ErrorHandler, or the action call.
 	 *
-	 * @param array<string,mixed> $route  Route definition (controller, action, methods?, ...)
-	 * @param string $method               Resolved HTTP method (uppercased)
-	 * @param list<mixed> $params          Positional params from regex captures
+	 * Behavior:
+	 * - Allowed methods are the route's methods, uppercased; names other than GET, POST, PUT,
+	 *   PATCH, DELETE, HEAD and OPTIONS are dropped. GET adds HEAD, and OPTIONS is always
+	 *   added, so a methods list without a known name allows OPTIONS only. Without methods,
+	 *   or with null, they are GET, HEAD and OPTIONS. The Allow header lists them in the
+	 *   order GET, HEAD, OPTIONS, POST, PUT, PATCH, DELETE.
+	 * - OPTIONS: 204 with the Allow header and no body; no controller is created.
+	 * - A method that is not allowed: 405 through httpError(), with the Allow header.
+	 * - 500 through httpError() when the route names no controller or a class that does not
+	 *   exist, or when the created controller has no method named by action. In the last case
+	 *   the controller's init() has already run.
+	 * - Otherwise calls the action with $params as positional arguments. The controller gets
+	 *   the route's template_file and template_layer, null when absent.
+	 *
+	 * Notes:
+	 * - HEAD runs the GET action. Whether a body is sent is left to the controller and the SAPI.
+	 *
+	 * @param  array<string,mixed>  $route   Route entry.
+	 * @param  string               $method  Uppercase request method.
+	 * @param  list<string>         $params  Placeholder captures, in path order.
 	 * @return void
+	 * @see \CitOmni\Kernel\Controller\BaseController::__construct()  What the controller receives.
 	 */
 	private function dispatch(array $route, string $method, array $params = []): void {
 		
-		// Normalize allowed methods (route-specified or default GET/HEAD/OPTIONS)
 		$allowed = null;
 		if (isset($route['methods'])) {
 			$allowed = \array_map('strtoupper', (array)$route['methods']);
 			$whitelist = ['GET','POST','PUT','PATCH','DELETE','HEAD','OPTIONS'];
 			$allowed = \array_values(\array_intersect($allowed, $whitelist));
 
-			// Auto-HEAD when GET is allowed
 			if (\in_array('GET', $allowed, true) && !\in_array('HEAD', $allowed, true)) {
 				$allowed[] = 'HEAD';
 			}
-			// Always allow OPTIONS negotiation
 			if (!\in_array('OPTIONS', $allowed, true)) {
 				$allowed[] = 'OPTIONS';
 			}
 
-			// Deduplicate and keep a stable, conventional order
+			// A fixed order keeps the Allow header the same whatever order the route lists.
 			$order = ['GET','HEAD','OPTIONS','POST','PUT','PATCH','DELETE'];
 			$allowed = \array_values(\array_unique($allowed));
 			\usort($allowed, static function ($a, $b) use ($order) {
 				return \array_search($a, $order, true) <=> \array_search($b, $order, true);
 			});
 
-			// Empty list -> safe default
 			if ($allowed === []) {
 				$allowed = ['GET','HEAD','OPTIONS'];
 			}
 		} else {
-			// Default: GET/HEAD/OPTIONS
 			$allowed = ['GET','HEAD','OPTIONS'];
 		}
 
-		// OPTIONS negotiation (no body)
 		if ($method === 'OPTIONS') {
-			// $allowed is allways set (either from route or by default GET/HEAD/OPTIONS)
 			\header('Allow: ' . \implode(', ', $allowed), true);
 			\http_response_code(204);
 			return;
 		}
 
-		// Guard disallowed methods (405 + Allow)
 		if ($allowed && !\in_array($method, $allowed, true)) {
 			
-			// RFC 9110 (HTTP Semantics): A 405 response MUST include an 'Allow' header listing the methods
-			// permitted for the target resource. Keep this header in place.
+			// RFC 9110: A 405 response must include an Allow header listing the methods
+			// permitted for the target resource.
 			\header('Allow: ' . \implode(', ', $allowed), true);
 
 			$this->app->errorHandler->httpError(405, [
 				'method'  => $method,
 				'allowed' => $allowed,
-				'route'   => $route, // The matched route configuration that did not allow the current HTTP method (for logging/diagnostics).
+				'route'   => $route,
 				'reason'  => 'method_not_allowed',
 			]);
 			return;
 		}
 
-		// Resolve controller/action
 		$controller = $route['controller'] ?? null;
 		$action = (string)($route['action'] ?? 'index');
 
-		// Controller must exist (FQCN); otherwise treat as server error
 		if ($controller === null || !\class_exists($controller)) {
 			$this->app->errorHandler->httpError(500, [
 				'reason'     => 'controller_missing',
@@ -367,13 +267,11 @@ class Router extends BaseService {
 			return;
 		}
 
-		// Instantiate controller with App and optional templating hints
 		$controllerInstance = new $controller($this->app, [
 			'template_file'  => $route['template_file']  ?? null,
 			'template_layer' => $route['template_layer'] ?? null
 		]);
 
-		// Action must exist; warn for developers and route to 500
 		if (!\method_exists($controllerInstance, $action)) {
 			$this->app->errorHandler->httpError(500, [
 				'reason'     => 'action_missing',
@@ -384,7 +282,6 @@ class Router extends BaseService {
 			return;
 		}
 
-		// Dispatch action with positional regex captures
 		\call_user_func_array([$controllerInstance, $action], $params);
 
 	}

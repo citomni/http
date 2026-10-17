@@ -19,143 +19,87 @@ use CitOmni\Kernel\Service\BaseService;
 
 
 /**
- * Maintenance: site-wide maintenance flag enforcement and toggling.
+ * Maintenance: Service that enforces and toggles the site-wide maintenance mode.
  *
- * Responsibilities:
- * - Read maintenance flag (flag-first), fall back to cfg defaults only if flag is missing/invalid.
- * - Enforce maintenance early via guard(): emit 503 + headers + optional branded template and exit.
- * - Toggle maintenance ON/OFF by atomically rewriting a small flag PHP file.
- * - Provide small, pure getters (isEnabled/getAllowedIps/getRetryAfter) and a per-request snapshot().
- * - Optionally rotate backups of the previous flag file according to cfg policy.
+ * Keeps the maintenance state in a flag file, so a toggle reaches every later request and
+ * process without a deploy, and the flag wins over cfg. Who may toggle the mode belongs to
+ * the caller; the look of the branded maintenance page belongs to its template.
  *
- * Collaborators:
- * - $this->app->request (read-only): Resolve client IP for allowlist checks.
- * - $this->app->cfg (read-only): Defaults (flag path, template path, retry interval, backup policy).
- * - $this->app->log (optional): If present, writes toggle audit entries.
- *
- * Configuration keys:
- * - maintenance.flag.path (string)               - absolute path to flag file. Default: CITOMNI_APP_PATH . '/var/flags/maintenance.php'
- * - maintenance.flag.template (string)           - absolute path to branded maintenance template (optional).
- * - maintenance.flag.default_retry_after (int)   - fallback Retry-After seconds (>= 0). Example: 600
- * - maintenance.flag.allowed_ips (array<string>) - optional fallback allow-list when flag lacks one.
- * - maintenance.backup.enabled (bool)            - enable lightweight backup rotation (default true).
- * - maintenance.backup.keep (int)                - number of backups to keep (default 3); 0 writes no backup.
- * - maintenance.backup.dir (string)              - directory for backups (default: app /var/backups/flags); a non-empty string.
- * - maintenance.log.filename (string)            - audit log filename (default: 'maintenance.json').
- *
- * Error handling:
- * - Fail fast by design. Invalid directories or permissions during writes raise \RuntimeException
- *   and bubble to the global error handler.
- * - Toggle methods (enable/disable) may throw \RuntimeException on I/O failures (directory creation, write, rename).
- * - Toggle methods read maintenance.backup.* before they write anything: a key removed by a cfg layer
- *   raises \OutOfBoundsException, a dir that is not a non-empty string \UnexpectedValueException.
- * - guard() emits a 503 response and exits the process when the client is not allowed; it does not throw.
- *
- * Typical usage:
- *
- *   // On every HTTP request, as early as possible (front controller or Kernel):
- *   $this->app->maintenance->guard(); // Emits 503 and exits if maintenance is active
- *
- *   // Toggle on (optionally adding the current actor IP in dev/when known):
- *   $this->app->maintenance->setRetryAfter(900)->enable("203.0.113.7"); // 15 minutes
- *
- *   // Toggle off (keeping a short Retry-After for caches/CDNs if desired):
- *   $this->app->maintenance->setRetryAfter(60)->disable();
- *
- * Examples:
- *
- *   // Read effective state without side effects:
- *   if ($this->app->maintenance->isEnabled()) { // show admin banner
- *   	// keep the UI hint minimal for privileged users
- *   }
- *
- *   // Permit a CI pipeline IP during a deployment window:
- *   $this->app->maintenance->enable("198.51.100.10");
- *
- * Failure:
- * - Filesystem misconfiguration (non-writable flag dir, unreadable template) leads to predictable
- *   exceptions on write or to the built-in minimal 503 body on read.
- *
- * Notes:
- * - Snapshot is memoized per request/process to minimize IO; any toggle resets memoization.
- * - In "dev", the special token "unknown" can be allowed to bypass strict IP detection.
- * - 503 responses add "X-Robots-Tag: noindex" and strong no-cache headers.
- * - setRetryAfter() only affects the next write (enable/disable). It never overrides enforcement.
+ * Rules:
+ * - Read the state only through snapshot(), so one request sees one state.
+ * - Change the flag only through writeFlagFile(), and clear the snapshot after every write.
+ * - Keep the flag file a PHP file that only returns an array: It is included, not parsed.
+ * - Accept the literal "unknown" in an allowlist only where allowUnknownToken() allows it.
  */
 class Maintenance extends BaseService {
 
-	/**
-	 * Memoized state for the current request. Built once on first snapshot().
-	 * @var array{enabled:bool,allowed_ips:array,retry_after:int,source:string}|null
-	 */
+	/** @var array{enabled:bool,allowed_ips:list<string>,retry_after:int,source:'flag'|'cfg'}|null Result of snapshot(); null while not built. */
 	private ?array $snapshot = null;
 
 
-	// Write-time override for retry_after (does NOT affect enforcement/guard()).
+	/** Retry-After in seconds for the next flag write only; null means cfg maintenance.flag.default_retry_after. */
 	protected ?int $writeRetryAfter = null;
 
 
-	/**
-	 * What follows "<flag file name>." in a backup name: local Ymd_His, microseconds and
-	 * the 12-hex-digit nonce of the write. Backups written before the nonce end after six
-	 * digits cut from (string)microtime(true). pruneBackups() deletes no other names.
-	 */
+	/** Regex of a backup name after the flag file name and a dot: Ymd_His, six digits of microseconds, an optional 12-hex-digit nonce, then .bak. */
 	private const BACKUP_SUFFIX_PATTERN = '\d{8}_\d{6}_\d{6}(?:_[0-9a-f]{12})?\.bak';
 
 
 	/**
-	 * Enforce maintenance mode early in the request lifecycle.
+	 * Answer 503 and end the process while maintenance is on, unless the request may pass.
+	 *
+	 * Call it before routing, so a blocked request never reaches a controller.
 	 *
 	 * Behavior:
-	 * - Builds a one-shot state via snapshot() (flag-first with cfg fallback).
-	 * - If maintenance is enabled and the client IP is not allowlisted, emits:
-	 *     1) HTTP 503 status
-	 *     2) Retry-After header (seconds)
-	 *     3) No-cache headers (Cache-Control, Pragma)
-	 *     4) X-Robots-Tag: noindex
-	 *     5) Content-Type: text/html; charset=<cfg locale charset>
-	 *     6) Connection: close
-	 * - Attempts to render a branded template if configured at maintenance.flag.template;
-	 *   otherwise renders a minimal inline HTML page.
-	 * - Terminates execution with exit immediately after sending the response.
+	 * - Returns without output when maintenance is off, when the app-relative request path
+	 *   starts with /_system/, or when Request::ip() is in the allowlist.
+	 * - Otherwise answers 503 and exits:
+	 *     - Status and headers, unless headers were already sent: Retry-After with the snapshot's
+	 *       retry_after, Cache-Control no-store, Pragma no-cache, X-Robots-Tag noindex and
+	 *       noarchive, Content-Type text/html with cfg locale.charset (UTF-8 without it), and
+	 *       Connection close.
+	 *     - Body: The file at cfg maintenance.flag.template when it is a readable file,
+	 *       included with $retry_after (seconds), $resume_at (now plus retry_after, as
+	 *       'Y-m-d H:i' in PHP's default timezone) and $contact_email (cfg identity.email,
+	 *       else cfg support_email, else support@citomni.com); otherwise a minimal built-in
+	 *       HTML page.
+	 * - Writes no file.
 	 *
 	 * Notes:
-	 * - This method performs no writes; it only reads the maintenance flag once per request.
-	 * - Allowlist normalization accepts the literal "unknown" token only in dev environments.
-	 * - If maintenance is disabled or the client is allowlisted, the method returns immediately.
+	 * - Requests under /_system/ pass unchecked: Every route there must authenticate its caller.
+	 * - The template is included in this method's scope, so it also sees the other locals.
 	 *
-	 * Typical usage (Kernel):
-	 *   $app->maintenance->guard(); // called early, before routing; exits on block
+	 * Typical usage:
+	 *   $app->maintenance->guard();
 	 *
 	 * @return void
+	 * @see \CitOmni\Http\Service\Maintenance::snapshot()  Where the state, the allowlist and retry_after come from.
 	 */
 	public function guard(): void {
 		
-		$state = $this->snapshot(); // built once per request
+		$state = $this->snapshot();
 
-		// Not enabled -> continue normal request processing
 		if (!$state['enabled']) {
 			return;
 		}
 
-		// Bypass maintenance for internal system endpoints (webhook-protected).
+		// System endpoints stay reachable under maintenance. Assumes each one authenticates its caller.
 		$uri = (string)($_SERVER['REQUEST_URI'] ?? '');
 		$path = (string)(\explode('?', $uri, 2)[0] ?? '');
 		if ($path !== '' && $path[0] !== '/') {
 			$path = '/' . $path;
 		}
 
-		// Compute app base path from SCRIPT_NAME (supports root + subdir installs).
+		// The app base path comes from SCRIPT_NAME, so an app in a subdirectory matches too.
 		$script = (string)($_SERVER['SCRIPT_NAME'] ?? '');
 		$base = \rtrim(\str_replace('\\', '/', \dirname($script)), '/');
 
-		// If entry is /<base>/public/index.php, strip /public to get /<base>.
+		// An entry script in public/ serves the app from the parent directory.
 		if ($base !== '' && \substr($base, -7) === '/public') {
 			$base = \substr($base, 0, -7);
 			$base = $base === '' ? '' : \rtrim($base, '/');
 		}
 
-		// Strip base prefix from request path if present.
 		if ($base !== '' && ($path === $base || \str_starts_with($path, $base . '/'))) {
 			$path = \substr($path, \strlen($base));
 			if ($path === '') {
@@ -167,20 +111,16 @@ class Maintenance extends BaseService {
 			return;
 		}
 
-		// Proxy-aware client IP resolution (Kernel::boot already set trusted proxies)
 		$clientIp = $this->app->request->ip();
 
-		// Allowlisted? Continue as normal
 		if ($clientIp !== null && \in_array($clientIp, $state['allowed_ips'], true)) {
 			return;
 		}
 
-		// Compute Retry-After (already clamped in snapshot())
 		$retry = $state['retry_after'];
 
-		// Emit minimal, cache-safe 503 response
+		// No cache may keep serving the 503 after maintenance ends.
 		if (!\headers_sent()) {
-			// \header('HTTP/1.1 503 Service Unavailable', true, 503);
 			\http_response_code(503);
 			\header('Retry-After: ' . $retry);
 			\header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
@@ -190,16 +130,15 @@ class Maintenance extends BaseService {
 			\header('Connection: close');
 		}
 
-		// Optional branded template (kept deliberately simple & deterministic)
 		$template = (string)$this->app->cfg->maintenance->flag->template;
 		if ($template !== '' && \is_file($template) && \is_readable($template)) {
 
-			// Variables available to the template (intentionally limited)
+			// Variables meant for the template.
 			$retry_after   = $retry;
 			$contact_email = (string)($this->app->cfg->identity->email ?? ($this->app->cfg->support_email ?? 'support@citomni.com'));
 
-			// Human-readable ETA, based on current default timezone (Kernel enforces timezone earlier)
-			$now = new \DateTimeImmutable('now'); // Default tz already applied in kernel
+			// Assumes PHP's default timezone is the app's timezone.
+			$now = new \DateTimeImmutable('now');
 			$resumeAt = $now->add(new \DateInterval('PT' . $retry . 'S'));
 			$resume_at = $resumeAt->format('Y-m-d H:i');
 
@@ -211,23 +150,15 @@ class Maintenance extends BaseService {
 				. '</body></html>';
 		}
 
-		// Hard stop under maintenance
 		exit;
 	}
 
 
 	/**
-	 * Fast check: is maintenance mode currently enabled?
+	 * Check whether maintenance mode is on.
 	 *
-	 * Behavior:
-	 * - Relies on the per-request snapshot() which reads the flag at most once.
-	 * - Returns a boolean derived from the flag file when present, otherwise cfg fallback.
-	 *
-	 * Notes:
-	 * - No I/O after the first snapshot() call in the same request.
-	 * - Use this in controllers or templates when you need a simple boolean.
-	 *
-	 * @return bool True when maintenance mode is enabled; false otherwise.
+	 * @return bool
+	 * @see \CitOmni\Http\Service\Maintenance::snapshot()  Where the state comes from.
 	 */
 	public function isEnabled(): bool {
 		return $this->snapshot()['enabled'];
@@ -235,21 +166,10 @@ class Maintenance extends BaseService {
 
 
 	/**
-	 * Get the normalized allowlist for the current request.
+	 * Return the client identifiers that pass guard() while maintenance is on.
 	 *
-	 * Behavior:
-	 * - Returns the effective allowlist taken from the flag file when present;
-	 *   if the flag omits the list entirely, falls back to cfg's maintenance.flag.allowed_ips.
-	 * - Normalization rules:
-	 *     - Trim and de-duplicate values
-	 *     - Validate IPv4/IPv6 addresses
-	 *     - Accept the literal "unknown" token only in dev environments
-	 *     - Sort deterministically (string sort)
-	 *
-	 * Notes:
-	 * - The allowlist is built once via snapshot() and reused within the same request.
-	 *
-	 * @return array<string> A list of allowed client identifiers (IPs and/or "unknown").
+	 * @return list<string>  Valid IP addresses, and "unknown" where allowUnknownToken() allows it; unique and sorted.
+	 * @see \CitOmni\Http\Service\Maintenance::snapshot()  Where the allowlist comes from.
 	 */
 	public function getAllowedIps(): array {
 		return $this->snapshot()['allowed_ips'];
@@ -257,19 +177,17 @@ class Maintenance extends BaseService {
 
 
 	/**
-	 * Set a write-time Retry-After override (seconds, >= 0) for the next flag write.
+	 * Set the Retry-After that the next enable() or disable() writes to the flag.
 	 *
 	 * Behavior:
-	 * - Affects only enable()/disable() writes performed after this call.
-	 * - Does NOT affect guard() enforcement, which always reads Retry-After
-	 *   from the flag (or falls back to cfg default when the flag lacks a value).
-	 * - The override is one-shot and is cleared automatically after a write.
+	 * - Applies to the next write only; the write clears it.
+	 * - Does not change what guard() or getRetryAfter() report before that write.
 	 *
 	 * Typical usage:
-	 *   $this->app->maintenance->setRetryAfter(900)->enable();  // plan a 15-minute window
+	 *   $this->app->maintenance->setRetryAfter(900)->enable([]);
 	 *
-	 * @param int $seconds Non-negative Retry-After value in seconds to store into the flag.
-	 * @return self Fluent reference for chaining.
+	 * @param  int  $seconds  Seconds; a negative value counts as 0.
+	 * @return self  This instance, for chaining.
 	 */
 	public function setRetryAfter(int $seconds): self {
 		$this->writeRetryAfter = \max(0, $seconds);
@@ -278,19 +196,10 @@ class Maintenance extends BaseService {
 
 
 	/**
-	 * Get the effective Retry-After (seconds, >= 0) for the current request.
+	 * Return the Retry-After that guard() sends.
 	 *
-	 * Behavior:
-	 * - Prefers the value from the flag file when available.
-	 * - Falls back to maintenance.flag.default_retry_after from cfg when the flag
-	 *   is missing or does not define a retry value.
-	 * - Value is clamped to a non-negative integer.
-	 *
-	 * Notes:
-	 * - This reflects the enforcement value (what guard() will send), not any pending
-	 *   write-time override set via setRetryAfter().
-	 *
-	 * @return int Non-negative Retry-After value in seconds.
+	 * @return int  Seconds, at least 0.
+	 * @see \CitOmni\Http\Service\Maintenance::snapshot()  Where retry_after comes from.
 	 */
 	public function getRetryAfter(): int {
 		return $this->snapshot()['retry_after'];
@@ -298,68 +207,55 @@ class Maintenance extends BaseService {
 
 
 	/**
-	 * Build and memoize the maintenance state for the current request.
+	 * Return the maintenance state from the flag file, with cfg as fallback.
 	 *
-	 * Construction rules (flag-first):
-	 *  1) If the flag file exists and returns an array:
-	 *       - enabled:     (bool)$flag['enabled']      (default false)
-	 *       - allowed_ips: if the key exists in the flag, use its array *as-is* (empty means empty);
-	 *                      if the key is omitted entirely, fall back to cfg maintenance.flag.allowed_ips.
-	 *       - retry_after: (int)$flag['retry_after']   (default cfg maintenance.flag.default_retry_after)
-	 *  2) If the flag is missing or invalid:
-	 *       - enabled=false; allowed_ips from cfg (optional); retry_after from cfg default.
+	 * The flag wins over cfg, so a toggle takes effect without a cfg change.
 	 *
 	 * Behavior:
-	 * - Normalizes allowlist (trim, validate IPs, allow "unknown" only in dev, unique, sorted).
-	 * - Clamps retry_after to a non-negative integer.
-	 * - Memoizes the result so subsequent calls avoid repeated I/O within the same request.
+	 * - When the flag file is readable and returns an array (source 'flag'):
+	 *     - enabled is the flag's enabled, false when absent.
+	 *     - allowed_ips is the flag's list when it has one, also when empty; otherwise cfg
+	 *       maintenance.flag.allowed_ips.
+	 *     - retry_after is the flag's retry_after when present; otherwise cfg
+	 *       maintenance.flag.default_retry_after.
+	 * - Otherwise (source 'cfg'): enabled is false; allowed_ips and retry_after come from cfg
+	 *   as above.
+	 * - allowed_ips keeps only valid IP addresses, plus "unknown" where allowUnknownToken()
+	 *   allows it; trimmed, unique and sorted. retry_after is at least 0.
+	 * - Later calls return the same array until enable() or disable() writes the flag.
 	 *
-	 * Notes:
-	 * - This method does not write anything and does not re-validate within the same request.
-	 * - The memoized snapshot is cleared when enable()/disable() writes a new flag.
+	 * Typical usage:
+	 *   $state = $this->app->maintenance->snapshot();
 	 *
-	 * @return array{
-	 *   enabled: bool,
-	 *   allowed_ips: array<int, string>,
-	 *   retry_after: int,
-	 *   source: 'flag'|'cfg'
-	 * }
+	 * @return array{enabled:bool,allowed_ips:list<string>,retry_after:int,source:'flag'|'cfg'}  retry_after in seconds.
 	 */
 	public function snapshot(): array {
 		if ($this->snapshot !== null) {
-			// One read per request; no revalidation within the same request.
 			return $this->snapshot;
 		}
 
-		// 1) Defaults from cfg (declarative; cfg does not depend on runtime)
 		$cfgDefaultRetry = \max(0, (int)$this->app->cfg->maintenance->flag->default_retry_after);
 		// An empty list is a Cfg node, not an array, and means no allowlist.
 		$cfgAllowlist    = $this->app->cfg->maintenance->flag->allowed_ips;
 		$cfgAllowlist    = \is_array($cfgAllowlist) ? $cfgAllowlist : [];
 
-		// 2) Attempt to load the raw flag (no validation here)
 		$flag     = $this->readFlag();
 		$fromFlag = \is_array($flag);
 
-		// 3) Effective raw fields with "flag overrides cfg" precedence
 		$enabledRaw = $fromFlag ? (bool)($flag['enabled'] ?? false) : false;
 		$retryRaw   = $fromFlag && \array_key_exists('retry_after', $flag)
 			? (int)$flag['retry_after']
 			: $cfgDefaultRetry;
 
-		// Build allowedRaw exactly once:
-		// - If flag has the 'allowed_ips' key (even if empty), use it verbatim ("empty means empty").
-		// - Otherwise, fall back to the cfg-level allowlist.
+		// A list in the flag wins also when empty: An empty list means that no client passes.
 		$flagHasAllow = $fromFlag && \array_key_exists('allowed_ips', $flag) && \is_array($flag['allowed_ips']);
 		$allowedRaw   = $flagHasAllow ? (array)$flag['allowed_ips'] : $cfgAllowlist;
 
-		// 4) Normalize values
 		$enabled = (bool)$enabledRaw;
-		$allowed = $this->normalizeIps($allowedRaw); // validate/dedupe/sort; allow "unknown" only in dev
+		$allowed = $this->normalizeIps($allowedRaw);
 		$retry   = \max(0, (int)$retryRaw);
 		$source  = $fromFlag ? 'flag' : 'cfg';
 
-		// 5) Memoize and return
 		return $this->snapshot = [
 			'enabled'     => $enabled,
 			'allowed_ips' => $allowed,
@@ -370,35 +266,32 @@ class Maintenance extends BaseService {
 
 
 	/**
-	 * Enable maintenance mode and persist the allowlist.
+	 * Turn maintenance mode on and write it, with its allowlist, to the flag file.
+	 *
+	 * The flag file is what every later request reads, so the change reaches them without a
+	 * cfg change or a deploy.
 	 *
 	 * Behavior:
-	 * - Requires an array of IP addresses (strings). Invalid/empty entries are ignored.
-	 * - The current client identifier is appended automatically when available:
-	 *   1) Adds the resolved client IP if valid.
-	 *   2) In dev, may add the literal "unknown" token when no IP is resolvable.
-	 * - Determines the stored retry_after using (in order):
-	 *   1) One-shot override set via setRetryAfter(), if present.
-	 *   2) maintenance.flag.default_retry_after from cfg.
-	 * - Writes the flag atomically and rotates backups according to maintenance.backup.* policy.
-	 * - Clears the per-request snapshot and the one-shot write override after a successful write.
-	 * - Emits an audit log entry (if a 'log' service is available).
-	 *
-	 * Notes:
-	 * - This method affects only on-disk state (flag file). Runtime enforcement reads the flag.
-	 * - Throws \RuntimeException on I/O/permission errors during write/backup operations.
+	 * - Writes enabled true, the allowlist and retry_after to the flag file:
+	 *     - The allowlist is $ips plus the caller's Request::ip(), reduced as in snapshot()
+	 *       to unique, valid entries.
+	 *     - retry_after is the setRetryAfter() value when set, otherwise cfg
+	 *       maintenance.flag.default_retry_after; at least 0.
+	 * - Writes also when maintenance is already on.
+	 * - Then clears the snapshot and the setRetryAfter() value, and logs the toggle.
 	 *
 	 * Typical usage:
-	 *   $this->app->maintenance->enable([]);                       // seed from current client only
-	 *   $this->app->maintenance->enable(['203.0.113.10']);         // explicit allowlist
-	 *   $this->app->maintenance->setRetryAfter(600)->enable(['1.2.3.4', '2001:db8::1']);
+	 *   $this->app->maintenance->setRetryAfter(600)->enable(['203.0.113.10']);
 	 *
-	 * @param array $ips List of IPs to allow while maintenance is on.
-	 * @return bool True on success.
-	 * @throws \RuntimeException If the flag file or its directories cannot be written.
+	 * @param  array<mixed>  $ips  IP addresses that pass guard(); other entries are dropped.
+	 * @return bool  Always true; a failure throws.
+	 * @throws \RuntimeException  When the flag file, its directory or a backup cannot be written.
+	 * @throws \UnexpectedValueException  When cfg maintenance.backup.dir is not a non-empty string.
+	 * @see \CitOmni\Http\Service\Maintenance::writeFlagFile()  How the flag file is replaced and backed up.
+	 * @see \CitOmni\Http\Service\Maintenance::logToggle()  What is logged.
 	 */
 	public function enable(array $ips): bool {
-		// Optionally append the caller's IP (makes it easy to not lock yourself out).
+		// The caller passes too, so whoever turns maintenance on is not locked out.
 		$clientIp = $this->app->request->ip();
 		if ($clientIp === 'unknown' && !$this->allowUnknownToken()) {
 			$clientIp = null;
@@ -407,20 +300,15 @@ class Maintenance extends BaseService {
 			$ips[] = $clientIp;
 		}
 
-		// Normalize (validates IPs, allows 'unknown' only in dev, dedupes, sorts).
 		$allowlist = $this->normalizeIps($ips);
 
-		// Write-time Retry-After: prefer explicit override, else cfg default.
 		$retry = \max(0, (int)($this->writeRetryAfter ?? $this->app->cfg->maintenance->flag->default_retry_after));
 
-		// Persist flag (idempotent write on every enable()).
 		$this->writeFlagFile(true, $allowlist, $retry);
 
-		// Clear per-request memo and one-shot write override.
 		$this->snapshot = null;
 		$this->writeRetryAfter = null;
 
-		// Audit (best effort).
 		$this->logToggle('enabled', ['allowed_ips' => $allowlist]);
 
 		return true;
@@ -428,38 +316,35 @@ class Maintenance extends BaseService {
 
 
 	/**
-	 * Disable maintenance mode and clear the allowlist.
+	 * Turn maintenance mode off and write it, with an empty allowlist, to the flag file.
+	 *
+	 * The flag file is what every later request reads, so the change reaches them without a
+	 * cfg change or a deploy.
 	 *
 	 * Behavior:
-	 * - Determines the stored retry_after using (in order):
-	 *     - The one-shot write override set via setRetryAfter(), if present
-	 *     - maintenance.flag.default_retry_after from cfg
-	 * - Writes the flag atomically with enabled=false and an empty allowlist.
-	 * - Rotates backups according to maintenance.backup.* policy.
-	 * - Clears the per-request snapshot and the one-shot write override after a successful write.
-	 * - Emits an audit log entry (if a 'log' service is available).
-	 *
-	 * Notes:
-	 * - This method affects only on-disk state (flag file). It does not send responses.
-	 * - Throws \RuntimeException on I/O/permission errors during write/backup operations.
+	 * - Writes enabled false, an empty allowlist and retry_after to the flag file; retry_after
+	 *   is the setRetryAfter() value when set, otherwise cfg maintenance.flag.default_retry_after;
+	 *   at least 0.
+	 * - Writes also when maintenance is already off.
+	 * - Then logs the toggle, and clears the snapshot and the setRetryAfter() value.
 	 *
 	 * Typical usage:
 	 *   $this->app->maintenance->disable();
 	 *
-	 * @return bool True on success.
+	 * @return bool  Always true; a failure throws.
+	 * @throws \RuntimeException  When the flag file, its directory or a backup cannot be written.
+	 * @throws \UnexpectedValueException  When cfg maintenance.backup.dir is not a non-empty string.
+	 * @see \CitOmni\Http\Service\Maintenance::writeFlagFile()  How the flag file is replaced and backed up.
+	 * @see \CitOmni\Http\Service\Maintenance::logToggle()  What is logged.
 	 */
 	public function disable(): bool {
-		// Write-time Retry-After: prefer explicit override, else cfg default.
 		$retry = $this->writeRetryAfter ?? (int)$this->app->cfg->maintenance->flag->default_retry_after;
 		$retry = \max(0, $retry);
 
-		// Write the flag-file
 		$this->writeFlagFile(false, [], $retry);
 		
-		// Log what happened
 		$this->logToggle('disabled', []);
 
-		// Reset per-request snapshot and clear the one-shot write override.
 		$this->snapshot = null;
 		$this->writeRetryAfter = null;
 
@@ -468,9 +353,9 @@ class Maintenance extends BaseService {
 
 
 	/**
-	 * Read the raw flag array from disk, or null if missing/invalid.
+	 * Include the flag file and return its array.
 	 *
-	 * @return array|null
+	 * @return array<mixed>|null  The array the file returns; null when the file is missing, unreadable or returns no array.
 	 */
 	protected function readFlag(): ?array {
 		$path = $this->getFlagPath();
@@ -478,15 +363,15 @@ class Maintenance extends BaseService {
 			return null;
 		}
 		\clearstatcache(true, $path);
-		$data = include $path; // must be a plain "return [ ... ];" file
+		$data = include $path;
 		return \is_array($data) ? $data : null;
 	}
 
 
 	/**
-	 * Get absolute filesystem path to the maintenance flag file.
+	 * Return the path of the flag file.
 	 *
-	 * @return string
+	 * @return string  Cfg maintenance.flag.path when it is a non-empty string; otherwise var/flags/maintenance.php under CITOMNI_APP_PATH.
 	 */
 	protected function getFlagPath(): string {
 		$path = $this->app->cfg->maintenance->flag->path;
@@ -498,13 +383,15 @@ class Maintenance extends BaseService {
 
 
 	/**
-	 * Normalize a list of IPs:
-	 * - Trims empties, validates IPv4/IPv6
-	 * - Allows literal "unknown" only when CITOMNI_ENVIRONMENT in {dev,stage}
-	 * - Sorts and de-duplicates
+	 * Reduce a list to unique, valid client identifiers.
 	 *
-	 * @param array $ips
-	 * @return string[]
+	 * Behavior:
+	 * - Keeps trimmed strings that are valid IPv4 or IPv6 addresses, and "unknown" where
+	 *   allowUnknownToken() allows it. Drops everything else.
+	 * - Removes duplicates and sorts as strings.
+	 *
+	 * @param  array<mixed>  $ips
+	 * @return list<string>
 	 */
 	protected function normalizeIps(array $ips): array {
 		$out = [];
@@ -536,19 +423,32 @@ class Maintenance extends BaseService {
 
 
 	/**
-	 * Write the flag atomically and rotate backups (if enabled).
+	 * Replace the flag file atomically, and back up the file it replaces.
+	 *
+	 * The new flag appears by rename, so a concurrent reader never includes a partial file.
+	 * Where rename cannot replace an existing file, the old one is deleted first, and a reader
+	 * in between finds no flag.
 	 *
 	 * Behavior:
-	 * - Resolves the backup policy first, so invalid maintenance.backup.* cfg fails before
-	 *   any directory or file is created.
-	 * - Backs up the replaced flag as <flag file name>.<Ymd_His>_<microseconds>_<nonce>.bak.
-	 *   Date, time and microseconds come from one clock reading, so the names of one second
-	 *   sort by time. The nonce is the temporary file's and keeps concurrent writes apart.
+	 * - Checks the backup policy before it creates a directory or writes a file.
+	 * - Creates the flag directory when missing.
+	 * - When backups are on, keep is above 0 and a readable flag file exists: Copies it to the
+	 *   backup directory first, as the flag file name, a dot, local Ymd_His, six digits of
+	 *   microseconds, the write's 12-hex-digit nonce and .bak, then prunes the backups to keep.
+	 *   Otherwise it writes no backup and deletes none.
+	 * - Invalidates the flag file in OPcache and sets mode 0644, both best effort.
 	 *
-	 * @param bool     $enabled
-	 * @param string[] $allowedIps Normalized allowlist
-	 * @param int      $retryAfter Seconds, >= 0
+	 * Notes:
+	 * - Date, time and microseconds come from one clock reading, so the backup names of one
+	 *   second sort by time. The nonce keeps concurrent writes apart.
+	 *
+	 * @param  bool  $enabled
+	 * @param  list<string>  $allowedIps  Allowlist as normalizeIps() returns it.
+	 * @param  int  $retryAfter  Seconds; a negative value is stored as 0.
 	 * @return void
+	 * @throws \RuntimeException  When a directory cannot be created or is not writable, or a file cannot be read, written or moved into place.
+	 * @throws \UnexpectedValueException  When cfg maintenance.backup.dir is not a non-empty string.
+	 * @see \CitOmni\Http\Service\Maintenance::resolveBackupPolicy()  The backup policy.
 	 */
 	protected function writeFlagFile(bool $enabled, array $allowedIps, int $retryAfter): void {
 		$policy   = $this->resolveBackupPolicy();
@@ -566,7 +466,6 @@ class Maintenance extends BaseService {
 			throw new \RuntimeException('Flag dir not writable: ' . $flagDir);
 		}
 
-		// Prepare new payload
 		$newArr = [
 			'enabled'     => (bool)$enabled,
 			'allowed_ips' => \array_values($allowedIps),
@@ -574,10 +473,8 @@ class Maintenance extends BaseService {
 		];
 		$newSrc = $this->buildFlagPhp($newArr);
 
-		// Backup policy
 		$doBackup = $policy['enabled'] && $policy['keep'] !== 0 && \is_file($flagPath) && \is_readable($flagPath);
 
-		// If backing up, write a rotating copy first
 		if ($doBackup) {
 			$backupDir = $policy['dir'];
 			// mkdir() fails when a concurrent request created the directory first; is_dir() decides.
@@ -588,6 +485,7 @@ class Maintenance extends BaseService {
 				throw new \RuntimeException('Backup dir not writable: ' . $backupDir);
 			}
 			// microtime() returns "0.12345600 1760090000": fixed-width microseconds and their second.
+			// rtrim() keeps a root such as "/" or "C:\" a root: The name follows one separator.
 			[$usec, $sec] = \explode(' ', \microtime());
 			$prefix = $baseName . '.';
 			$backup = \rtrim($backupDir, "/\\") . '/' . $prefix . \date('Ymd_His', (int)$sec) . '_' . \substr($usec, 2, 6) . '_' . $nonce . '.bak';
@@ -601,11 +499,12 @@ class Maintenance extends BaseService {
 			$this->pruneBackups($backupDir, $prefix, (int)$policy['keep']);
 		}
 
-		// Atomic write
+		// Write a temporary file and rename it, so a reader never includes a partial flag.
 		if (\file_put_contents($tmpPath, $newSrc, \LOCK_EX) === false) {
 			throw new \RuntimeException('Failed to write temporary flag file: ' . $tmpPath);
 		}
 		if (!@\rename($tmpPath, $flagPath)) {
+			// Where rename cannot replace an existing file, delete it and retry.
 			@\unlink($flagPath);
 			if (!@\rename($tmpPath, $flagPath)) {
 				@\unlink($tmpPath);
@@ -613,7 +512,7 @@ class Maintenance extends BaseService {
 			}
 		}
 
-		// Best-effort OPcache invalidation
+		// The flag is included as PHP, so OPcache must not keep serving the old file.
 		if (\function_exists('opcache_invalidate')) {
 			@\opcache_invalidate($flagPath, true);
 		}
@@ -622,23 +521,26 @@ class Maintenance extends BaseService {
 
 
 	/**
-	 * Build the PHP payload for the maintenance flag file.
-	 * Emits a minimal, side-effect free file that only "return"s an array.
+	 * Build the PHP source of a flag file.
 	 *
-	 * @param array $arr
+	 * Behavior:
+	 * - The source only returns an array with enabled (bool, false when absent), allowed_ips
+	 *   (a list, empty when absent) and retry_after (int, at least 0, 300 when absent).
+	 * - A comment header carries the generation time in PHP's default timezone and in UTC.
+	 *
+	 * @param  array<string,mixed>  $arr  Values for enabled, allowed_ips and retry_after; other keys are ignored.
 	 * @return string
 	 */
 	protected function buildFlagPhp(array $arr): string {
-		// Build payload using real PHP types (safe for var_export()).
+		// Plain scalars and lists only, so var_export() writes a literal that include returns as is.
 		$payload = [
 			'enabled'     => (bool)($arr['enabled'] ?? false),
 			'allowed_ips' => \array_values((array)($arr['allowed_ips'] ?? [])),
 			'retry_after' => \max(0, (int)($arr['retry_after'] ?? 300)),
 		];
 
-		// ASCII-only header; no side effects; explains provenance and policy.
-		$generatedAtLocal = \date('c');  // The app's TZ (configured in http/Kernel)
-		$generatedAtUtc   = \gmdate('c'); // Always UTC
+		$generatedAtLocal = \date('c');
+		$generatedAtUtc   = \gmdate('c');
 		$header = <<<PHP
 		<?php
 		/**
@@ -655,31 +557,18 @@ class Maintenance extends BaseService {
 		return 
 		PHP;
 
-		// Emit the array as valid PHP.
 		return $header . \var_export($payload, true) . ";\n";
 	}
 
 
 	/**
-	 * Resolve the backup policy from maintenance.backup.*.
-	 *
-	 * Behavior:
-	 * - Reads enabled, keep and dir directly; Registry::CFG_HTTP ships all three.
-	 * - enabled is cast to bool; keep is cast to int and clamped to >= 0.
-	 * - dir must be a non-empty string and is returned as configured. File names are
-	 *   appended after trimming trailing separators, so a root such as "/" or "C:\"
-	 *   stays a root.
+	 * Read and check the backup policy in cfg maintenance.backup.
 	 *
 	 * Notes:
-	 * - enabled false or keep 0 writes no backup; existing backups are left in place.
-	 * - dir is validated also while backups are off.
-	 * - Cfg exposes keys through __get() and __isset(), not as properties, so
-	 *   property_exists() cannot detect them.
+	 * - Checks dir also while backups are off.
 	 *
-	 * @return array{enabled: bool, keep: int, dir: string}  The effective backup policy.
-	 * @throws \OutOfBoundsException      When a cfg layer removed a key, e.g. by replacing
-	 *                                    maintenance.backup with an empty array.
-	 * @throws \UnexpectedValueException  When dir is not a non-empty string.
+	 * @return array{enabled:bool,keep:int,dir:string}  keep is at least 0; dir is returned as configured.
+	 * @throws \UnexpectedValueException  When cfg maintenance.backup.dir is not a non-empty string.
 	 */
 	protected function resolveBackupPolicy(): array {
 		$backup  = $this->app->cfg->maintenance->backup;
@@ -696,17 +585,17 @@ class Maintenance extends BaseService {
 
 
 	/**
-	 * Delete old backups beyond the retention count.
+	 * Delete the backups beyond the $keep newest.
 	 *
 	 * Behavior:
-	 * - Considers only the files writeFlagFile() names: $prefix followed by
-	 *   BACKUP_SUFFIX_PATTERN, the form from before the nonce included. Other files in
-	 *   $dir are never deleted, also when they start with $prefix.
-	 * - Keeps the $keep newest by mtime, and within one second by name.
+	 * - Considers only files named $prefix followed by BACKUP_SUFFIX_PATTERN, with or without
+	 *   the nonce. Other files in $dir are never deleted, also when they start with $prefix.
+	 * - Keeps the $keep newest by mtime; of two equal mtimes, the greater name counts as newer.
+	 * - Does nothing when $keep is below 1 or $dir cannot be read. Deletes best effort.
 	 *
-	 * @param string $dir
-	 * @param string $prefix
-	 * @param int    $keep
+	 * @param  string  $dir  Backup directory.
+	 * @param  string  $prefix  Flag file name and a dot.
+	 * @param  int  $keep  Number of backups to keep.
 	 * @return void
 	 */
 	protected function pruneBackups(string $dir, string $prefix, int $keep): void {
@@ -740,10 +629,10 @@ class Maintenance extends BaseService {
 			return;
 		}
 
-		// Newest first
+		// Newest first. Names sort by time within one second, so they break mtime ties.
 		\usort($candidates, function (array $a, array $b): int {
 			if ($a['mtime'] === $b['mtime']) {
-				return \strcmp($b['name'], $a['name']); // tie-breaker
+				return \strcmp($b['name'], $a['name']);
 			}
 			return ($a['mtime'] > $b['mtime']) ? -1 : 1;
 		});
@@ -755,24 +644,39 @@ class Maintenance extends BaseService {
 
 
 	/**
-	 * Allow the literal token "unknown" only in the dev environment.
-	 * Rationale: Staging should mimic production; prefer real client IPs and proper proxy config there.
+	 * Check whether the literal "unknown" may stand in an allowlist.
+	 *
+	 * The token matches every client for which Request::ip() has no public address, such as a
+	 * client on localhost.
+	 *
+	 * @return bool  True only when CITOMNI_ENVIRONMENT is dev.
+	 * @see \CitOmni\Http\Service\Request::ip()  When it answers "unknown".
 	 */
 	protected function allowUnknownToken(): bool {
+		// Not in stage: Stage should behave like production, with real client IPs and proxy cfg.
 		return \defined('CITOMNI_ENVIRONMENT') && \CITOMNI_ENVIRONMENT === 'dev';
 	}
 	
 
 	/**
-	 * Best-effort toggle logging (optional).
-	 * Filename comes literally from cfg (maintenance.log.filename).
-	 * Empty or non-string -> fallback to 'maintenance.json'.
+	 * Log a maintenance toggle, when a log service is registered.
+	 *
+	 * Behavior:
+	 * - Does nothing without a log service.
+	 * - Writes one entry with category 'toggle maintenance mode', $action as message, and
+	 *   $extra plus actor_ip (Request::ip()) and uri (REQUEST_URI, or null) as context.
+	 * - Passes cfg maintenance.log.filename as the log file name; maintenance.json when that
+	 *   is empty or not a string.
+	 *
+	 * @param  string  $action  Log message, such as enabled.
+	 * @param  array<string,mixed>  $extra  Context fields; they win over actor_ip and uri.
+	 * @return void
+	 * @see \CitOmni\Infrastructure\Service\Log::write()  How the entry is written, and its exceptions.
 	 */
 	protected function logToggle(string $action, array $extra): void {
 		if ($this->app->hasService('log')) {
 			$clientIp = $this->app->request->ip();
 
-			// Take cfg literally, unless value is '' or not a string
 			$cfgName  = $this->app->cfg->maintenance->log->filename;
 			$filename = (\is_string($cfgName) && $cfgName !== '') ? $cfgName : 'maintenance.json';
 

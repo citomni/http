@@ -16,17 +16,14 @@ declare(strict_types=1);
 namespace CitOmni\Http\Exception;
 
 /**
- * NonceException: Base exception for the Nonce service.
+ * NonceException: Base exception for nonce ledger failures.
  *
- * Catch this to handle all nonce-related failures in a single branch.
- * Subtype:
- * - NonceConfigException - invalid configuration discovered at init time.
+ * Lets a caller handle every exception of the nonce ledger in one catch.
  *
- * Note:
- * - Runtime check failures (replay, storage write failure, malformed nonce
- *   string from caller) are signalled via boolean return from
- *   Nonce::checkAndStore(). This separation keeps hot-path semantics simple
- *   and lets exceptional config errors fail-fast at boot.
+ * Rules:
+ * - Throw a subclass: Each kind of failure has its own.
+ * - Never use it for the outcome of a nonce check: A replayed or malformed nonce and a failed
+ *   write are a negative answer, not an exception.
  */
 class NonceException extends \RuntimeException {
 }

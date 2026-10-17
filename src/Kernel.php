@@ -22,159 +22,61 @@ use CitOmni\Kernel\Mode;
 use CitOmni\Kernel\Runtime;
 
 /**
- * Kernel: High-performance HTTP bootstrapper and dispatcher for CitOmni apps.
+ * Kernel: Entry point of HTTP mode that boots the App and dispatches one request.
  *
- * Responsibilities:
- * - Boot the application in HTTP mode with deterministic config/service merges.
- *   1) Resolve [appRoot, configDir, publicPath] from a flexible $entryPath.
- *   2) Instantiate App($configDir, Mode::HTTP). Vendor baseline is merged with providers, app base,
- *      and environment overlays; precompiled caches under /var/cache are used when present.
- *   3) Install the HTTP ErrorHandler service early.
- *   4) Apply shared runtime configuration via Runtime::configure($app->cfg):
- *      timezone, default charset, and ICU locale on a best-effort basis.
- *   5) Enforce HTTP-specific runtime requirements (intl is mandatory for localized HTTP features).
- *   6) Never catch exceptions in Kernel; downstream failures are handled by the ErrorHandler service.
+ * Turns an entry path into a booted App and a dispatched request. It owns the order of the
+ * steps in between, so that the ErrorHandler service takes over right after the App exists,
+ * and a request the kernel refuses reaches no controller. Building cfg and maps belongs to
+ * App, process-wide PHP settings to Runtime, logging and rendering failures to the
+ * ErrorHandler service, and dispatch to the Router.
  *
- * - Apply HTTP-specific environment defaults and wire services required early in the request lifecycle.
- *   1) Define CITOMNI_PUBLIC_ROOT_URL (DEV allows auto-detect; non-DEV requires absolute cfg.http.base_url).
- *   2) Apply cfg.http.trusted_proxies to the Request service (enables proxy-aware IP/URL resolution).
- *
- * - Dispatch the HTTP request lifecycle.
- *   1) Start a single, top-level output buffer as early as possible to prevent partial output. This allows
- *      the ErrorHandler to fully replace the response on failures (status line + headers + body).
- *   2) Reject POST bodies exceeding PHP's post_max_size with HTTP 413 before dispatch.
- *   3) Enforce optional Fetch Metadata resource isolation (403).
- *   4) Enforce maintenance via $app->maintenance->guard() (flag-first, deterministic behavior).
- *   5) Route and dispatch via $app->router->run() (404/405/5xx are delegated to ErrorHandler::httpError()).
- *   6) Optionally emit a DEV-friendly performance footer when ?_perf is present.
- *
- * Request lifecycle (order of operations):
- *   - Output buffer start
- *   - boot():
- *       resolve paths -> instantiate App -> ErrorHandler install
- *       -> Runtime::configure() -> intl requirement assertion
- *       -> public root URL -> trusted proxies
- *   - POST size guard (413)
- *   - optional Fetch Metadata guard (403)
- *   - maintenance guard
- *   - router run
- *   - optional perf footer
- *
- * Error handling:
- * - Fail fast in Kernel / shared runtime setup:
- *     - Invalid timezone -> \RuntimeException.
- *     - Failed default charset -> \RuntimeException.
- *     - Missing PHP intl extension in HTTP mode -> \RuntimeException.
- *     - Unresolvable entry path / missing config dir -> \RuntimeException.
- *     - Non-DEV without absolute cfg.http.base_url -> \RuntimeException.
- * - No try/catch in Kernel. The ErrorHandler service is installed early and is responsible for:
- *     - Uncaught exceptions,
- *     - Shutdown fatals,
- *     - Request/router HTTP errors (413/404/405/5xx),
- *     ensuring a complete client response (HTML or JSON) and structured logs (JSONL).
- * - Output buffering:
- *     - Kernel starts one top-level output buffer before booting the App. This prevents accidental
- *       partial responses and enables the handler to clear buffers and fully replace the response.
- *
- * Typical usage:
- *
- *   // public/index.php
- *   declare(strict_types=1);
- *   define('CITOMNI_START_NS', hrtime(true));
- *   define('CITOMNI_ENVIRONMENT', 'dev');               // or 'prod' in production
- *   define('CITOMNI_PUBLIC_PATH', __DIR__);
- *   define('CITOMNI_APP_PATH', \dirname(__DIR__));
- *   require CITOMNI_APP_PATH . '/vendor/autoload.php';
- *   \CitOmni\Http\Kernel::run(__DIR__);                 // pass public/ as entry
- *
- * Examples:
- *
- *   // A) Boot from /config (equivalent resolution)
- *   \CitOmni\Http\Kernel::run(\dirname(__DIR__) . '/config');
- *
- *   // B) Production with explicit base URL (no trailing slash)
- *   // In /config/citomni_http_cfg.prod.php:
- *   return [
- *     'http' => ['base_url' => 'https://www.example.com', 'trust_proxy' => false],
- *   ];
- *
- *   // C) DEV auto-detect base URL behind a proxy
- *   // In /config/citomni_http_cfg.dev.php:
- *   return [
- *     'http' => ['trust_proxy' => true, 'trusted_proxies' => ['10.0.0.0/8']],
- *   ];
- *
- *   // D) ErrorHandler DEV overlay (render non-fatals + show details)
- *   // In /config/citomni_http_cfg.dev.php:
- *   return [
- *     'error_handler' => [
- *       'render' => [
- *         'trigger' => E_WARNING | E_NOTICE | E_CORE_WARNING | E_COMPILE_WARNING
- *                    | E_USER_WARNING | E_USER_NOTICE | E_RECOVERABLE_ERROR
- *                    | E_DEPRECATED | E_USER_DEPRECATED,
- *         'detail'  => ['level' => 1],
- *         'force_error_reporting' => E_ALL,
- *       ],
- *     ],
- *   ];
- *
- * Failure:
- *
- *   // Non-DEV without absolute base_url:
- *   define('CITOMNI_ENVIRONMENT', 'prod');
- *   // Empty or relative cfg.http.base_url -> \CitOmni\Http\Kernel::boot(...) throws \RuntimeException.
- *
- *   // Invalid timezone (cfg.locale.timezone):
- *   // Runtime::configure() throws \RuntimeException.
- *
- *   // Invalid charset (cfg.locale.charset):
- *   // Runtime::configure() throws \RuntimeException.
- *
- *   // Missing intl extension in HTTP mode:
- *   // \CitOmni\Http\Kernel::boot(...) throws \RuntimeException.
- *
- * Notes:
- * - CITOMNI_PUBLIC_ROOT_URL:
- *     - If pre-defined by the entrypoint or deploy tooling, Kernel respects it.
- *     - In 'dev': if cfg.http.base_url is absolute, it is used; else Kernel auto-detects (optionally
- *       honoring X-Forwarded-* when cfg.http.trust_proxy is true).
- *     - In non-dev: cfg.http.base_url MUST be an absolute URL, otherwise Kernel throws.
- *
- * - Runtime configuration:
- *     - Shared process-global runtime setup is delegated to \CitOmni\Kernel\Runtime.
- *     - HTTP mode still enforces intl as a hard requirement after Runtime::configure().
- *
- * - Performance footer:
- *     - When the query parameter ?_perf is present, Kernel emits a harmless HTML comment footer with timing,
- *       memory, and included file counts-useful for local diagnostics.
+ * Rules:
+ * - Catch no exceptions: Once boot() has installed the ErrorHandler service, a failure belongs
+ *   to it.
+ * - End a request that the kernel refuses through ErrorHandler::httpError(), never with a
+ *   response of its own.
  */
 class Kernel {
 	
 
 	/**
-	 * Run the HTTP application: boot -> POST size -> Fetch Metadata -> maintenance -> router -> optional perf footer.
+	 * Boot the App, check the request and dispatch it through the Router.
+	 *
+	 * Handles one request from start to end. It starts an output buffer before anything else,
+	 * so that the ErrorHandler service can still discard what the request has printed and send
+	 * a complete error response in its place.
+	 *
+	 * Behavior:
+	 * - Runs these steps in order; a step that ends the request skips the rest:
+	 *     1) boot().
+	 *     2) 413 through httpError(), with context source 'request' and reason
+	 *        post_max_size_exceeded, when Request::exceedsPostMaxSize() is true.
+	 *     3) The Fetch Metadata check; see guardFetchMetadata().
+	 *     4) guard() of the maintenance service.
+	 *     5) run() of the router service.
+	 * - When the query string has _perf and the router returns, appends an HTML comment with the
+	 *   seconds since CITOMNI_START_NS (0 when it is undefined), the current and peak memory and
+	 *   the number of included files. Unless CITOMNI_ENVIRONMENT is 'prod', a second HTML comment
+	 *   lists the included files.
 	 *
 	 * Notes:
-	 * - Maintenance is enforced via $app->maintenance->guard() with no arguments to keep
-	 *   flag-first, deterministic behavior.
-	 * - The performance footer is emitted only when the request has ?_perf (DEV-friendly).
+	 * - Any client can add _perf. Outside 'prod', the file list it gets holds absolute paths.
+	 * - The _perf comments follow whatever the action printed, also in a response that is not HTML.
 	 *
-	 * @param string $entryPath See boot() for accepted forms.
-	 * @param array<string,mixed> $opts Reserved; currently unused.
+	 * @param  string  $entryPath  Passed to boot().
+	 * @param  array<string,mixed>  $opts  Passed to boot().
 	 * @return void
-	 * @throws \RuntimeException Propagated from boot()/maintenance/router on fatal errors.
+	 * @throws \RuntimeException  When boot() fails, or when cfg security.fetch_metadata is invalid.
+	 * @see \CitOmni\Http\Kernel::boot()  Accepted entry paths and boot failures.
 	 */
 	public static function run(string $entryPath, array $opts = []): void {
 
-		// Start a single, top-level output buffer as early as possible.
-		// Goal: prevent partial/fragmented output so ErrorHandler can clear buffers and emit a full response
-		// (status line + headers + body) atomically. Disable implicit flush so nothing is sent prematurely.
+		// Before anything can print: The ErrorHandler service can then still discard the output
+		// and send a complete response with its own status line and headers. Implicit flush is
+		// off, so nothing reaches the client early.
 		\ob_start();
 		\ob_implicit_flush(false);
 
-		// Accept either public/, config/, or app-root.
-		// boot() performs HTTP-mode bootstrap, shared runtime configuration,
-		// and HTTP-specific early wiring before maintenance/router dispatch.
 		$app = self::boot($entryPath, $opts);
 
 		// PHP may discard both POST fields and uploads when the whole body is too large.
@@ -193,28 +95,18 @@ class Kernel {
 		// Reject disallowed browser contexts before maintenance or controller work.
 		self::guardFetchMetadata($app);
 
-		// Deliberately call guard() with no arguments.
-		// Rationale: The maintenance policy (enabled, allowlist, retry_after) is defined by the flag file
-		// and the service itself falls back to cfg (maintenance.flag.default_retry_after) only if the flag
-		// is missing or incomplete. Injecting values here (e.g., via index.php/$opts) could accidentally
-		// override the flag, create environment-specific drift, and bind Kernel behavior to deployment-time
-		// parameters. Keeping Kernel argument-free ensures deterministic, flag-first enforcement.
 		$app->maintenance->guard();		
 
-		// Router is a service provided by the HTTP package and mapped as 'router'
 		$app->router->run();
 
 
 		if (isset($_GET['_perf'])) {
 
-			// Emit lightweight runtime performance diagnostics when explicitly requested.
+			// Assumes the front controller defines CITOMNI_START_NS from hrtime(true) as its
+			// first statement, so the time covers boot and dispatch.
 			//
-			// CITOMNI_START_NS is captured at the beginning of the public entrypoint
-			// using hrtime(true), so the elapsed time covers the complete HTTP boot
-			// and dispatch lifecycle up to this point.
-			//
-			// The summary is intentionally safe for production: it exposes aggregate
-			// timing, memory, and included-file counts, but no filesystem paths.
+			// The summary is safe for production: It holds aggregate timing, memory and
+			// included-file counts, but no filesystem paths.
 			$nowNs = \hrtime(true);
 			$startNs = \defined('CITOMNI_START_NS') ? (int)\CITOMNI_START_NS : $nowNs;
 			$elapsedStr = \sprintf('%.3f', ($nowNs - $startNs) / 1_000_000_000);
@@ -227,9 +119,8 @@ class Kernel {
 				. ' -->';
 			echo \PHP_EOL;
 
-			// Dev and stage may additionally expose the concrete included-file list
-			// for deployment and autoload diagnostics. Keep absolute filesystem paths
-			// out of production responses.
+			// Outside prod, the included-file list helps with deployment and autoload
+			// diagnostics. It holds absolute paths, so prod never gets it.
 			if (\CITOMNI_ENVIRONMENT !== 'prod') {
 				echo '<!--';
 				var_dump(\get_included_files());
@@ -241,55 +132,53 @@ class Kernel {
 	
 	
 	/**
-	 * Boot the App in HTTP mode and apply shared/runtime-specific defaults.
+	 * Build the App in HTTP mode and prepare the process for a request.
+	 *
+	 * Installs the ErrorHandler service as soon as the App exists, so that every later uncaught
+	 * failure reaches it. Dispatches nothing; run() does.
 	 *
 	 * Behavior:
-	 * - Resolve [appRoot, configDir, publicPath] from $entryPath.
-	 * - Instantiate App($configDir, Mode::HTTP).
-	 * - Install the HTTP ErrorHandler service early.
-	 * - Apply shared runtime configuration via Runtime::configure($app->cfg).
-	 * - Enforce HTTP-specific runtime requirements (intl is mandatory in HTTP mode).
-	 * - Define CITOMNI_PUBLIC_ROOT_URL (see definePublicRootUrl()).
-	 * - Apply cfg.http.trusted_proxies to Request (optional).
+	 * - Runs these steps in order:
+	 *     1) Builds App in Mode::HTTP from the config directory that $entryPath leads to.
+	 *     2) Calls install() on the errorHandler service. A failure in step 1 happens before
+	 *        that, so the ErrorHandler service does not report it.
+	 *     3) Applies Runtime::configure() to the App's cfg.
+	 *     4) Requires the PHP intl extension.
+	 *     5) Defines CITOMNI_PUBLIC_ROOT_URL; see definePublicRootUrl().
+	 *     6) Passes cfg http.trusted_proxies to Request::setTrustedProxies() when it is a
+	 *        non-empty list.
 	 *
 	 * Notes:
-	 * - Expects CITOMNI_APP_PATH to be defined by the entrypoint (used by App caches).
-	 * - Kernel does not define CITOMNI_APP_PATH/CITOMNI_PUBLIC_PATH; only PUBLIC_ROOT_URL.
-	 * - Runtime::configure() handles timezone, charset, and ICU locale setup; HTTP still asserts intl explicitly.
+	 * - Assumes CITOMNI_APP_PATH is defined. Kernel defines only CITOMNI_PUBLIC_ROOT_URL.
 	 *
-	 * @param string $entryPath Absolute path to /public, /config, or app root.
-	 * @param array<string,mixed> $opts Reserved; currently unused.
+	 * @param  string  $entryPath  Path to the app's public directory, its config directory or the app root.
+	 * @param  array<string,mixed>  $opts  Not read.
 	 * @return App
-	 * @throws \RuntimeException On invalid runtime configuration, missing intl in HTTP mode, or missing/invalid paths.
+	 * @throws \RuntimeException  When $entryPath leads to no config directory, when the PHP intl
+	 *                            extension is missing, when CITOMNI_ENVIRONMENT is not 'dev' and
+	 *                            neither CITOMNI_PUBLIC_ROOT_URL is defined nor cfg http.base_url is
+	 *                            absolute, or from App::__construct() and Runtime::configure().
+	 * @see \CitOmni\Http\Kernel::resolvePaths()  How $entryPath is resolved.
+	 * @see \CitOmni\Kernel\Runtime::configure()  The process-wide settings and their failures.
 	 */
 	public static function boot(string $entryPath, array $opts = []): App {
 		
-		// Resolve paths (app root, config dir, public path).
 		[$appRoot, $configDir, $publicPath] = self::resolvePaths($entryPath);
 
-		// 1) Construct the App container for HTTP mode.
 		$app = new App($configDir, Mode::HTTP);
 
-		// 2) Install the HTTP error handler early.
-		// Reads exclusively from cfg.error_handler.
 		$app->errorHandler->install();
 
-		// 3) Apply shared runtime configuration.
-		// Handles timezone, default charset, and ICU locale on a best-effort basis.
 		Runtime::configure($app->cfg);
 
-		// 4) HTTP requires intl for localized dates/numbers.
-		// Runtime::configure() only sets ICU when the extension is available.
+		// HTTP needs intl for localized dates and numbers. Runtime::configure() sets the ICU
+		// locale only when the extension is loaded, so the requirement is checked here.
 		if (!\class_exists(\Locale::class)) {
 			throw new \RuntimeException('PHP intl extension is required for localized dates/numbers.');
 		}
 
-		// 5) Define CITOMNI_PUBLIC_ROOT_URL (env-aware).
 		self::definePublicRootUrl($app);
 
-		// 6) Wire http.trusted_proxies into Request service.
-		// A non-empty list is injected into the Request service so client IP/URL
-		// resolution becomes proxy-aware behind load balancers or reverse proxies.
 		// An empty list is a Cfg node, not an array, and leaves Request as it is.
 		$tp = $app->cfg->http->trusted_proxies;
 		if (\is_array($tp)) {
@@ -301,28 +190,29 @@ class Kernel {
 
 
 	/**
-	 * Enforce the optional Fetch Metadata policy (security.fetch_metadata) before dispatch.
+	 * Refuse a request whose browser context cfg security.fetch_metadata does not allow.
 	 *
 	 * Behavior:
-	 * - Off unless security.fetch_metadata.enabled is true (vendor baseline: false).
-	 * - When on, every response gets "Vary: Sec-Fetch-Site, Sec-Fetch-Mode, Sec-Fetch-Dest",
-	 *   appended to any existing Vary values.
-	 * - "same-origin" and "none" continue at once. Every other request is decided by
-	 *   Policy\FetchMetadataPolicy. A refusal is a 403 through ErrorHandler::httpError()
-	 *   (request log, reason fetch_metadata_rejected), and dispatch never resumes.
-	 *
-	 * Notes:
-	 * - A missing security.fetch_metadata node counts as off. run() also serves the signed
-	 *   /_system/reset-cache webhook that rebuilds a compiled config, so a compiled config
-	 *   from before this baseline existed must not make every request fail. The keys inside
-	 *   the node come from the same baseline and are read directly.
+	 * - Does nothing unless security.fetch_metadata.enabled is true. A missing
+	 *   security.fetch_metadata counts as off.
+	 * - When on, the response gets "Vary: Sec-Fetch-Site, Sec-Fetch-Mode, Sec-Fetch-Dest",
+	 *   added to any Vary header already set, whatever the outcome.
+	 * - A Sec-Fetch-Site of "same-origin" or "none", in any letter case, is allowed. Every other
+	 *   request is allowed only when FetchMetadataPolicy::allows() says so.
+	 * - A refused request ends in a 403 through httpError(), with context source 'request' and
+	 *   reason fetch_metadata_rejected. It never returns to dispatch.
 	 * - Starts no session, reads no request body and logs only refusals.
 	 *
 	 * @param  App  $app  Booted HTTP application.
 	 * @return void
-	 * @throws \RuntimeException  When security.fetch_metadata is not a map or enabled is not a boolean.
+	 * @throws \RuntimeException  When security.fetch_metadata is not a map or its enabled is not a
+	 *                            boolean, or when FetchMetadataPolicy::allows() rejects the rest of it.
+	 * @see \CitOmni\Http\Policy\FetchMetadataPolicy::allows()  Which other requests are allowed.
 	 */
 	private static function guardFetchMetadata(App $app): void {
+		// ?? on an own key, deliberately: A compiled cfg cache may predate the baseline of
+		// security.fetch_metadata, and failing here would also fail the request that rebuilds
+		// the cache. The keys inside the node come with the same baseline and are read directly.
 		$cfg = $app->cfg->security->fetch_metadata ?? null;
 		if ($cfg === null) {
 			return;
@@ -351,29 +241,33 @@ class Kernel {
 			'message' => 'The request context is not allowed for this resource.',
 		]);
 
-		// httpError() normally ends the request. A handler that returns (re-entrancy or a
-		// custom handler) must still never resume dispatch.
+		// httpError() never returns, but the errorHandler service id may map to another class.
+		// A refused request must not resume dispatch whatever that class does.
 		exit;
 	}
 
 
 	/**
-	 * Resolve appRoot, configDir and publicPath from a flexible entry path.
+	 * Resolve the app root, the config directory and the public directory from an entry path.
 	 *
-	 * Rules:
-	 * - If $entry points to ".../public" (or a dir with index.php):
-	 *   appRoot = dirname(entry), configDir = appRoot.'/config', publicPath = entry.
-	 * - If $entry points to ".../config" (or contains citomni_http_cfg.php):
-	 *   appRoot = dirname(entry), configDir = entry,
-	 *   publicPath = appRoot.'/public' if it exists, else dirname($_SERVER['SCRIPT_FILENAME']).
-	 * - If $entry points to app-root (has a "config" dir):
-	 *   configDir = appRoot.'/config', publicPath = appRoot.'/public' if it exists, else dirname($_SERVER['SCRIPT_FILENAME']).
+	 * Behavior:
+	 * - The first match wins:
+	 *     1) A directory named public, or one that holds index.php, is the public directory.
+	 *        The app root is its parent, whose config directory must exist.
+	 *     2) A directory named config, or one that holds citomni_http_cfg.php, is the config
+	 *        directory. The app root is its parent.
+	 *     3) A directory that holds a config directory is the app root.
+	 * - In 2) and 3), the public directory is the app root's public directory when it exists,
+	 *   otherwise the directory of SCRIPT_FILENAME, or the app root without one.
+	 * - Trailing slashes and backslashes of $entryPath are ignored. Each returned path is its
+	 *   realpath() when that resolves, otherwise the path as built.
 	 *
-	 * All returned paths are normalized; realpath() is used when available.
+	 * Notes:
+	 * - An app root that holds index.php matches 1), so its parent is taken as the app root.
 	 *
-	 * @param string $entryPath
-	 * @return array{0:string,1:string,2:string} [appRoot, configDir, publicPath]
-	 * @throws \RuntimeException If paths cannot be resolved or config dir is missing.
+	 * @param  string  $entryPath  Path to the public directory, the config directory or the app root.
+	 * @return array{0:string,1:string,2:string}  App root, config directory and public directory.
+	 * @throws \RuntimeException  When no case matches, or in 1) when the parent has no config directory.
 	 */
 	private static function resolvePaths(string $entryPath): array {
 		$in  = \rtrim($entryPath, '/\\');
@@ -388,7 +282,6 @@ class Kernel {
 				throw new \RuntimeException("Config directory not found beside public: {$configDir}");
 			}
 			$publicPath = $abs;
-			// Normalize
 			$appRoot   = \realpath($appRoot)   ?: $appRoot;
 			$configDir = \realpath($configDir) ?: $configDir;
 			$publicPath= \realpath($publicPath)?: $publicPath;
@@ -402,7 +295,6 @@ class Kernel {
 			$configDir = $abs;
 			$publicGuess = $appRoot . '/public';
 			$publicPath  = \is_dir($publicGuess) ? $publicGuess : (\dirname($_SERVER['SCRIPT_FILENAME'] ?? $publicGuess));
-			// Normalize
 			$appRoot    = \realpath($appRoot)    ?: $appRoot;
 			$configDir  = \realpath($configDir)  ?: $configDir;
 			$publicPath = \realpath($publicPath) ?: $publicPath;
@@ -415,7 +307,6 @@ class Kernel {
 			$configDir = $abs . '/config';
 			$publicGuess = $abs . '/public';
 			$publicPath  = \is_dir($publicGuess) ? $publicGuess : (\dirname($_SERVER['SCRIPT_FILENAME'] ?? $publicGuess));
-			// Normalize
 			$appRoot    = \realpath($appRoot)    ?: $appRoot;
 			$configDir  = \realpath($configDir)  ?: $configDir;
 			$publicPath = \realpath($publicPath) ?: $publicPath;
@@ -427,62 +318,50 @@ class Kernel {
 
 
 	/**
-	 * Define the CITOMNI_PUBLIC_ROOT_URL constant.
+	 * Define CITOMNI_PUBLIC_ROOT_URL, the absolute public URL of the app without a trailing slash.
 	 *
-	 * Strategy:
-	 * - If already defined (e.g., by index.php or a deploy step), respect it.
-	 * - DEV environment:
-	 *   - If cfg.http.base_url is an absolute URL, use it.
-	 *   - Else auto-detect from server variables (optionally proxy-aware).
-	 * - Non-DEV environments:
-	 *   - Require an absolute cfg.http.base_url; otherwise throw.
+	 * Behavior:
+	 * - Keeps a CITOMNI_PUBLIC_ROOT_URL that is already defined, whatever its value.
+	 * - Otherwise, cfg http.base_url without its trailing slashes counts as absolute when it
+	 *   starts with http:// or https://, in any letter case. A missing http.base_url counts as
+	 *   empty.
+	 *     - When CITOMNI_ENVIRONMENT is 'dev': The absolute http.base_url, otherwise the URL that
+	 *       autoDetectBaseUrl() derives from the request, with cfg http.trust_proxy.
+	 *     - In every other environment, an undefined CITOMNI_ENVIRONMENT included: The absolute
+	 *       http.base_url, otherwise a \RuntimeException.
 	 *
-	 * Proxy awareness:
-	 * - Honours cfg.http.trust_proxy during auto-detection (X-Forwarded-*).
-	 *
-	 * Notes:
-	 * - A missing http.base_url counts as empty. run() also serves the signed /_system/reset-cache
-	 *   webhook that rebuilds a compiled config, so a compiled config from before http.base_url
-	 *   had a baseline must not make every request fail.
-	 *
-	 * @param \CitOmni\Kernel\App $app Current application.
-	 * @throws \RuntimeException If no absolute base_url is configured in non-DEV env.
+	 * @param  \CitOmni\Kernel\App  $app  App whose cfg holds http.base_url and http.trust_proxy.
 	 * @return void
+	 * @throws \RuntimeException  When CITOMNI_PUBLIC_ROOT_URL is undefined, CITOMNI_ENVIRONMENT is not
+	 *                            'dev' and http.base_url is not absolute.
+	 * @see \CitOmni\Http\Kernel::autoDetectBaseUrl()  The URL used in dev without an absolute base URL.
 	 */
 	private static function definePublicRootUrl(\CitOmni\Kernel\App $app): void {
-		// Respect pre-defined value (set early by index.php or deploy tool)
 		if (\defined('CITOMNI_PUBLIC_ROOT_URL')) {
 			return;
 		}
 
-		// Config wrapper (read-only) and environment (default to 'prod')
 		$cfg = $app->cfg;
 		$env = \defined('CITOMNI_ENVIRONMENT') ? (string)\CITOMNI_ENVIRONMENT : 'prod';
 
-		// Config base_url (trim trailing slash); '' means not set. The ?? is deliberate, see Notes.
+		// ?? on an own key, deliberately: A compiled cfg cache may predate the http.base_url
+		// baseline, and failing here would also fail the request that rebuilds the cache.
 		$cfgBase = \rtrim((string)($cfg->http->base_url ?? ''), '/');
 
-		// Whether to trust proxy headers (X-Forwarded-*) for URL detection
 		$trustProxy = (bool)$cfg->http->trust_proxy;
 
-		// Check if cfgBase is a fully qualified URL
 		$isAbsolute = ($cfgBase !== '' && \preg_match('#^https?://#i', $cfgBase) === 1);
 
 		if ($env === 'dev') {
-			// Dev: allow flexible setup
-			// - Use absolute config base_url if provided
-			// - Else auto-detect from server variables
 			\define('CITOMNI_PUBLIC_ROOT_URL', $isAbsolute ? $cfgBase : self::autoDetectBaseUrl($trustProxy));
 			return;
 		}
 
 		if ($isAbsolute) {
-			// Non-dev: absolute base_url is mandatory, use it as-is
 			\define('CITOMNI_PUBLIC_ROOT_URL', $cfgBase);
 			return;
 		}
 
-		// Non-dev without absolute base_url -> fatal error
 		throw new \RuntimeException(
 			"Missing or invalid http.base_url for environment '{$env}'. " .
 			"Set a full URL (e.g. https://www.example.com) in /config/citomni_http_cfg.{$env}.php"
@@ -491,20 +370,27 @@ class Kernel {
 
 
 	/**
-	 * Auto-detect the absolute public root URL (no trailing slash).
+	 * Derive the app's absolute public URL from the current request.
 	 *
-	 * - Scheme: HTTPS if server says so, or if trust_proxy + X-Forwarded-Proto = https.
-	 * - Host: HTTP_HOST (or X-Forwarded-Host when trust_proxy), fallback SERVER_NAME.
-	 * - Path: derived from SCRIPT_NAME; strips a trailing "/public" segment if present.
+	 * Behavior:
+	 * - Scheme: https when the HTTPS server variable is non-empty and not "off", when the server
+	 *   port is 443, or, with $trustProxy, when X-Forwarded-Proto is https. Otherwise http.
+	 * - Host: With $trustProxy and an X-Forwarded-Host header, its first entry; otherwise the
+	 *   Host header. When that is empty, SERVER_NAME, or localhost without one. Every character
+	 *   other than letters, digits, dot, hyphen and colon is removed.
+	 * - Path: The directory of SCRIPT_NAME, or of PHP_SELF without it, minus a trailing /public.
+	 *   With $trustProxy, a non-empty X-Forwarded-Prefix is put in front, unless the path
+	 *   already starts with it.
 	 *
-	 * Security:
-	 * - X-Forwarded-* headers are trusted only when cfg.http.trust_proxy is truthy.
+	 * Notes:
+	 * - $trustProxy trusts the X-Forwarded headers of every client; the peer is not checked
+	 *   against cfg http.trusted_proxies. Without it, the host still comes from a header that
+	 *   the client sends.
 	 *
-	 * @param bool $trustProxy Whether X-Forwarded-* may be trusted.
-	 * @return string Absolute URL without trailing slash.
+	 * @param  bool  $trustProxy  Whether the X-Forwarded headers are used.
+	 * @return string  Absolute URL without a trailing slash.
 	 */
 	private static function autoDetectBaseUrl(bool $trustProxy): string {
-		// 1) Scheme
 		$xfProto = (string)($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '');
 		$isHttps = (
 			(!empty($_SERVER['HTTPS']) && \strtolower((string)$_SERVER['HTTPS']) !== 'off')
@@ -513,7 +399,6 @@ class Kernel {
 		);
 		$scheme = $isHttps ? 'https' : 'http';
 
-		// 2) Host
 		$host = (string)($_SERVER['HTTP_HOST'] ?? '');
 		if ($trustProxy && isset($_SERVER['HTTP_X_FORWARDED_HOST'])) {
 			$parts = \explode(',', (string)$_SERVER['HTTP_X_FORWARDED_HOST']);
@@ -524,18 +409,17 @@ class Kernel {
 		}
 		$host = (string)\preg_replace('/[^a-zA-Z0-9\.\-:]/', '', $host);
 
-		// 3) Base path (from script)
 		$scriptName = (string)($_SERVER['SCRIPT_NAME'] ?? ($_SERVER['PHP_SELF'] ?? '/index.php'));
 		$basePath = \rtrim(\str_replace('\\', '/', \dirname($scriptName)), '/');
 
-		// SPECIAL: strip trailing "/public" (supports both app-root webroot and public/ webroot)
+		// With the web root at the app root, the script runs below /public, but the app's URL is
+		// the directory above it.
 		if ($basePath !== '' && \substr($basePath, -7) === '/public') {
 			$basePath = \substr($basePath, 0, -7);
-			// normalize to empty when we just removed the only segment
 			$basePath = ($basePath === '') ? '' : \rtrim($basePath, '/');
 		}
 
-		// 4) Optional reverse-proxy mount path (honour a proxy path prefix if provided)
+		// A reverse proxy that mounts the app below a path sends that path as X-Forwarded-Prefix.
 		if ($trustProxy && isset($_SERVER['HTTP_X_FORWARDED_PREFIX'])) {
 			$xfPrefix = \trim((string)$_SERVER['HTTP_X_FORWARDED_PREFIX']);
 			if ($xfPrefix !== '') {

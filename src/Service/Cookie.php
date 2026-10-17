@@ -18,165 +18,53 @@ use CitOmni\Kernel\Service\BaseService;
 
 
 /**
- * Cookie: Security-first, deterministic cookie API and owner of the cookie attributes.
+ * Cookie: Service that sets, reads and deletes cookies with one set of default attributes.
  *
- * Responsibilities:
- * - Provide a thin, explicit wrapper around setcookie()/$_COOKIE.
- * - Resolve the application's default cookie attributes (Secure, SameSite, HttpOnly,
- *   Path, Domain) once per request from cfg.cookie, the service options and the request.
- *   Session takes the attributes of the PHP session cookie from attributes() as well, so
- *   every cookie of the application follows one rule.
- * - Allow per-call overrides via $options and convert a friendly 'ttl' to 'expires'.
+ * Gives the application one set of default cookie attributes (Secure, SameSite, HttpOnly, Path
+ * and Domain), resolved once per instance from cfg cookie, the service options and the request,
+ * with per-call overrides on top. It neither serializes nor signs a value: The browser holds it,
+ * so what a value contains, and protecting it, belongs to the caller.
  *
- * Collaborators:
- * - $this->app->cfg->cookie (read): Default attributes, baseline in Registry::CFG_HTTP.
- * - $this->app->cfg->http->base_url and CITOMNI_PUBLIC_ROOT_URL (read): HTTPS signals for
- *   the Secure inference.
- * - $this->app->request (required): isHttps(), the proxy-aware HTTPS signal of this request.
- *   The request service is part of the citomni/http baseline in HTTP mode.
- *
- * Configuration (cfg.cookie; service $options are merged on top, last wins):
- * - secure   (bool|null)   Explicit value, or null to infer: True when http.base_url or
- *                          CITOMNI_PUBLIC_ROOT_URL is https, or when this request is HTTPS.
- * - samesite (string)      "Lax", "Strict" or "None" in any casing. "None" requires Secure.
- * - path     (string|null) Leading slash, no trailing slash except for "/"; null or ""
- *                          means "/".
- * - domain   (string|null) null or "" => host-only: No Domain attribute, so the browser
- *                          returns the cookie only to the host that set it. A domain shares
- *                          the cookie with all its subdomains; set it only for that purpose.
- * - httponly (bool)        Default true.
- *
- * Public API:
- * - set(string $name, string $value, array $options = []): bool
- *     Supported $options (caller overrides the defaults):
- *       ttl       (int)    Lifetime seconds; coerced to >= 0; converted to expires = time() + ttl.
- *       expires   (int)    Unix timestamp (overrides ttl).
- *       path      (string)
- *       domain    (string|null) null or "" means host-only.
- *       secure    (bool)
- *       httponly  (bool)
- *       samesite  (string: "Lax"|"Strict"|"None")
- *     Returns false if PHP refuses to set the cookie (e.g., headers already sent).
- *     Note: set() updates $_COOKIE[$name] for the current request iff PHP accepted the cookie
- *           and the computed scope (domain/path) applies to the current request.
- *
- * - get(string $name, ?string $default = null): ?string
- *     Return the cookie value as string, or $default when absent or not a string.
- *     Cookie input is untrusted: PHP parses "Cookie: name[]=x" into an array, and such
- *     values are treated as absent rather than cast to "Array".
- *
- * - has(string $name): bool
- *     True if the cookie is present in the current request as a string value.
- *
- * - delete(string $name, array $options = []): bool
- *     Delete by setting an expiry in the past. You may pass path/domain/etc. to match scope.
- *     Returns false if PHP refuses the deletion (e.g., headers already sent).
- *     Note: delete() removes the key from $_COOKIE locally (current-request view).
- *
- * - attributes(array $overrides = []): array<string,mixed>
- *     The defaults with normalized $overrides on top, validated as a whole. set(), delete()
- *     and Session use it, so overrides are checked in the combination that is sent.
- *
- * - defaults(): array<string,mixed>
- *     The effective defaults after initialization (useful for tests/diagnostics).
- *
- * Behavior & invariants:
- * - SameSite=None requires Secure=true for the defaults and for every resolved attribute
- *   set; violations throw \RuntimeException.
- * - SameSite values other than Lax, Strict and None throw \InvalidArgumentException, as do
- *   a non-boolean secure or httponly and a non-string domain. A typo must not silently
- *   change the cookie policy.
- * - Cookie names are validated against the RFC6265 token charset; invalid names throw
- *   \InvalidArgumentException.
- * - Defaults are built once at init from cfg + service $options (last wins).
- * - Local view semantics:
- *   - set(): updates $_COOKIE[$name] for the current request iff PHP accepted the cookie
- *     and the computed scope (domain/path) applies to the current request; otherwise leaves
- *     $_COOKIE unchanged.
- *   - delete(): unsets $_COOKIE[$name] locally regardless of setcookie()'s return value.
- *
- * Error handling:
- * - Missing cookies and non-string (array-shaped) values on get/has return $default/false;
- *   no exceptions and no warnings.
- * - set()/delete() return false if PHP refuses the operation (e.g., headers already sent).
- * - Invalid configuration is detected at init(); invalid options at the call.
- * - Unexpected runtime errors bubble to the global error handler (fail fast).
- *
- * Performance:
- * - Deterministic option merging; no unnecessary serialization or allocations.
- * - The Secure inference runs once at init and only when cookie.secure is null.
- *
- * Typical usage:
- *   // 1) Session cookie (until browser close)
- *   $this->app->cookie->set('sid', $token);
- *
- *   // 2) One-hour cookie with strict policy
- *   $this->app->cookie->set('sid', $token, ['ttl' => 3600, 'samesite' => 'Strict', 'httponly' => true]);
- *
- *   // 3) Cross-site (iframe/SaaS) cookie: must be Secure + None
- *   $this->app->cookie->set('auth', $jwt, ['ttl' => 7200, 'samesite' => 'None', 'secure' => true, 'httponly' => true]);
- *
- *   // 4) Read with default fallback
- *   $sid = $this->app->cookie->get('sid', '');
- *
- *   // 5) Delete with path/domain to match scope
- *   $this->app->cookie->delete('sid', ['path' => '/', 'domain' => 'example.com']);
- *
- * Notes:
- * - Prefer 'ttl' for relative lifetimes; use 'expires' only when you have a fixed timestamp.
- * - Negative ttl values are coerced to 0.
- * - Secure from an https base URL is a site policy: The cookie is Secure even when this
- *   request reached PHP over HTTP, as behind a TLS proxy that is not trusted. Browsers only
- *   see the https side. Response decides HSTS from Request::isHttps() alone.
- * - Avoid storing secrets without signing/encryption; cookies are client-held.
+ * Rules:
+ * - Resolve the attributes of every outgoing cookie through attributes(), so an override is
+ *   checked in the combination that is sent.
+ * - Throw for an invalid name, Secure, HttpOnly, SameSite, Path or Domain value rather than fall
+ *   back: A typo must not silently change the cookie policy.
+ * - Treat cookie input as untrusted: A value that is not a string, such as array-shaped input
+ *   (name[]=x), counts as absent and is never cast.
  */
 class Cookie extends BaseService {
 
 
 
-/*
- *---------------------------------------------------------------
- * CONFIGURATION DEFAULTS & BOOTSTRAP
- *---------------------------------------------------------------
- * PURPOSE
- *   Build effective cookie defaults once per request (cfg + options).
- *
- * NOTES
- *   - Enforces invariants early (e.g., SameSite=None => Secure=true).
- *   - Host-only unless cfg.cookie.domain names a domain.
- */
+	// ----------------------------------------------------------------
+	// Defaults
+	// ----------------------------------------------------------------
 
-	/** @var array<string,mixed> */
+	/** @var array<string,mixed> Default attributes of every cookie, before per-call overrides. */
 	private array $defaults = [];
 
 
 	/**
-	 * Initialize default cookie options from config and runtime environment.
+	 * Resolve the default attributes from cfg cookie, the service options and the request.
 	 *
 	 * Behavior:
-	 * - Secure:
-	 *   1) Respect cookie.secure when it is a bool.
-	 *   2) When it is null, infer from http.base_url, CITOMNI_PUBLIC_ROOT_URL or the
-	 *      current request (any https signal => true).
-	 * - SameSite: Lax, Strict or None (any casing); None requires Secure.
-	 * - Domain: cookie.domain when it names a domain; null or "" => host-only. There is no
-	 *   inference from the base URL: A Domain attribute widens the scope to every subdomain,
-	 *   so it must be configured explicitly.
-	 * - Merge: Constructor $options are merged over the defaults (last wins), and the
-	 *   result is validated again.
-	 *
-	 * Notes:
-	 * - Keep this method fast; it runs once per request (constructor init path).
+	 * - secure: cfg cookie.secure when it is a bool. When it is null, true when the site uses HTTPS
+	 *   by its configured URL or by this request; see siteUsesHttps().
+	 * - path, domain, httponly and samesite: cfg cookie.*, normalized as by attributes(). A null or
+	 *   empty domain means host-only. There is no inference from the base URL, because a Domain
+	 *   attribute shares the cookie with every subdomain.
+	 * - expires: 0, a session cookie.
+	 * - The service options override any attribute and are checked the same way.
 	 *
 	 * @return void
-	 * @throws \RuntimeException If SameSite=None is used without Secure=true, or if
-	 *                           cookie.secure is neither a bool nor null.
-	 * @throws \InvalidArgumentException For an invalid SameSite, domain or httponly value.
+	 * @throws \RuntimeException  When cfg cookie.secure is neither a bool nor null, or the defaults combine SameSite=None with Secure off.
+	 * @throws \InvalidArgumentException  When cfg cookie.path, cookie.domain, cookie.httponly or cookie.samesite, or a service option, has an invalid value.
+	 * @see \CitOmni\Kernel\Service\BaseService::__construct()  Calls it once per instance.
 	 */
 	protected function init(): void {
 		$cfg = $this->app->cfg->cookie->toArray();
 
-		// 1) Secure: Explicit, or inferred from the site's URL and the request.
 		$secure = $cfg['secure'];
 		if ($secure === null) {
 			$secure = $this->siteUsesHttps();
@@ -184,7 +72,7 @@ class Cookie extends BaseService {
 			throw new \RuntimeException('cookie.secure must be true, false or null (inferred); got ' . \var_export($secure, true) . '.');
 		}
 
-		// 2) Remaining attributes, normalized and type-checked like per-call options.
+		// Normalized and type-checked like per-call options.
 		$this->defaults = ['expires' => 0, 'secure' => $secure] + $this->normalizeOptions([
 			'path'     => $cfg['path'],
 			'domain'   => $cfg['domain'],
@@ -192,12 +80,12 @@ class Cookie extends BaseService {
 			'samesite' => $cfg['samesite'],
 		], true);
 
-		// 3) Service-level $options (from the service definition), last wins.
+		// The service options win over cfg.
 		if ($this->options !== []) {
 			$this->defaults = $this->mergeAssoc($this->defaults, $this->normalizeOptions($this->options, true));
 		}
 
-		// 4) Browsers require Secure when SameSite=None; check the final combination.
+		// Browsers drop SameSite=None without Secure; check the final combination.
 		$this->assertSameSiteNoneIsSecure($this->defaults);
 	}
 
@@ -206,73 +94,67 @@ class Cookie extends BaseService {
 
 
 
-/*
- *---------------------------------------------------------------
- * PUBLIC API - READ/WRITE/DELETE
- *---------------------------------------------------------------
- * PURPOSE
- *   Minimal, explicit cookie operations with deterministic behavior.
- *
- * NOTES
- *   - set()/delete() return false if headers already sent.
- *   - set() mirrors into $_COOKIE if scope matches this request.
- */
+	// ----------------------------------------------------------------
+	// Public API
+	// ----------------------------------------------------------------
 
 	/**
-	 * Set a cookie with deterministic merging and safe defaults.
+	 * Send a cookie and, where this request would see it, mirror it into $_COOKIE.
 	 *
 	 * Behavior:
-	 * - Resolves the attributes through attributes($options), which validates them.
-	 * - Calls setcookie(); if accepted and scope matches this request, mirrors into $_COOKIE.
+	 * - An attribute missing from $options takes its default; see attributes().
+	 * - ttl is the lifetime in seconds from now, a negative ttl counting as 0. A non-null ttl wins
+	 *   over expires.
+	 * - expires is a Unix timestamp; 0 makes a session cookie, which the browser drops when it
+	 *   closes.
+	 * - Returns false when PHP refuses the header, as when headers were already sent.
+	 * - When PHP accepted the cookie and its domain and path match this request, $_COOKIE[$name]
+	 *   is set to the value; otherwise $_COOKIE is unchanged.
 	 *
-	 * @param string              $name     RFC6265-token cookie name (validated).
-	 * @param string              $value    Raw cookie value (no serialization performed).
-	 * @param array<string,mixed> $options  ttl|expires|path|domain|secure|httponly|samesite
-	 * @return bool True if PHP accepted the cookie; false if headers already sent or refused.
-	 * @throws \InvalidArgumentException For an invalid cookie name or option value.
-	 * @throws \RuntimeException For SameSite=None without Secure=true.
+	 * Typical usage:
+	 *   $this->app->cookie->set('theme', 'dark', ['ttl' => 31536000]);
+	 *
+	 * @param  string  $name  RFC 6265 token.
+	 * @param  string  $value  Not serialized; setcookie() URL-encodes it.
+	 * @param  array{ttl?:int,expires?:int,path?:string|null,domain?:string|null,secure?:bool,httponly?:bool,samesite?:string}  $options
+	 * @return bool  True when PHP accepted the header.
+	 * @throws \InvalidArgumentException  When the name is not an RFC 6265 token, or an option has an invalid value.
+	 * @throws \RuntimeException  When the attributes combine SameSite=None with Secure off.
+	 * @throws \ValueError  When setcookie() rejects the path, domain or expires, such as a path with ";" or a space.
 	 */
 	public function set(string $name, string $value, array $options = []): bool {
 
-		// 1) Validate name early (fail fast on invalid RFC6265 token).
 		$this->assertValidName($name);
 
-		// 2) Resolve the final attribute set: The defaults with the caller's options on top.
-		//    attributes() also handles ttl -> expires and rejects SameSite=None without Secure.
 		$final = $this->attributes($options);
 
-		// 3) Convert to the exact array shape setcookie() expects.
-		//    Domain is omitted for host-only cookies (null/empty).
 		$opts = $this->buildCookieOptions($final);
 
-		// 4) Emit the Set-Cookie header.
-		//    Returns false if headers were already sent or PHP rejected the header.
 		$ok = \setcookie($name, $value, $opts);
 
-		// 5) Local view: If the browser would see this cookie on *this* request
-		//    (domain/path match) and PHP accepted it, mirror the value into $_COOKIE
-		//    so downstream code in the same request can read it.
+		// Mirror only where the browser would send the cookie back to this URL, so later code in
+		// this request reads what the next request will carry.
 		if ($ok && $this->isCookieVisibleHere($opts)) {
 			$_COOKIE[$name] = $value;
 		}
 
-		// 6) Report success/failure
 		return $ok;
 	}
 
 
 	/**
-	 * Read a cookie as string (current request view).
+	 * Return a cookie of this request as a string.
 	 *
-	 * Notes:
-	 * - Returns $default when the cookie key is absent.
-	 * - Returns $default when the value is not a string (array-shaped input such as
-	 *   "name[]=x"). Never casts untrusted arrays to the string "Array".
+	 * Behavior:
+	 * - Returns $default when the cookie is absent, or when its value is not a string.
 	 *
-	 * @param string      $name
-	 * @param string|null $default
-	 * @return string|null Cookie value or $default.
-	 * @throws \InvalidArgumentException For invalid cookie name.
+	 * Typical usage:
+	 *   $theme = $this->app->cookie->get('theme', 'light');
+	 *
+	 * @param  string  $name
+	 * @param  string|null  $default
+	 * @return string|null  The value, or $default.
+	 * @throws \InvalidArgumentException  When the name is not an RFC 6265 token.
 	 */
 	public function get(string $name, ?string $default = null): ?string {
 		$this->assertValidName($name);
@@ -282,14 +164,11 @@ class Cookie extends BaseService {
 
 
 	/**
-	 * Test if a cookie is present in the current request view.
+	 * Check whether this request carries a cookie with a string value.
 	 *
-	 * Notes:
-	 * - Consistent with get(): non-string (array-shaped) values count as absent.
-	 *
-	 * @param string $name
-	 * @return bool True if present in $_COOKIE as a string.
-	 * @throws \InvalidArgumentException For invalid cookie name.
+	 * @param  string  $name
+	 * @return bool  False also for a value that is not a string, as in get().
+	 * @throws \InvalidArgumentException  When the name is not an RFC 6265 token.
 	 */
 	public function has(string $name): bool {
 		$this->assertValidName($name);
@@ -298,61 +177,63 @@ class Cookie extends BaseService {
 
 
 	/**
-	 * Delete a cookie (by expiring it in the past).
+	 * Delete a cookie in the browser and in this request.
+	 *
+	 * A browser deletes only the cookie with the same name, path and domain, so pass the path and
+	 * domain the cookie was set with when they differ from the defaults.
 	 *
 	 * Behavior:
-	 * - Resolves the scope through attributes($options) (path/domain/etc.).
-	 * - Emits an expired Set-Cookie header; removes local $_COOKIE entry unconditionally.
+	 * - Sends the cookie with an empty value and an expiry in the past; ttl and expires in $options
+	 *   do not apply.
+	 * - Removes $_COOKIE[$name] also when PHP refuses the header.
 	 *
-	 * @param string              $name
-	 * @param array<string,mixed> $options Optional overrides to match cookie scope.
-	 * @return bool True if PHP accepted the deletion header; false if headers already sent/refused.
-	 * @throws \InvalidArgumentException If cookie name or an option value is invalid.
-	 * @throws \RuntimeException If SameSite=None without Secure=true.
+	 * Typical usage:
+	 *   $this->app->cookie->delete('theme');
+	 *
+	 * @param  string  $name  RFC 6265 token.
+	 * @param  array{ttl?:int,expires?:int,path?:string|null,domain?:string|null,secure?:bool,httponly?:bool,samesite?:string}  $options  Attributes of the cookie to delete, as for set().
+	 * @return bool  True when PHP accepted the header; false when it refused it, as when headers were already sent.
+	 * @throws \InvalidArgumentException  When the name is not an RFC 6265 token, or an option has an invalid value.
+	 * @throws \RuntimeException  When the attributes combine SameSite=None with Secure off.
+	 * @throws \ValueError  When setcookie() rejects the path or domain, such as a path with ";" or a space.
 	 */
 	public function delete(string $name, array $options = []): bool {
-		// 1) Validate name early (fail fast).
 		$this->assertValidName($name);
 
-		// 2) Resolve the scope and force expiration into the past to signal deletion.
 		$opts = $this->attributes($options);
 		$opts['expires'] = \time() - 3600;
 
-		// 3) Convert to setcookie() options (omit 'domain' if host-only).
 		$scOpts = $this->buildCookieOptions($opts);
 
-		// 4) Emit expired Set-Cookie header (empty value). This returns false if
-		//    headers were already sent or PHP rejected the header.
 		$result = \setcookie($name, '', $scOpts);
 
-		// 5) Local view: Always remove the key from $_COOKIE so downstream code in
-		//    this same request does not see a ghost value.
+		// Unset whatever setcookie() returned, so later code in this request never reads a cookie
+		// that is being deleted.
 		unset($_COOKIE[$name]);
 
-		// 6) Report whether PHP accepted the deletion header.
 		return $result;
 	}
 
 
 	/**
-	 * Resolve a cookie's attributes: The defaults with $overrides on top.
+	 * Return the attributes of one cookie: The defaults with $overrides on top.
 	 *
 	 * Behavior:
-	 * - Normalizes $overrides like set() options: ttl -> expires, SameSite casing, a
-	 *   leading dot and "" in domain, and the types of every attribute.
-	 * - Validates the final combination: SameSite=None requires Secure=true.
-	 *
-	 * Notes:
-	 * - Session resolves the PHP session cookie here with its session.cookie_* settings
-	 *   as overrides, so it follows the same rule as every other cookie.
+	 * - Normalizes $overrides:
+	 *     - A non-null ttl becomes expires.
+	 *     - samesite gets its canonical casing.
+	 *     - path gets a leading slash and no trailing slash; null or "" means "/".
+	 *     - domain is lowercased without a leading dot; null or "" means host-only (null).
+	 * - Checks the combination that would be sent: SameSite=None requires Secure.
 	 *
 	 * Typical usage:
 	 *   $attributes = $this->app->cookie->attributes(['samesite' => 'Strict']);
 	 *
-	 * @param array<string,mixed> $overrides ttl|expires|path|domain|secure|httponly|samesite
-	 * @return array<string,mixed> Keys: expires, path, domain|null, secure, httponly, samesite.
-	 * @throws \InvalidArgumentException For an invalid option value.
-	 * @throws \RuntimeException For SameSite=None without Secure=true.
+	 * @param  array{ttl?:int,expires?:int,path?:string|null,domain?:string|null,secure?:bool,httponly?:bool,samesite?:string}  $overrides  As the $options of set().
+	 * @return array<string,mixed>  expires, path, domain (null for host-only), secure, httponly and samesite, plus any unrecognized key of the service options or $overrides as given.
+	 * @throws \InvalidArgumentException  When an override has an invalid value.
+	 * @throws \RuntimeException  When the result combines SameSite=None with Secure off.
+	 * @see \CitOmni\Http\Service\Cookie::set()  What ttl and expires mean.
 	 */
 	public function attributes(array $overrides = []): array {
 		$attributes = $this->mergeAssoc($this->defaults, $this->normalizeOptions($overrides, false));
@@ -365,20 +246,14 @@ class Cookie extends BaseService {
 
 
 
-/*
- *---------------------------------------------------------------
- * DIAGNOSTICS
- *---------------------------------------------------------------
- * PURPOSE
- *   Introspection helpers (useful for tests and debugging).
- */
+	// ----------------------------------------------------------------
+	// Diagnostics
+	// ----------------------------------------------------------------
 
 	/**
-	 * Return the effective merged defaults computed at init().
+	 * Return the default attributes that init() resolved, for tests and diagnostics.
 	 *
-	 * NOTE: Exposing the computed defaults with this method can be useful in tests/diagnostics.
-	 *
-	 * @return array<string,mixed> Keys: expires, path, domain|null, secure, httponly, samesite.
+	 * @return array<string,mixed>  expires, path, domain (null for host-only), secure, httponly and samesite, plus any unrecognized key of the service options as given.
 	 */
 	public function defaults(): array {
 		return $this->defaults;
@@ -389,64 +264,51 @@ class Cookie extends BaseService {
 
 
 
-/*
- *---------------------------------------------------------------
- * INTERNALS - OPTION NORMALIZATION & MERGE
- *---------------------------------------------------------------
- * PURPOSE
- *   Normalize caller/service options and merge "last wins".
- *
- * NOTES
- *   - ttl -> expires
- *   - Validates/normalizes samesite/secure/httponly/path/domain types.
- */
+	// ----------------------------------------------------------------
+	// Option normalization
+	// ----------------------------------------------------------------
 
 
 	/**
-	 * Normalize caller/service options to canonical internal shape.
+	 * Normalize an options map and check the type of each attribute.
 	 *
 	 * Behavior:
-	 * - ttl -> expires (seconds, coerced to >= 0).
-	 * - samesite: Lax, Strict or None in any casing; anything else throws.
-	 * - path: A leading slash and no trailing slash, except for "/"; null or "" => "/".
-	 * - domain: null or "" => null (host-only); otherwise lowercase without a leading dot.
-	 * - secure/httponly: Must be bool.
-	 * - When $forDefaults=true, clamps expires to >= 0.
+	 * - A non-null ttl becomes expires = now + ttl, with a negative ttl counted as 0. It replaces
+	 *   any expires in the map.
+	 * - samesite, path and domain go through normalizeSameSite(), normalizePath() and
+	 *   normalizeDomain().
+	 * - secure and httponly must be bools.
+	 * - With $forDefaults, a non-null expires becomes an int of at least 0.
+	 * - Other keys pass unchanged.
 	 *
-	 * @param array<string,mixed> $in
-	 * @param bool                $forDefaults Clamp expires when building defaults.
-	 * @return array<string,mixed> Normalized option map.
-	 * @throws \InvalidArgumentException For an invalid samesite, path, domain, secure or httponly value.
+	 * @param  array<string,mixed>  $in
+	 * @param  bool  $forDefaults  True when building the defaults.
+	 * @return array<string,mixed>
+	 * @throws \InvalidArgumentException  When samesite, path, domain, secure or httponly has an invalid value.
 	 */
 	private function normalizeOptions(array $in, bool $forDefaults): array {
 		$out = $in;
 
-		// ttl -> expires
 		if (isset($out['ttl'])) {
 			$ttl = (int)$out['ttl'];
 			unset($out['ttl']);
 			$out['expires'] = \time() + \max(0, $ttl);
 		}
-		// samesite
 		if (\array_key_exists('samesite', $out)) {
 			$out['samesite'] = $this->normalizeSameSite($out['samesite']);
 		}
-		// path
 		if (\array_key_exists('path', $out)) {
 			$out['path'] = $this->normalizePath($out['path']);
 		}
-		// domain
 		if (\array_key_exists('domain', $out)) {
 			$out['domain'] = $this->normalizeDomain($out['domain']);
 		}
-		// secure/httponly
 		foreach (['secure', 'httponly'] as $flag) {
 			if (\array_key_exists($flag, $out) && !\is_bool($out[$flag])) {
 				throw new \InvalidArgumentException("Cookie attribute '{$flag}' must be a bool; got " . \var_export($out[$flag], true) . '.');
 			}
 		}
 
-		// For defaults, ensure expires is int >= 0
 		if ($forDefaults && isset($out['expires'])) {
 			$out['expires'] = \max(0, (int)$out['expires']);
 		}
@@ -456,11 +318,11 @@ class Cookie extends BaseService {
 
 
 	/**
-	 * Shallow associative merge with "last wins" semantics.
+	 * Merge two maps shallowly; a key of $b wins over the same key of $a.
 	 *
-	 * @param array<string,mixed> $a
-	 * @param array<string,mixed> $b
-	 * @return array<string,mixed> Result where keys from $b override $a.
+	 * @param  array<string,mixed>  $a
+	 * @param  array<string,mixed>  $b
+	 * @return array<string,mixed>
 	 */
 	private function mergeAssoc(array $a, array $b): array {
 		foreach ($b as $k => $v) {
@@ -472,51 +334,39 @@ class Cookie extends BaseService {
 
 
 
-/*
- *---------------------------------------------------------------
- * INTERNALS - SETCOOKIE OPTIONS BUILDER
- *---------------------------------------------------------------
- * PURPOSE
- *   Convert normalized options into setcookie() array shape.
- *
- * NOTES
- *   - Omits 'domain' when null for host-only cookies.
- */
+	// ----------------------------------------------------------------
+	// Setcookie options
+	// ----------------------------------------------------------------
 
 	/**
-	 * Build the options array for PHP's setcookie().
+	 * Build the options array of setcookie() from normalized attributes.
 	 *
 	 * Behavior:
-	 * - Canonicalizes the SameSite value; normalizeOptions() already canonicalized the path.
-	 * - Omits 'domain' for host-only cookies (null) per RFC6265.
-	 * - Does not enforce invariants here (e.g., SameSite=None => Secure=true); attributes()
-	 *   validated them.
+	 * - A missing attribute becomes expires 0, path "/", secure false, httponly true or samesite Lax.
+	 * - Omits domain for a host-only cookie.
 	 *
-	 * @param array<string,mixed> $opts Normalized options (may include: expires, path, domain, secure, httponly, samesite).
-	 * @return array<string,mixed> Keys suitable for setcookie(): expires, path, secure, httponly, samesite[, domain].
+	 * Notes:
+	 * - Checks no combination of attributes: Assumes that attributes() has checked them.
+	 *
+	 * @param  array<string,mixed>  $opts  Normalized attributes.
+	 * @return array{expires:int,path:string,secure:bool,httponly:bool,samesite:string,domain?:string}
 	 */
 	private function buildCookieOptions(array $opts): array {
 
-		// 1) Expires
-		// Allow 0 (session cookie) or any integer (including negatives for deletions).
+		// Not clamped: An expiry in the past deletes the cookie.
 		$expires = (int)($opts['expires'] ?? 0);
 
-		// 2) Path
-		// normalizePath() already gave it a leading slash and no trailing slash.
+		// Assumes normalizePath() has run: A leading slash and no trailing slash.
 		$path = (string)($opts['path'] ?? '/');
 
-		// 3) Domain
-		// null -> host-only cookie. normalizeDomain() already lowercased it and dropped a leading dot.
+		// null is host-only. Assumes normalizeDomain() has run: Lowercase, no leading dot.
 		$domain = $opts['domain'] ?? null;
 
-		// 4) Secure / httponly
 		$secure   = (bool)($opts['secure']   ?? false);
 		$httponly = (bool)($opts['httponly'] ?? true);
 
-		// 5) Samesite
 		$samesite = $this->normalizeSameSite($opts['samesite'] ?? 'Lax');
 
-		// 6) Assemble setcookie() options
 		$out = [
 			'expires'  => $expires,
 			'path'     => $path,
@@ -525,7 +375,7 @@ class Cookie extends BaseService {
 			'samesite' => $samesite,
 		];
 
-		// Only include domain when explicitly set (non-null).
+		// A host-only cookie has no Domain attribute.
 		if ($domain !== null) {
 			$out['domain'] = $domain;
 		}
@@ -537,26 +387,22 @@ class Cookie extends BaseService {
 
 
 
-/*
- *---------------------------------------------------------------
- * INTERNALS - VALIDATION & CANONICALIZATION
- *---------------------------------------------------------------
- * PURPOSE
- *   Guard rails and tiny helpers for correctness.
- */
+	// ----------------------------------------------------------------
+	// Validation and HTTPS detection
+	// ----------------------------------------------------------------
 
 	/**
-	 * Validate cookie name against RFC6265 token charset.
+	 * Check that a cookie name is an RFC 6265 token.
 	 *
-	 * @param string $name
+	 * @param  string  $name
 	 * @return void
-	 * @throws \InvalidArgumentException If the name is empty or contains invalid characters.
+	 * @throws \InvalidArgumentException  When the name is empty or has a character outside the token set.
 	 */
 	private function assertValidName(string $name): void {
 		if ($name === '') {
 			throw new \InvalidArgumentException('Cookie name cannot be empty.');
 		}
-		// RFC6265 token chars (no separators/CTL/SP/";,=" etc.)
+		// RFC 6265 token: No separators, control characters or spaces.
 		if (!\preg_match('/^[A-Za-z0-9!#$%&\'*+\-.\^_`|~]+$/', $name)) {
 			throw new \InvalidArgumentException('Invalid cookie name: ' . $name);
 		}
@@ -564,16 +410,16 @@ class Cookie extends BaseService {
 
 
 	/**
-	 * Normalize a SameSite value.
+	 * Return a SameSite value in its canonical casing.
 	 *
 	 * Behavior:
 	 * - Accepts "Lax", "Strict" and "None" in any casing.
-	 * - Throws for anything else. Falling back to Lax would hide a typo such as "Nnoe"
-	 *   behind a different policy.
+	 * - Throws for anything else rather than fall back to Lax, which would hide a typo such as
+	 *   "Nnoe" behind a different policy.
 	 *
-	 * @param mixed $val
+	 * @param  mixed  $val
 	 * @return 'Lax'|'Strict'|'None'
-	 * @throws \InvalidArgumentException For any other value.
+	 * @throws \InvalidArgumentException  When the value is not one of the three, in any casing.
 	 */
 	private function normalizeSameSite(mixed $val): string {
 		$s = \is_string($val) ? \ucfirst(\strtolower($val)) : '';
@@ -585,19 +431,15 @@ class Cookie extends BaseService {
 
 
 	/**
-	 * Normalize a Path value.
+	 * Return a cookie path with a leading slash and no trailing slash.
 	 *
 	 * Behavior:
 	 * - null and "" mean "/".
-	 * - Adds a missing leading slash and drops trailing slashes: "app/" => "/app".
+	 * - Adds a missing leading slash and drops trailing slashes: "app/" becomes "/app".
 	 *
-	 * Notes:
-	 * - The session cookie takes its path from attributes(), so it gets the same path
-	 *   as every other cookie.
-	 *
-	 * @param mixed $val
-	 * @return string Path.
-	 * @throws \InvalidArgumentException For a value that is neither a string nor null.
+	 * @param  mixed  $val
+	 * @return string
+	 * @throws \InvalidArgumentException  When the value is neither a string nor null.
 	 */
 	private function normalizePath(mixed $val): string {
 		if ($val === null || $val === '') {
@@ -612,16 +454,15 @@ class Cookie extends BaseService {
 
 
 	/**
-	 * Normalize a Domain value.
+	 * Return a cookie domain in lowercase without a leading dot, or null for host-only.
 	 *
 	 * Behavior:
-	 * - null and "" mean host-only and return null.
-	 * - A string is lowercased without a leading dot (obsolete in RFC 6265); a value
-	 *   that is empty afterwards also means host-only.
+	 * - null, "" and a value of only dots mean host-only.
+	 * - Drops leading dots, which RFC 6265 ignores.
 	 *
-	 * @param mixed $val
-	 * @return string|null Domain, or null for host-only.
-	 * @throws \InvalidArgumentException For a value that is neither a string nor null.
+	 * @param  mixed  $val
+	 * @return string|null  The domain, or null for host-only.
+	 * @throws \InvalidArgumentException  When the value is neither a string nor null.
 	 */
 	private function normalizeDomain(mixed $val): ?string {
 		if ($val === null || $val === '') {
@@ -636,11 +477,11 @@ class Cookie extends BaseService {
 
 
 	/**
-	 * Reject SameSite=None without Secure, which browsers drop.
+	 * Throw for SameSite=None without Secure, which browsers drop.
 	 *
-	 * @param array<string,mixed> $attributes Normalized attributes.
+	 * @param  array<string,mixed>  $attributes  Normalized attributes.
 	 * @return void
-	 * @throws \RuntimeException When samesite is None and secure is not true.
+	 * @throws \RuntimeException  When samesite is None and secure is not true.
 	 */
 	private function assertSameSiteNoneIsSecure(array $attributes): void {
 		if (($attributes['samesite'] ?? 'Lax') === 'None' && ($attributes['secure'] ?? false) !== true) {
@@ -650,22 +491,26 @@ class Cookie extends BaseService {
 
 
 	/**
-	 * Whether the site is served over HTTPS: By its configured public URL or by this request.
+	 * Check whether the site uses HTTPS, by its configured public URL or by this request.
 	 *
 	 * Behavior:
-	 * - True when http.base_url starts with https://.
-	 * - True when CITOMNI_PUBLIC_ROOT_URL starts with https://. Kernel defines the constant
-	 *   from http.base_url, but an entry point or deploy step may define it beforehand,
-	 *   which Kernel respects; then it may be the only https signal.
-	 * - Otherwise Request::isHttps(), which honors trusted proxies.
+	 * - True when cfg http.base_url or the constant CITOMNI_PUBLIC_ROOT_URL starts with https://,
+	 *   in any casing.
+	 * - Otherwise the result of Request::isHttps().
 	 *
-	 * @return bool True when any of the signals says https.
+	 * Notes:
+	 * - An https URL is a site policy: The result is true even when this request reached PHP over
+	 *   HTTP, as behind a TLS proxy that is not trusted, because browsers only see the https side.
+	 *
+	 * @return bool
+	 * @see \CitOmni\Http\Service\Request::isHttps()  Which requests count as HTTPS, behind a proxy included.
 	 */
 	private function siteUsesHttps(): bool {
 		$baseUrl = (string)$this->app->cfg->http->base_url;
 		if (\stripos($baseUrl, 'https://') === 0) {
 			return true;
 		}
+		// The constant may be defined independently of http.base_url, and be the only https signal.
 		if (\defined('CITOMNI_PUBLIC_ROOT_URL') && \stripos((string)\CITOMNI_PUBLIC_ROOT_URL, 'https://') === 0) {
 			return true;
 		}
@@ -677,57 +522,37 @@ class Cookie extends BaseService {
 
 
 
-/*
- *---------------------------------------------------------------
- * INTERNALS - VISIBILITY CHECK (LOCAL VIEW)
- *---------------------------------------------------------------
- * PURPOSE
- *   Decide if a just-set cookie should be visible in this request.
- *
- * NOTES
- *   - RFC6265 path-match boundary: "/app" must not match "/apple".
- *   - Domain cookie matches exact domain + subdomains.
- */
+	// ----------------------------------------------------------------
+	// Local view
+	// ----------------------------------------------------------------
 
 	/**
-	 * Best-effort check: will a just-set cookie be visible to *this* request?
-	 *
-	 * Mirrors browser visibility rules enough to safely reflect a successful
-	 * setcookie() into $_COOKIE immediately (so downstream code can read it
-	 * within the same request).
+	 * Check whether a browser would send a cookie with these options back to this request's URL.
 	 *
 	 * Behavior:
-	 * - Normalizes the request host and path. A bracketed IPv6 literal loses its brackets
-	 *   and the port after them ("[::1]:8080" -> "::1"); a name or IPv4 address loses its
-	 *   port ("example.com:8080" -> "example.com"). The host is lowercased.
-	 * - Domain rules:
-	 *   - If the request host is an IP or "localhost": browsers typically reject
-	 *     Domain-scoped cookies; require host-only (cookie domain MUST be null).
-	 *   - Else (real registrable host): domain matches on exact host or any subdomain.
-	 * - Path rules (RFC6265-ish):
-	 *   - "/" matches everything.
-	 *   - Otherwise require exact path match OR a prefix + "/" boundary.
+	 * - The host is HTTP_HOST, or SERVER_NAME without it, lowercased and without its port and the
+	 *   brackets of an IPv6 literal. An empty host matches no cookie.
+	 * - On an IP address or localhost only a host-only cookie matches, because browsers typically
+	 *   reject a Domain attribute there.
+	 * - On any other host a host-only cookie matches, and a Domain cookie matches its domain and
+	 *   every subdomain.
+	 * - The path matches when the cookie path is "/" or equals the request path, or when the
+	 *   request path starts with the cookie path plus "/": "/app" matches "/app/x" but not "/apple".
 	 *
 	 * Notes:
-	 * - This is a conservative heuristic; it does not attempt full RFC parity.
-	 * - Only 'domain' and 'path' keys (as produced by buildCookieOptions()) are used.
+	 * - A conservative heuristic, not full RFC 6265 parity.
 	 *
-	 * Typical usage:
-	 *   $opts = $this->buildCookieOptions($final);
-	 *   if ($ok && $this->isCookieVisibleHere($opts)) { $_COOKIE[$name] = $value; }
-	 *
-	 * @param array $opts Cookie options array (keys: 'domain'?, 'path'?).
-	 * @return bool True if the cookie should be visible in this request context.
+	 * @param  array<string,mixed>  $opts  Options as built by buildCookieOptions(); only domain and path are read.
+	 * @return bool
 	 */
 	private function isCookieVisibleHere(array $opts): bool {
 
-		// 1) Normalize the request host for domain matching
-		//    - Accept HTTP_HOST (preferred) or SERVER_NAME as fallback
-		//    - A bracketed IPv6 literal carries its port after the closing bracket, and the
-		//      colons inside the brackets belong to the address: "[::1]:8080" -> "::1".
-		//      Without a closing bracket the host is malformed and stays empty.
-		//    - Otherwise a single colon separates the port: "example.com:8080" -> "example.com".
-		//      More colons mean a raw IPv6 literal (e.g. from SERVER_NAME) without a port.
+		// -- 1. Normalize the request host -------------------------------
+		// A bracketed IPv6 literal carries its port after the closing bracket, and the colons
+		// inside the brackets belong to the address: "[::1]:8080" -> "::1". Without a closing
+		// bracket the host is malformed and stays empty. Otherwise a single colon separates the
+		// port: "example.com:8080" -> "example.com". More colons mean a raw IPv6 literal, as from
+		// SERVER_NAME, without a port.
 		$host = (string)($_SERVER['HTTP_HOST'] ?? $_SERVER['SERVER_NAME'] ?? '');
 		if ($host !== '' && $host[0] === '[') {
 			$rb = \strpos($host, ']');
@@ -738,7 +563,8 @@ class Cookie extends BaseService {
 		$host = \strtolower($host);
 
 
-		// 2) Normalize the request path (ignore query string)
+		// -- 2. Normalize the request path -------------------------------
+		// The query string is not part of the path.
 		$uri = (string)($_SERVER['REQUEST_URI'] ?? '/');
 		$qpos = \strpos($uri, '?');
 		$reqPath = ($qpos === false) ? $uri : \substr($uri, 0, $qpos);
@@ -747,9 +573,8 @@ class Cookie extends BaseService {
 		}
 
 
-		// 3) Normalize cookie scope from $opts
-		//    - domain: null means host-only; non-null means Domain attribute set
-		//    - path: ensure leading "/" and remove trailing "/" (except keep "/" as-is)
+		// -- 3. Normalize the cookie scope -------------------------------
+		// A null or empty domain means host-only.
 		$cookieDomain = isset($opts['domain']) && $opts['domain'] !== '' ? \strtolower((string)$opts['domain']) : null;
 		$cookiePath   = (string)($opts['path'] ?? '/');
 		if ($cookiePath === '' || $cookiePath[0] !== '/') {
@@ -761,36 +586,27 @@ class Cookie extends BaseService {
 		}
 
 
-		// 4) Domain matching
-		//    Special-case IP/localhost: browsers disallow/ignore Domain= for such hosts.
-		//    => Require host-only cookies (cookieDomain === null) in that scenario.
-		//    Otherwise (registrable host): accept exact match or subdomain match.
+		// -- 4. Match the domain -----------------------------------------
 		$hostIsIpOrLocal = ($host === 'localhost') || \filter_var($host, \FILTER_VALIDATE_IP);
 
 		if ($hostIsIpOrLocal) {
-			// On IP or "localhost", Domain-scoped cookies are effectively not visible.
+			// Browsers typically reject a Domain attribute on an IP address or localhost.
 			$domainOk = ($cookieDomain === null) && ($host !== '');
 		} else {
 			if ($cookieDomain === null) {
-				// Host-only cookie on a regular hostname -> visible when host is non-empty.
 				$domainOk = ($host !== '');
 			} else {
-				// Domain cookie: matches the domain itself and any subdomain.
-				// Example: cookieDomain="example.com" matches "example.com" and "a.example.com".
 				$domainOk = ($host === $cookieDomain) || \str_ends_with($host, '.' . $cookieDomain);
 			}
 		}
 
 
-		// 5) Path matching (RFC6265 path-match semantics)
-		//    - "/" matches everything
-		//    - Otherwise require exact match OR prefix + "/" boundary
+		// -- 5. Match the path -------------------------------------------
+		// RFC 6265 path-match: "/app" must not match "/apple".
 		$pathOk = ($cookiePath === '/')
 			? true
 			: ($reqPath === $cookiePath || \str_starts_with($reqPath, $cookiePath . '/'));
 
-
-		// 6) Final verdict: visible only if both domain and path conditions hold
 		return $domainOk && $pathOk;
 	}
 

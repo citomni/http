@@ -19,86 +19,55 @@ use CitOmni\Http\Exception\NonceConfigException;
 use CitOmni\Kernel\Service\BaseService;
 
 /**
- * Nonce: Filesystem-backed single-use token ledger with namespaced storage and TTL.
+ * Nonce: Service for a filesystem ledger of single-use tokens, kept per namespace for a TTL.
  *
- * Provides replay protection for primitives such as webhooks, OTP enrollment,
- * one-time form submissions, and similar single-use scenarios. Each call site
- * picks its own namespace so multiple unrelated ledgers can coexist without
- * collisions, and so opportunistic pruning can use per-namespace TTLs.
+ * Gives replay protection to single-use flows such as signed webhooks: A nonce is accepted
+ * once within its TTL. Each caller picks its own namespace and TTL, so unrelated ledgers do
+ * not collide. What a nonce protects, and how a rejection is answered, belongs to the callers.
  *
- * Behavior:
- * - Storage layout: <root_dir>/<namespace>/<sha256(nonce)>.nonce
- * - First write of a nonce wins (atomic O_EXCL via fopen 'x').
- * - Subsequent writes within TTL are rejected (replay).
- * - Subsequent writes after TTL are accepted (the stale file is reaped first).
- * - Opportunistic purge runs probabilistically inside checkAndStore() to
- *   prevent unbounded growth on long-lived ledgers. Operators may also call
- *   purgeExpired() from a CLI cron for deterministic cleanup.
- * - Nonce strings must match a strict character/length whitelist to keep
- *   filesystem behavior predictable across platforms.
- *
- * Notes:
- * - Boolean return from checkAndStore() conflates "replay" and "transient
- *   storage failure" into a single negative answer. This is intentional:
- *   from a security standpoint both must reject the request, and richer
- *   telemetry can be added later without changing the call sites.
- * - Configuration shape errors fail fast at init(). Runtime storage failures
- *   return false from checkAndStore().
- *
- * Config node: nonce
- *   - dir                 string  Required. Root directory for all ledgers.
- *   - max_len             int     Optional, default 128. Maximum nonce length.
- *   - purge_probability   int     Optional, default 50. 1-in-N chance to opportunistically purge.
- *   - purge_limit         int     Optional, default 25. Max files scanned per opportunistic purge.
- *   - dir_mode            int     Optional, default 0775. Mode used when creating directories.
- *   - file_mode           int     Optional, default 0660. Mode applied to nonce files.
- *
- * Typical usage:
- *   if (!$this->app->nonce->checkAndStore('webhooks', $nonce, 300)) {
- *       // Replay or storage failure - reject the request.
- *   }
- *
- *   // CLI cron:
- *   $deleted = $this->app->nonce->purgeExpired('webhooks', 300);
- *
- * @throws NonceConfigException On invalid config at init time.
+ * Rules:
+ * - Store only a hash of a nonce, never the nonce itself.
+ * - Answer a replay, malformed input and a storage failure alike with a negative result, never
+ *   with an exception: Each means that single use cannot be proven, so the caller rejects.
+ * - Check cfg values once, in init(), and report a wrong one with NonceConfigException.
+ * - Bound every purge by a number of scanned entries.
  */
 class Nonce extends BaseService {
 
-	/** Hash algorithm used to derive the on-disk filename from the nonce string. */
+	/** Hash algorithm that turns a nonce into the file name of its entry. */
 	private const HASH_ALGO = 'sha256';
 
-	/** Filename suffix for nonce ledger entries. */
+	/** File name suffix of a ledger entry. */
 	private const EXT = '.nonce';
 
-	/** Maximum length of a namespace label (bounded for filesystem sanity). */
+	/** Maximum length of a namespace name, in characters. */
 	private const NAMESPACE_MAX_LEN = 64;
 
-	/** Strict allow-list pattern for namespace labels (built from NAMESPACE_MAX_LEN). */
+	/** Pattern of a valid namespace name: ASCII letters, digits, _ and -. */
 	private const NAMESPACE_PATTERN = '/^[A-Za-z0-9_-]{1,' . self::NAMESPACE_MAX_LEN . '}$/';
 
-	/** Resolved root directory for all namespaced ledgers (no trailing separator). */
+	/** Root directory of all namespaces, without a trailing separator. */
 	private string $rootDir = '';
 
-	/** Maximum byte length of an accepted nonce string. */
+	/** Maximum length of an accepted nonce, in bytes. */
 	private int $maxLen = 128;
 
-	/** Compiled regex for nonce-string validation (built from $maxLen at init). */
+	/** Pattern of a valid nonce: ASCII letters, digits, _ . : and -, at most $maxLen of them. */
 	private string $nonceCharPattern = '';
 
-	/** Probability divisor for opportunistic purge (1 in N). */
+	/** Chance of an opportunistic purge after a stored nonce, as 1 in this number. */
 	private int $purgeProbability = 50;
 
-	/** Maximum number of directory entries scanned in one opportunistic purge. */
+	/** Maximum number of entries scanned in one opportunistic purge. */
 	private int $purgeLimit = 25;
 
-	/** Octal mode applied to created directories. */
+	/** Permission mode of a directory that the ledger creates. */
 	private int $dirMode = 0775;
 
-	/** Octal mode applied to created nonce files. */
+	/** Permission mode of a stored entry. */
 	private int $fileMode = 0660;
 
-	/** @var array<string, true> Namespaces whose subdirectory has already been ensured this request. */
+	/** @var array<string,true> Namespaces whose directory this instance has found usable. */
 	private array $ensuredNamespaces = [];
 
 
@@ -109,16 +78,18 @@ class Nonce extends BaseService {
 	// ----------------------------------------------------------------
 
 	/**
-	 * Read cfg.nonce, validate, and pre-derive immutable scalars.
+	 * Read and check the nonce cfg once.
 	 *
 	 * Behavior:
-	 * - Verifies the configured hash algorithm is supported by ext-hash.
-	 * - Does NOT pre-create the root directory; subdirectories are ensured
-	 *   lazily on first use within each namespace. This keeps the service
-	 *   cheap to instantiate when not actually used.
+	 * - Requires, under cfg nonce, with dir cast to string and the numbers to int:
+	 *     - dir: Not empty after trimming, and without NUL bytes.
+	 *     - max_len: From 8 to 1024.
+	 *     - purge_probability and purge_limit: At least 1.
+	 * - Touches no directory: A namespace directory is created on its first use.
 	 *
 	 * @return void
-	 * @throws NonceConfigException On invalid configuration.
+	 * @throws \CitOmni\Http\Exception\NonceConfigException  When a value breaks these requirements, or PHP's hash extension lacks HASH_ALGO.
+	 * @see \CitOmni\Kernel\Service\BaseService::__construct()  Calls it once per instance.
 	 */
 	protected function init(): void {
 		$cfg = $this->app->cfg->nonce;
@@ -171,30 +142,39 @@ class Nonce extends BaseService {
 	// ----------------------------------------------------------------
 
 	/**
-	 * Atomically claim a nonce within the given namespace.
+	 * Claim a nonce in a namespace, once within the TTL.
 	 *
-	 * Returns true when this is the first time the nonce is seen (or the
-	 * previous occurrence has expired and was reaped). Returns false on
-	 * replay, on malformed input, or on any storage failure.
+	 * Records the nonce so that a second claim within the TTL fails. The TTL belongs to the
+	 * caller: It must cover the whole time in which the protected request would still be
+	 * accepted.
 	 *
 	 * Behavior:
-	 * - Uses fopen 'x' for atomic create-or-fail semantics.
-	 * - On collision, checks file mtime against TTL; reaps and retries once
-	 *   if the existing entry has expired.
-	 * - May trigger an opportunistic purge of other expired entries in the
-	 *   namespace (probability 1 in cfg.nonce.purge_probability).
+	 * - Returns true when no entry for the nonce exists, or the existing one is at least
+	 *   $ttlSeconds old; the entry is then stored with the current time.
+	 * - Of concurrent claims of a nonce that has no entry yet, at most one returns true.
+	 * - Returns false for a replay within the TTL, for a TTL below 1, for a nonce that is
+	 *   empty, longer than cfg nonce.max_len bytes or has a character outside A-Z, a-z, 0-9,
+	 *   _ . : and -, for a namespace outside NAMESPACE_PATTERN, and when the namespace
+	 *   directory cannot be created or written or the entry cannot be read or stored.
+	 * - Creates the namespace directory on first use.
+	 * - After a stored nonce, purges expired entries of the namespace with a chance of 1 in
+	 *   cfg nonce.purge_probability, scanning at most cfg nonce.purge_limit entries.
 	 *
 	 * Notes:
-	 * - The nonce string is treated as opaque; only its hash is persisted.
-	 * - TTL is owned by the caller. Pick whatever fits the use case
-	 *   (short-lived webhook windows, longer-lived email confirmation
-	 *   tokens, multi-step enrollment flows, etc.). Values <= 0 are
-	 *   rejected because they have no meaningful semantics.
+	 * - The purge judges expiry by this call's TTL: Callers that share a namespace must use
+	 *   the same TTL, or a shorter one removes entries that a longer one still needs.
+	 * - The nonce and namespace checks let one trailing line feed through, because their
+	 *   patterns end in $ without the D modifier.
 	 *
-	 * @param  string  $namespace    Logical bucket name (e.g. 'webhooks', 'csrf').
-	 * @param  string  $nonce        Opaque single-use token string.
-	 * @param  int     $ttlSeconds   Validity window in seconds (must be > 0).
-	 * @return bool                  True on success, false on replay/storage failure.
+	 * Typical usage:
+	 *   if (!$this->app->nonce->checkAndStore('webhooks', $nonce, 300)) {
+	 *       // Replay or storage failure: Reject the request.
+	 *   }
+	 *
+	 * @param  string  $namespace  Ledger name, such as webhooks.
+	 * @param  string  $nonce  Single-use token; only its hash is stored.
+	 * @param  int  $ttlSeconds  How long a claim blocks the same nonce, in seconds; at least 1.
+	 * @return bool  True when this call claimed the nonce.
 	 */
 	public function checkAndStore(string $namespace, string $nonce, int $ttlSeconds): bool {
 		if ($ttlSeconds <= 0) {
@@ -218,6 +198,7 @@ class Nonce extends BaseService {
 		$path = $nsDir . \DIRECTORY_SEPARATOR . \hash(self::HASH_ALGO, $nonce) . self::EXT;
 		$now  = \time();
 
+		// Mode 'x' creates the file or fails when it exists, atomically, so the first claim wins.
 		$fh = @\fopen($path, 'x');
 		if ($fh === false) {
 			// Either it exists, or fopen failed for another reason. If it exists,
@@ -240,7 +221,7 @@ class Nonce extends BaseService {
 			}
 		}
 
-		// Best-effort write of the timestamp (file presence alone is what counts).
+		// Best-effort write of the timestamp: Only the entry's presence and mtime count.
 		@\fwrite($fh, (string)$now);
 		@\fclose($fh);
 		@\touch($path, $now);
@@ -252,15 +233,24 @@ class Nonce extends BaseService {
 
 
 	/**
-	 * Deterministically prune expired nonces in a namespace.
+	 * Remove expired entries of a namespace.
 	 *
-	 * Intended for CLI cron usage. Scans up to $max entries in the namespace
-	 * directory and removes those whose mtime is older than $ttlSeconds.
+	 * For deterministic cleanup of busy or long-lived ledgers, such as from a scheduled CLI
+	 * command, next to the opportunistic purge of checkAndStore().
 	 *
-	 * @param  string  $namespace    Logical bucket name.
-	 * @param  int     $ttlSeconds   Age threshold for removal.
-	 * @param  int     $max          Maximum entries to scan in one call.
-	 * @return int                   Number of files actually removed.
+	 * Behavior:
+	 * - Scans at most $max ledger entries and removes those at least $ttlSeconds old; other
+	 *   files in the directory are left alone and do not count.
+	 * - Removes nothing and returns 0 for a TTL or $max below 1, an invalid namespace, and a
+	 *   namespace without a readable directory.
+	 *
+	 * Typical usage:
+	 *   $removed = $this->app->nonce->purgeExpired('webhooks', 300);
+	 *
+	 * @param  string  $namespace  Ledger name, such as webhooks.
+	 * @param  int  $ttlSeconds  Age from which an entry has expired, in seconds; use the TTL of the claims.
+	 * @param  int  $max  Maximum number of entries scanned.
+	 * @return int  Number of entries removed.
 	 */
 	public function purgeExpired(string $namespace, int $ttlSeconds, int $max = 500): int {
 		if ($ttlSeconds <= 0 || $max <= 0) {
@@ -317,13 +307,15 @@ class Nonce extends BaseService {
 	// ----------------------------------------------------------------
 
 	/**
-	 * Ensure the per-namespace subdirectory exists and is writable.
+	 * Return the directory of a namespace, created and writable.
 	 *
-	 * The result is memoized per request to avoid repeated stat() calls when
-	 * the same namespace is hit multiple times.
+	 * Behavior:
+	 * - Creates the directory, with missing parents, when it does not exist.
+	 * - Remembers a usable namespace per instance; later calls for it return the path without
+	 *   touching the filesystem.
 	 *
-	 * @param  string   $namespace
-	 * @return string|null  Absolute namespace directory, or null on failure.
+	 * @param  string  $namespace  Valid namespace name.
+	 * @return string|null  The directory, or null when it cannot be created or is not writable.
 	 */
 	private function ensureNamespaceDir(string $namespace): ?string {
 		$nsDir = $this->rootDir . \DIRECTORY_SEPARATOR . $namespace;
@@ -348,14 +340,16 @@ class Nonce extends BaseService {
 
 
 	/**
-	 * Probabilistic, bounded scan for expired entries.
+	 * Remove expired entries of a namespace directory, with a chance of 1 in $purgeProbability.
 	 *
-	 * Designed to keep amortized cost near zero while preventing unbounded
-	 * directory growth on busy ledgers. Failures are silent - purging is
-	 * housekeeping, not load-bearing.
+	 * Keeps a busy ledger from growing without bound at a small amortized cost.
 	 *
-	 * @param  string  $nsDir
-	 * @param  int     $ttlSeconds
+	 * Behavior:
+	 * - Scans at most $purgeLimit ledger entries and removes those at least $ttlSeconds old.
+	 * - Fails silently: Purging is housekeeping, so a filesystem error only ends or skips it.
+	 *
+	 * @param  string  $nsDir  Namespace directory.
+	 * @param  int  $ttlSeconds  Age from which an entry has expired, in seconds.
 	 * @return void
 	 */
 	private function maybePurge(string $nsDir, int $ttlSeconds): void {
@@ -390,7 +384,10 @@ class Nonce extends BaseService {
 
 
 	/**
-	 * Cheap suffix check that avoids full pathinfo() overhead.
+	 * Check whether a file name ends with the ledger entry suffix.
+	 *
+	 * @param  string  $name  File name without directory.
+	 * @return bool
 	 */
 	private function hasNonceExt(string $name): bool {
 		$len = \strlen(self::EXT);

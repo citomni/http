@@ -22,133 +22,71 @@ use CitOmni\Kernel\Cfg;
 use CitOmni\Kernel\Service\BaseService;
 
 /**
- * Csrf: Layered CSRF protection for HTTP requests.
+ * Csrf: Service that issues CSRF tokens and verifies requests against layered CSRF checks.
  *
- * Three independent defense layers, evaluated cheapest-first:
- * 1) Fetch Metadata (Sec-Fetch-Site header) - near-zero cost, browser-dependent.
- * 2) Origin/Referer validation - full origin (scheme+host+port) comparison against
- *    the request's own origin and any configured trusted origins.
- * 3) Token match - session-stored token vs. submitted token (header or form field).
+ * Gives forms and scripts one session-bound token, and adapters one layered verification of
+ * state-changing requests. It decides whether a request passes; how a refusal is answered
+ * belongs to the caller, and when to rotate the token, such as at login, belongs to the
+ * authentication flow.
  *
- * All enabled layers must pass. A failure in any layer short-circuits further checks.
- *
- * Behavior:
- * - verify() returns bool; requireValid() throws CsrfVerificationException.
- *   Both use the same internal engine. Choose based on flow:
- *   bool for redirect+flash, exception for fail-fast/API/guards.
- * - Requests with methods not in protect_methods pass unconditionally.
- * - When disabled via config, all verification methods return success.
- * - Token is created lazily on first token()/htmlField()/rotate() call.
- * - When mask_tokens is enabled, each token() call returns a differently
- *   masked representation of the same session token. This is correct and
- *   intentional - it prevents BREACH-style compression attacks.
- * - Failure logging goes through the log service when available and enabled.
- *   It includes generic request context, and callers may pass extra context
- *   to verify()/requireValid() for adapter-specific audit details.
- *   The service never writes directly to files.
- * - token(), htmlField() and rotate() store the token and so start the session when
- *   there is none. Verification and clear() never start one: Without a session there
- *   is no token, and verification fails with TokenMissing. Callers do not need to
- *   ensure session state before calling any of them.
- *
- * Notes:
- * - This service replaces the legacy security service for CSRF concerns.
- *   Auth-specific rotation (login/logout) is the auth package's responsibility:
- *   it reads cfg and calls rotate() explicitly.
- * - trusted_origins config accepts full origins (scheme://host:port, recommended)
- *   or bare hostnames (legacy/convenience - matches any scheme/port for that host).
- *   Full origins are compared strictly; bare hostnames match the host portion only.
- * - A request whose Origin header is a trusted origin also passes the fetch metadata
- *   layer, which otherwise refuses "cross-site" (and "same-site" when allow_same_site
- *   is off). The Origin/Referer layer and the token still apply.
- * - For PUT/PATCH/DELETE requests, the token must be submitted via the HTTP header
- *   (headerName). The form field fallback reads only $_POST, which PHP populates
- *   exclusively for POST requests. HTML forms natively support only GET/POST;
- *   method-override (POST with _method) is physically a POST and works with the
- *   form field. JavaScript clients should always use the header.
- * - Request path semantics are explicit:
- *   pathRaw() is transport-facing, while pathFromAppRoot() is app-facing.
- *   Redirect examples use pathFromAppRoot(). Logging records both forms.
- *
- * Config node: security.csrf (see init() for all keys).
- *
- * Typical usage:
- *   // HTML form flow:
- *   if (!$this->app->csrf->verify()) {
- *       $this->app->flash->error('Invalid or expired token.');
- *       $this->app->response->redirect($this->app->request->pathFromAppRoot());
- *   }
- *
- *   // API/fail-fast:
- *   $this->app->csrf->requireValid();
- *
- *   // Template: {{{ $csrfField() }}}
- *   // JS: fetch('/api', { headers: { 'X-CSRF-Token': token } })
- *
- * @throws CsrfException On invalid config at init time, or internal invariant violation.
- * @throws CsrfVerificationException On verification failure (requireValid() only).
+ * Rules:
+ * - Read cfg security.csrf only in init(). Report a wrong value there with CsrfException,
+ *   never by switching a check off.
+ * - Never create a session while verifying: A request without one has no token and fails.
+ * - Never put a token in a log record.
+ * - Report every rejected request as exactly one CsrfFailureReason.
  */
 class Csrf extends BaseService {
 
-	/** @var bool Whether CSRF protection is globally enabled. */
+	/** Whether verification is on; when false, every request passes. */
 	private bool $enabled;
 
-	/** @var string Form field name for the CSRF token. */
+	/** Name of the form field that carries the token. */
 	private string $fieldName;
 
-	/** @var string HTTP header name for AJAX/API token submission. */
+	/** Name of the request header that carries the token. */
 	private string $headerName;
 
-	/** @var string Session key where the raw token hex is stored. */
+	/** Session key of the stored token. */
 	private string $sessionKey;
 
-	/** @var int Number of random bytes for token generation (>= 16). */
+	/** Token length in random bytes, at least 16. */
 	private int $tokenBytes;
 
-	/** @var array<int, string> Uppercased HTTP methods that require CSRF verification. */
+	/** @var list<string> Uppercase HTTP methods that require verification. */
 	private array $protectMethods;
 
-	/** @var bool Whether to validate Origin/Referer headers. */
+	/** Whether the Origin check, with its Referer fallback, runs. */
 	private bool $originCheck;
 
-	/** @var bool Fall back to Referer when Origin is absent on HTTPS. */
+	/** Whether an HTTPS request without Origin is checked by its Referer instead of failing. */
 	private bool $refererFallbackOnHttps;
 
-	/** @var bool Allow requests without Origin header on plain HTTP (dev, internal). */
+	/** Whether a plain HTTP request without Origin passes the Origin check. */
 	private bool $allowMissingOriginOnHttp;
 
-	/**
-	 * @var array<int, string> Pre-normalized full trusted origins (scheme://host[:port]).
-	 *
-	 * Populated from trusted_origins config entries that contain "://".
-	 * Compared strictly against the normalized submitted origin.
-	 */
+	/** @var list<string> Trusted full origins, as normalizeOrigin() returns them. */
 	private array $trustedFullOrigins;
 
-	/**
-	 * @var array<int, string> Pre-lowercased bare trusted hostnames.
-	 *
-	 * Populated from trusted_origins config entries without "://".
-	 * Matched against the host portion of the submitted origin only (less strict).
-	 */
+	/** @var list<string> Trusted bare hostnames, lowercased; each matches its host over http and https on any port. */
 	private array $trustedHosts;
 
-	/** @var bool Whether Sec-Fetch-Site checking is active. */
+	/** Whether the Sec-Fetch-Site check runs. */
 	private bool $fetchMetadataEnabled;
 
-	/** @var bool Whether same-site requests pass fetch metadata check. */
+	/** Whether Sec-Fetch-Site same-site passes the Sec-Fetch-Site check. */
 	private bool $fetchMetadataAllowSameSite;
 
-	/** @var bool Whether tokens are XOR-masked on output and unmasked on verify. */
+	/** Whether tokens are issued masked with a new random pad each time, and submitted masked. */
 	private bool $maskTokens;
 
-	/** @var bool Whether failures are written to the log service. */
+	/** Whether verification failures are written to the log service. */
 	private bool $logFailures;
 
-	/** @var string Logical destination passed to the log service's file parameter. */
+	/** Log file name that failure records go to, as the log service's file argument. */
 	private string $logChannel;
 
-	/** @var ?string Cached normalized origin for the current request (scheme://host[:port]). */
+	/** The request's own normalized origin; null until getRequestOrigin() has built it. */
 	private ?string $requestOrigin = null;
 
 
@@ -161,22 +99,19 @@ class Csrf extends BaseService {
 	// ----------------------------------------------------------------
 
 	/**
-	 * One-time initialization. Reads security.csrf config, pre-derives
-	 * immutable scalars, validates constraints.
+	 * Read and check cfg security.csrf once.
 	 *
 	 * Behavior:
-	 * - Reads its security.csrf keys directly, so a missing key throws \OutOfBoundsException.
-	 * - The flags must be booleans and protect_methods a list; anything else, null included,
-	 *   throws CsrfException instead of switching a check off.
-	 * - trusted_origins entries containing "://" are stored as full origins (strict match).
-	 *   Entries without "://" are stored as bare hostnames (host-only match, less strict).
-	 *   Both are lowercased and default-ports are stripped at init time.
-	 * - protect_methods are uppercased at init time for case-insensitive matching.
-	 * - Fails fast with CsrfException on invalid config values.
+	 * - protect_methods match in any letter case; empty entries are ignored.
+	 * - A trusted_origins entry with "://" is a full origin: It matches exactly, after
+	 *   lowercasing and dropping a default port. An entry without "://" is a hostname: It
+	 *   matches an http or https origin with that host on any port.
+	 * - A trusted_origins entry that cannot be used is ignored: A full origin without an http
+	 *   or https scheme and a host, or a hostname with "/", ":" or whitespace.
 	 *
 	 * @return void
-	 * @throws CsrfException On invalid config (e.g. token_bytes < 16, empty field_name, a flag that
-	 *                       is not a boolean, protect_methods that is not a list).
+	 * @throws \CitOmni\Http\Exception\CsrfException  When a flag is not a boolean, protect_methods is not an array, field_name, header_name or session_key is empty, or token_bytes is below 16.
+	 * @see \CitOmni\Kernel\Service\BaseService::__construct()  Calls it once per instance.
 	 */
 	protected function init(): void {
 		$c = $this->app->cfg->security->csrf;
@@ -195,8 +130,8 @@ class Csrf extends BaseService {
 		$this->logFailures	= self::flag($c->log_failures, 'log_failures');
 		$this->logChannel	= (string)$c->log_channel;
 
-		// protect_methods - indexed array, normalize to uppercase, trim, deduplicate.
-		// An empty list is a Cfg node; null would leave every method unprotected.
+		// An empty list arrives as a Cfg node. Any other non-array, null included, throws
+		// rather than leave every method unprotected.
 		$rawMethods = $c->protect_methods;
 		if ($rawMethods instanceof Cfg) {
 			$rawMethods = $rawMethods->toArray();
@@ -213,7 +148,6 @@ class Csrf extends BaseService {
 		}
 		$this->protectMethods = \array_values(\array_unique($this->protectMethods));
 
-		// trusted_origins - split into full origins and bare hostnames.
 		$rawOrigins = $c->trusted_origins;
 		if ($rawOrigins instanceof Cfg) {
 			$rawOrigins = $rawOrigins->toArray();
@@ -226,14 +160,14 @@ class Csrf extends BaseService {
 				continue;
 			}
 			if (\str_contains($str, '://')) {
-				// Full origin - normalize to lowercase, strip default ports.
+				// An entry that normalizeOrigin() rejects could never match a request.
 				$normalized = $this->normalizeOrigin($str);
 				if ($normalized !== null) {
 					$this->trustedFullOrigins[] = $normalized;
 				}
 			} else {
-				// Bare hostname - host-only match (less strict).
-				// Reject entries that look like malformed URLs or contain invalid characters.
+				// Bare hostname: Matches by host alone. Entries that look like a URL or contain
+				// whitespace are dropped.
 				$lower = \strtolower($str);
 				if ($lower !== '' && \strpbrk($lower, '/:') === false && !\preg_match('/\s/', $lower)) {
 					$this->trustedHosts[] = $lower;
@@ -241,12 +175,10 @@ class Csrf extends BaseService {
 			}
 		}
 
-		// fetch_metadata - nested config node.
 		$fm = $c->fetch_metadata;
 		$this->fetchMetadataEnabled = self::flag($fm->enabled, 'fetch_metadata.enabled');
 		$this->fetchMetadataAllowSameSite = self::flag($fm->allow_same_site, 'fetch_metadata.allow_same_site');
 
-		// Validate constraints.
 		if ($this->fieldName === '') {
 			throw new CsrfException('Config security.csrf.field_name must not be empty.');
 		}
@@ -268,7 +200,7 @@ class Csrf extends BaseService {
 	 * @param  mixed   $value  The cfg value.
 	 * @param  string  $key    Path below security.csrf, for the message.
 	 * @return bool
-	 * @throws CsrfException  When the value is not a boolean.
+	 * @throws \CitOmni\Http\Exception\CsrfException  When the value is not a boolean.
 	 */
 	private static function flag(mixed $value, string $key): bool {
 		if (!\is_bool($value)) {
@@ -288,25 +220,36 @@ class Csrf extends BaseService {
 	// ----------------------------------------------------------------
 
 	/**
-	 * Verify the current request against all enabled CSRF defense layers.
+	 * Check the current request against every enabled CSRF check.
 	 *
-	 * Returns true in three cases:
-	 * 1) CSRF protection is disabled (cfg: enabled = false).
-	 * 2) The request method is not in protect_methods (e.g. GET, HEAD, OPTIONS).
-	 * 3) All enabled defense layers passed.
+	 * Suits a form flow that answers a refusal with a message and a redirect. The checks run in
+	 * this order, and the first one that rejects decides the reason:
+	 * 1) Sec-Fetch-Site, when cfg security.csrf.fetch_metadata.enabled is true.
+	 * 2) Origin, or Referer without Origin, when cfg security.csrf.origin_check is true.
+	 * 3) The submitted token against the session token, always.
 	 *
-	 * Returns false when any enabled layer rejects the request.
-	 * On failure, the reason is logged (if log_failures is enabled) but not
-	 * exposed to the caller. Use requireValid() when the reason is needed.
+	 * Behavior:
+	 * - True without any check when cfg security.csrf.enabled is false or the request method is
+	 *   not in protect_methods.
+	 * - True when every enabled check passes; false otherwise.
+	 * - A request whose Origin is in cfg security.csrf.trusted_origins passes the Sec-Fetch-Site
+	 *   check whatever the header says. The other checks still apply.
+	 * - The token is read from the header named by header_name and, for POST without that
+	 *   header, from the form field named by field_name. PUT, PATCH and DELETE must use the header.
+	 * - On false, writes one failure record when cfg security.csrf.log_failures is true and the
+	 *   log service is registered. The reason is not returned.
 	 *
 	 * Typical usage:
-	 *   if (!$this->app->csrf->verify()) {
-	 *       $this->app->flash->error('Invalid or expired token.');
-	 *       $this->app->response->redirect($this->app->request->pathFromAppRoot());
+	 *   if (!$this->app->csrf->verify(['action' => 'profile_save'])) {
+	 *       $this->app->flash->error('The form expired. Try again.');
+	 *       $this->app->response->redirect($this->app->request->pathFromAppRoot(), 303);
 	 *   }
 	 *
-	 * @param array<string,mixed> $context Additional developer-supplied log context on failure.
-	 * @return bool True if the request is allowed, false if rejected.
+	 * @param  array<string,mixed>  $context  Extra fields for the failure record, such as the action. Logged as given, so never put secrets in it; a key the record already has is dropped.
+	 * @return bool  True when the request may proceed.
+	 * @throws \CitOmni\Http\Exception\CsrfException  When the token check reads a session token that is neither null, '' nor token_bytes bytes in hex.
+	 * @see \CitOmni\Http\Enum\CsrfFailureReason  The reasons a request is rejected for.
+	 * @see \CitOmni\Http\Service\Csrf::requireValid()  The same checks, with the reason in an exception.
 	 */
 	public function verify(array $context = []): bool {
 		if (!$this->enabled || !$this->isProtectedMethod()) {
@@ -324,26 +267,26 @@ class Csrf extends BaseService {
 
 
 	/**
-	 * Verify the current request or throw on failure.
+	 * Check the current request like verify(), and throw with the reason when it is rejected.
 	 *
-	 * Same verification engine as verify(), but throws CsrfVerificationException
-	 * with the specific CsrfFailureReason on failure. Returns void on success
-	 * (including when disabled or method is not protected).
+	 * Suits an endpoint or guard that answers a refusal from the reason, or lets it fail.
+	 *
+	 * Behavior:
+	 * - Returns when verify() would return true.
+	 * - Logs a rejection exactly as verify() does before it throws.
 	 *
 	 * Typical usage:
-	 *   // API endpoint - let error handler catch and render 403:
-	 *   $this->app->csrf->requireValid();
-	 *
-	 *   // With explicit catch:
 	 *   try {
 	 *       $this->app->csrf->requireValid();
 	 *   } catch (CsrfVerificationException $e) {
 	 *       $this->app->response->jsonProblem('CSRF rejected', 403, $e->reason->value);
 	 *   }
 	 *
-	 * @param array<string,mixed> $context Additional developer-supplied log context on failure.
+	 * @param  array<string,mixed>  $context  Extra fields for the failure record, such as the action. Logged as given, so never put secrets in it; a key the record already has is dropped.
 	 * @return void
-	 * @throws CsrfVerificationException With the specific failure reason.
+	 * @throws \CitOmni\Http\Exception\CsrfVerificationException  When an enabled check rejects the request; its reason names the check.
+	 * @throws \CitOmni\Http\Exception\CsrfException  When the token check reads a session token that is neither null, '' nor token_bytes bytes in hex.
+	 * @see \CitOmni\Http\Service\Csrf::verify()  Which checks run, in which order.
 	 */
 	public function requireValid(array $context = []): void {
 		if (!$this->enabled || !$this->isProtectedMethod()) {
@@ -371,18 +314,22 @@ class Csrf extends BaseService {
 	// ----------------------------------------------------------------
 
 	/**
-	 * Return the CSRF token for the current session.
+	 * Return the token to submit with a protected request.
 	 *
-	 * Creates the session token lazily on first call (which starts the session
-	 * when there is none). When mask_tokens is enabled, each call returns a
-	 * different masked representation (new random mask). All masked variants
-	 * resolve to the same underlying session token on verify.
+	 * Issues the token that a form or script sends back; verification compares it with the
+	 * session token.
+	 *
+	 * Behavior:
+	 * - Stores a new session token when the session has none, or one that is not token_bytes
+	 *   bytes in hex; storing starts the session when there is none.
+	 * - With cfg security.csrf.mask_tokens true, every call returns a different base64 string
+	 *   that verifies as the same session token, so the token never repeats in a compressed
+	 *   response (BREACH). Otherwise it returns the session token as lowercase hex.
 	 *
 	 * Typical usage:
-	 *   // Meta tag for JS consumption:
-	 *   <meta name="csrf-token" content="{{ $this->app->csrf->token() }}">
+	 *   $token = $this->app->csrf->token();
 	 *
-	 * @return string Masked or raw token string, depending on config.
+	 * @return string
 	 */
 	public function token(): string {
 		$hex = $this->ensureSessionToken();
@@ -391,17 +338,18 @@ class Csrf extends BaseService {
 
 
 	/**
-	 * Return a complete hidden HTML input element containing the CSRF token.
+	 * Return a hidden form input that carries a token under the configured field name.
 	 *
-	 * Output is HTML-escaped. Use triple-brace syntax in templates: {{{ $csrfField() }}}.
+	 * For a form that posts without a script. Like token(), it may store a session token.
 	 *
-	 * Starts the session if not already active.
+	 * Behavior:
+	 * - Name and value are already HTML-escaped: Output the string as it is.
 	 *
 	 * Typical usage:
-	 *   {{{ $csrfField() }}}
-	 *   // Outputs: <input type="hidden" name="_csrf" value="...">
+	 *   $field = $this->app->csrf->htmlField();
 	 *
-	 * @return string Full <input type="hidden"> HTML string.
+	 * @return string  One hidden input element as HTML.
+	 * @see \CitOmni\Http\Service\Csrf::token()  The token in the value, and when the session starts.
 	 */
 	public function htmlField(): string {
 		$name	= \htmlspecialchars($this->fieldName, \ENT_QUOTES | \ENT_SUBSTITUTE, 'UTF-8');
@@ -411,11 +359,9 @@ class Csrf extends BaseService {
 
 
 	/**
-	 * Return the configured form field name.
+	 * Return the name of the form field that carries the token.
 	 *
-	 * Useful for JS clients that need to know which field name to submit.
-	 *
-	 * @return string The field name (e.g. '_csrf').
+	 * @return string  Cfg security.csrf.field_name.
 	 */
 	public function fieldName(): string {
 		return $this->fieldName;
@@ -423,11 +369,9 @@ class Csrf extends BaseService {
 
 
 	/**
-	 * Return the configured HTTP header name.
+	 * Return the name of the request header that carries the token.
 	 *
-	 * Useful for SPA/AJAX clients that submit tokens via headers.
-	 *
-	 * @return string The header name (e.g. 'X-CSRF-Token').
+	 * @return string  Cfg security.csrf.header_name.
 	 */
 	public function headerName(): string {
 		return $this->headerName;
@@ -445,23 +389,19 @@ class Csrf extends BaseService {
 	// ----------------------------------------------------------------
 
 	/**
-	 * Generate a new token, replace the session token, and return it.
+	 * Replace the session token with a new one and return it.
 	 *
-	 * The previous token is immediately invalidated. Any forms rendered with
-	 * the old token will fail verification. Call this at privilege-level
-	 * transitions (login, logout) to prevent session fixation attacks.
+	 * Call it at a privilege change, such as login or logout.
 	 *
-	 * Starts the session if not already active.
-	 *
-	 * The auth package is responsible for calling rotate() based on its own
-	 * config (rotate_on_login, rotate_on_logout). This service has no
-	 * awareness of auth semantics.
+	 * Behavior:
+	 * - Every token issued before the call fails verification afterwards, also in forms
+	 *   rendered with it.
+	 * - Starts the session when there is none.
 	 *
 	 * Typical usage:
-	 *   // After successful login:
-	 *   $newToken = $this->app->csrf->rotate();
+	 *   $token = $this->app->csrf->rotate();
 	 *
-	 * @return string The new token (masked or raw, same format as token()).
+	 * @return string  The new token, in the format of token().
 	 */
 	public function rotate(): string {
 		$hex = $this->generateToken();
@@ -470,12 +410,13 @@ class Csrf extends BaseService {
 
 
 	/**
-	 * Remove the CSRF token from the session.
+	 * Remove the token from the session.
 	 *
-	 * Use when destroying a session entirely. After clear(), subsequent
-	 * token()/htmlField() calls will create a fresh token.
+	 * Use it when the session ends or changes hands, so no token issued before stays valid.
 	 *
-	 * Never starts a session: Without one there is no token to remove.
+	 * Behavior:
+	 * - The next token() or htmlField() stores a new token.
+	 * - Never creates a session: Without one there is no token to remove.
 	 *
 	 * @return void
 	 */
@@ -494,9 +435,9 @@ class Csrf extends BaseService {
 	// ----------------------------------------------------------------
 
 	/**
-	 * Whether CSRF protection is globally enabled.
+	 * Check whether verification is on.
 	 *
-	 * @return bool True if enabled in config.
+	 * @return bool  Cfg security.csrf.enabled.
 	 */
 	public function isEnabled(): bool {
 		return $this->enabled;
@@ -504,13 +445,9 @@ class Csrf extends BaseService {
 
 
 	/**
-	 * Whether the current HTTP method requires CSRF verification.
+	 * Check whether the current request method requires verification.
 	 *
-	 * Reads the method from the request service and checks against
-	 * the protect_methods config list. Both sides are uppercased to
-	 * ensure case-insensitive matching regardless of request-layer behavior.
-	 *
-	 * @return bool True if the current method is in protect_methods.
+	 * @return bool  True when the method is in cfg security.csrf.protect_methods, in any letter case.
 	 */
 	public function isProtectedMethod(): bool {
 		return \in_array(\strtoupper($this->app->request->method()), $this->protectMethods, true);
@@ -528,13 +465,15 @@ class Csrf extends BaseService {
 	// ----------------------------------------------------------------
 
 	/**
-	 * Run all enabled defense layers in order.
+	 * Run the enabled checks in order and return the first rejection.
 	 *
-	 * @return ?CsrfFailureReason Null on success, reason enum on failure.
+	 * @return CsrfFailureReason|null  The reason, or null when every enabled check passes.
+	 * @throws \CitOmni\Http\Exception\CsrfException  When checkToken() finds a malformed session token.
+	 * @see \CitOmni\Http\Service\Csrf::verify()  The order of the checks.
 	 */
 	private function runVerification(): ?CsrfFailureReason {
-		// -- 1. Validate fetch metadata ------------------------------------
-		// Layer 1: Fetch Metadata (cheapest - header read + string compare).
+		// -- 1. Check Sec-Fetch-Site -------------------------------------
+		// The header checks come first: They cost no session read.
 		if ($this->fetchMetadataEnabled) {
 			$reason = $this->checkFetchMetadata();
 			if ($reason !== null) {
@@ -542,8 +481,7 @@ class Csrf extends BaseService {
 			}
 		}
 
-		// -- 2. Validate origin or referer ---------------------------------
-		// Layer 2: Origin/Referer (header read + origin compare).
+		// -- 2. Check Origin or Referer ----------------------------------
 		if ($this->originCheck) {
 			$reason = $this->checkOrigin();
 			if ($reason !== null) {
@@ -551,53 +489,49 @@ class Csrf extends BaseService {
 			}
 		}
 
-		// -- 3. Validate token ---------------------------------------------
-		// Layer 3: Token (session read + decode + hash_equals).
+		// -- 3. Check the token ------------------------------------------
 		return $this->checkToken();
 	}
 
 
 	/**
-	 * Layer 1: Validate Sec-Fetch-Site header.
-	 *
-	 * Browsers that do not send the header are silently skipped (null = pass).
-	 * This is intentional: the header is additive defense, not a hard gate.
+	 * Check the Sec-Fetch-Site header.
 	 *
 	 * Behavior:
-	 * - same-origin and none pass; same-site passes when allow_same_site is on.
-	 * - Any other value passes only when the Origin header is a trusted origin.
-	 *   Browsers send "cross-site" for every request from another site, so this is
-	 *   what makes a trusted_origins entry for another site usable.
+	 * - Passes when the header is absent or empty.
+	 * - Passes same-origin and none, and same-site when cfg security.csrf.fetch_metadata.allow_same_site
+	 *   is true. Values match in any letter case.
+	 * - Passes any other value only when the Origin header is a trusted origin. Browsers send
+	 *   cross-site for every request from another site, so this is what makes a trusted_origins
+	 *   entry for another site usable.
 	 *
-	 * @return ?CsrfFailureReason Null on pass, FetchMetadataRejected on fail.
+	 * @return CsrfFailureReason|null  FetchMetadataRejected, or null when the check passes.
 	 */
 	private function checkFetchMetadata(): ?CsrfFailureReason {
 		$site = $this->app->request->header('Sec-Fetch-Site');
 
-		// Header absent - browser doesn't support Fetch Metadata. Skip layer.
+		// The header is an extra defense, not a gate: Browsers without Fetch Metadata send none.
 		if ($site === null || $site === '') {
 			return null;
 		}
 
 		$site = \strtolower($site);
 
-		// same-origin: always safe.
 		if ($site === 'same-origin') {
 			return null;
 		}
 
-		// none: direct navigation, bookmarks, typed URL. Safe for form submits.
+		// none: The user started the request, by a bookmark or a typed URL.
 		if ($site === 'none') {
 			return null;
 		}
 
-		// same-site: configurable - safe for most setups, but some apps
-		// serving multiple subdomains may want to restrict this.
+		// Configurable, because an app may not trust every sibling subdomain.
 		if ($site === 'same-site' && $this->fetchMetadataAllowSameSite) {
 			return null;
 		}
 
-		// Other sites pass only from a trusted origin; layers 2 and 3 still apply.
+		// Other sites pass only from a trusted origin; the Origin and token checks still apply.
 		if ($this->requestOriginIsTrusted()) {
 			return null;
 		}
@@ -607,25 +541,31 @@ class Csrf extends BaseService {
 
 
 	/**
-	 * Layer 2: Validate Origin header (or Referer fallback).
+	 * Check that the request comes from its own origin or a trusted one.
 	 *
-	 * Compares full origins (scheme+host+port), not just hostnames.
-	 * Default ports (443 for HTTPS, 80 for HTTP) are stripped before comparison.
+	 * The browser sets Origin and Referer, so a page on another site cannot claim this
+	 * site's origin.
 	 *
 	 * Behavior:
-	 * - Origin present -> normalize and compare against request origin + trusted origins.
-	 * - Origin "null" (privacy redirect) -> treated as absent.
-	 * - Origin absent + HTTPS + referer fallback enabled -> extract origin from Referer, compare.
-	 * - Origin absent + HTTP + allow_missing_origin_on_http -> pass (dev/internal policy).
-	 * - Origin absent + no fallback applicable -> OriginMissing.
+	 * - An origin matches when it is the request's own origin, compared by scheme, host and
+	 *   port without the scheme's default port, or a trusted origin. Only http and https
+	 *   origins can match.
+	 * - An Origin header must match, or the result is OriginMismatch. An empty Origin and the
+	 *   Origin "null" count as absent.
+	 * - Without Origin on HTTPS: With cfg security.csrf.referer_fallback_on_https true, the
+	 *   origin of the Referer must match; RefererMissing without a Referer, RefererMismatch when
+	 *   it does not match. Otherwise OriginMissing.
+	 * - Without Origin on plain HTTP: Passes when cfg security.csrf.allow_missing_origin_on_http
+	 *   is true; otherwise OriginMissing.
 	 *
-	 * @return ?CsrfFailureReason Null on pass, specific reason on fail.
+	 * @return CsrfFailureReason|null  The reason, or null when the check passes.
+	 * @see \CitOmni\Http\Service\Csrf::isTrustedOrigin()  When an origin is trusted.
+	 * @see \CitOmni\Http\Service\Request::isHttps()  When a request counts as HTTPS.
 	 */
 	private function checkOrigin(): ?CsrfFailureReason {
 		$origin = $this->app->request->header('Origin');
 
-		// -- 1. Validate explicit Origin header -----------------------------
-		// Origin present and not the literal string "null" (sent by privacy-sensitive navigations).
+		// Privacy-sensitive navigations send the literal Origin "null".
 		if ($origin !== null && $origin !== '' && \strtolower($origin) !== 'null') {
 			$normalized = $this->normalizeOrigin($origin);
 			if ($normalized === null) {
@@ -636,7 +576,6 @@ class Csrf extends BaseService {
 				: CsrfFailureReason::OriginMismatch;
 		}
 
-		// -- 2. Handle HTTPS requests without Origin ------------------------
 		if ($this->app->request->isHttps()) {
 			if ($this->refererFallbackOnHttps) {
 				$referer = $this->app->request->header('Referer');
@@ -654,11 +593,9 @@ class Csrf extends BaseService {
 					: CsrfFailureReason::RefererMismatch;
 			}
 
-			// HTTPS, no referer fallback - cannot verify origin.
 			return CsrfFailureReason::OriginMissing;
 		}
 
-		// -- 3. Handle HTTP requests without Origin -------------------------
 		if ($this->allowMissingOriginOnHttp) {
 			return null;
 		}
@@ -668,26 +605,26 @@ class Csrf extends BaseService {
 
 
 	/**
-	 * Layer 3: Validate submitted token against session token.
+	 * Check the submitted token against the session token.
 	 *
-	 * Reads the submitted token from the header (headerName) first. If absent
-	 * and the request method is POST, falls back to the form field (fieldName).
-	 * For PUT/PATCH/DELETE, the header is the only accepted transport - PHP only
-	 * populates $_POST for POST requests.
+	 * The one check that always runs: Only a page that received the token from this session
+	 * can send it back.
 	 *
-	 * A form field that is not a string (PHP parses "_csrf[]=x" into an array)
-	 * fails as TokenInvalid.
+	 * Behavior:
+	 * - Reads the token from the header named by headerName; for POST without that header,
+	 *   from the form field named by fieldName.
+	 * - TokenMissing when no token is submitted or the session holds none.
+	 * - TokenInvalid when the submitted token is not a string or not in the format that
+	 *   cfg security.csrf.mask_tokens selects.
+	 * - TokenMismatch when it differs from the session token. The comparison takes constant time.
+	 * - Never creates a session, so a forged request does not create one either.
 	 *
-	 * Never starts a session: A request without one has no session token and fails
-	 * as TokenMissing, so a forged request does not create a session either.
-	 *
-	 * @return ?CsrfFailureReason Null on pass, specific reason on fail.
-	 * @throws CsrfException If the session token exists but is malformed (invariant violation).
+	 * @return CsrfFailureReason|null  The reason, or null when the tokens match.
+	 * @throws \CitOmni\Http\Exception\CsrfException  When a string token is submitted and the session token is neither null, '' nor token_bytes bytes in hex.
 	 */
 	private function checkToken(): ?CsrfFailureReason {
-		// -- 1. Load submitted token from header or POST --------------------
-		// Read submitted token: header first (all methods), then POST form field
-		// (POST only - PHP only populates $_POST for POST requests).
+		// -- 1. Read the submitted token ---------------------------------
+		// PHP fills $_POST only for POST, so other methods must use the header.
 		$submitted = $this->app->request->header($this->headerName);
 		if (
 			($submitted === null || $submitted === '')
@@ -705,16 +642,14 @@ class Csrf extends BaseService {
 			return CsrfFailureReason::TokenInvalid;
 		}
 
-		// -- 2. Load and validate session token -----------------------------
-		// Read session token.
+		// -- 2. Read the session token -----------------------------------
 		$sessionHex = $this->app->session->get($this->sessionKey);
 
 		if ($sessionHex === null || (\is_string($sessionHex) && $sessionHex === '')) {
 			return CsrfFailureReason::TokenMissing;
 		}
 
-		// Session token exists but is malformed - this is framework-state corruption,
-		// not a client-side submission error. Fail fast.
+		// A malformed session token is corrupted server state, not a client error.
 		if (
 			!\is_string($sessionHex)
 			|| \strlen($sessionHex) !== $this->tokenBytes * 2
@@ -725,15 +660,13 @@ class Csrf extends BaseService {
 
 		$sessionHex = \strtolower($sessionHex);
 
-		// -- 3. Normalize submitted token ----------------------------------
-		// Derive comparable hex from submitted token.
+		// -- 3. Decode the submitted token -------------------------------
 		if ($this->maskTokens) {
 			$submittedHex = $this->unmask($submitted);
 			if ($submittedHex === null) {
 				return CsrfFailureReason::TokenInvalid;
 			}
 		} else {
-			// Unmasked mode: validate submitted value is well-formed hex.
 			if (
 				\strlen($submitted) !== $this->tokenBytes * 2
 				|| !\ctype_xdigit($submitted)
@@ -743,7 +676,7 @@ class Csrf extends BaseService {
 			$submittedHex = \strtolower($submitted);
 		}
 
-		// -- 4. Compare in constant time -----------------------------------
+		// -- 4. Compare in constant time ---------------------------------
 		return \hash_equals($sessionHex, $submittedHex)
 			? null
 			: CsrfFailureReason::TokenMismatch;
@@ -760,12 +693,14 @@ class Csrf extends BaseService {
 	// ----------------------------------------------------------------
 
 	/**
-	 * Ensure a token exists in the session. Returns the raw hex string (lowercase).
+	 * Return the session token, and store a new one when the session holds no valid token.
 	 *
-	 * Validates that the stored value is a hex string of the expected length.
-	 * If missing, empty, wrong length, or non-hex: generates a fresh token.
+	 * Keeps a valid token, so forms issued earlier in the session stay valid.
 	 *
-	 * @return string Lowercase hex-encoded raw token.
+	 * Behavior:
+	 * - A stored value that is not tokenBytes bytes in hex is replaced, not reported.
+	 *
+	 * @return string  The token as lowercase hex.
 	 */
 	private function ensureSessionToken(): string {
 		$hex = $this->app->session->get($this->sessionKey);
@@ -784,11 +719,15 @@ class Csrf extends BaseService {
 
 
 	/**
-	 * Generate a new random token, store in session, return lowercase hex.
+	 * Store a new random token in the session and return it.
 	 *
-	 * Storing the token starts the session when there is none.
+	 * Creates the session secret that every issued token is derived from.
 	 *
-	 * @return string Lowercase hex-encoded raw token.
+	 * Behavior:
+	 * - Replaces any stored token, so every token issued before fails verification.
+	 * - Starts the session when there is none.
+	 *
+	 * @return string  The token as lowercase hex.
 	 */
 	private function generateToken(): string {
 		$hex = \bin2hex(\random_bytes($this->tokenBytes));
@@ -807,14 +746,12 @@ class Csrf extends BaseService {
 	// ----------------------------------------------------------------
 
 	/**
-	 * Mask a raw hex token with a random one-time pad.
+	 * Mask a token with a new random pad.
 	 *
-	 * Output format: base64(mask || (mask XOR raw_bytes)).
-	 * Length of mask equals tokenBytes. Total encoded payload is tokenBytes * 2.
-	 *
-	 * @param string $rawHex Lowercase hex-encoded raw token (from ensureSessionToken/generateToken).
-	 * @return string Base64-encoded masked token.
-	 * @throws CsrfException If the hex token cannot be decoded (should never happen with validated input).
+	 * @param  string  $rawHex  Token of tokenBytes bytes, as hex.
+	 * @return string  Base64 of the pad followed by the pad XOR the token bytes; 2 * tokenBytes bytes before encoding.
+	 * @throws \CitOmni\Http\Exception\CsrfException  When $rawHex is not valid hex.
+	 * @see \CitOmni\Http\Service\Csrf::unmask()  The inverse.
 	 */
 	private function mask(string $rawHex): string {
 		$raw = \hex2bin($rawHex);
@@ -827,10 +764,11 @@ class Csrf extends BaseService {
 
 
 	/**
-	 * Unmask a submitted masked token back to raw hex.
+	 * Recover the token from a masked token.
 	 *
-	 * @param string $masked Base64-encoded masked token.
-	 * @return ?string Lowercase hex-encoded raw token, or null on invalid format/length.
+	 * @param  string  $masked  Masked token as submitted.
+	 * @return string|null  The token as lowercase hex, or null when the input is not strict base64 of exactly 2 * tokenBytes bytes.
+	 * @see \CitOmni\Http\Service\Csrf::mask()  The format.
 	 */
 	private function unmask(string $masked): ?string {
 		$decoded = \base64_decode($masked, true);
@@ -860,14 +798,15 @@ class Csrf extends BaseService {
 	// ----------------------------------------------------------------
 
 	/**
-	 * Extract and normalize an origin from a URL or origin string.
+	 * Return the origin of a URL or origin string in a comparable form.
 	 *
-	 * Returns lowercase scheme://host (with :port appended only if non-default).
-	 * Accepts both full URLs (Referer) and bare origins (Origin header).
-	 * Only http and https schemes are accepted - others return null.
+	 * Behavior:
+	 * - Lowercase scheme://host, followed by :port only when the port is not the scheme's
+	 *   default (80 for http, 443 for https). Path, query and user info are dropped.
+	 * - An IPv6 host keeps its brackets, as parse_url() returns it.
 	 *
-	 * @param string $url URL or origin string.
-	 * @return ?string Normalized origin, or null if unparseable or non-HTTP scheme.
+	 * @param  string  $url  Full URL, such as a Referer, or an origin.
+	 * @return string|null  The origin, or null when the string has no scheme or host, or the scheme is not http or https.
 	 */
 	private function normalizeOrigin(string $url): ?string {
 		$parts = \parse_url($url);
@@ -898,18 +837,13 @@ class Csrf extends BaseService {
 
 
 	/**
-	 * Check if a normalized origin matches the request's own origin or any trusted origin.
+	 * Check whether an origin is the request's own origin or a trusted one.
 	 *
-	 * Matching order:
-	 * 1) Exact match against request's own normalized origin (scheme+host+port).
-	 * 2) Exact match against trusted full origins (entries configured with "://").
-	 * 3) Host-only match against trusted bare hostnames (entries configured without "://").
-	 *
-	 * @param string $origin Normalized origin (from normalizeOrigin()).
-	 * @return bool True if the origin is trusted.
+	 * @param  string  $origin  Origin as normalizeOrigin() returns it.
+	 * @return bool
+	 * @see \CitOmni\Http\Service\Csrf::isTrustedOrigin()  When an origin is trusted.
 	 */
 	private function originMatchesExpected(string $origin): bool {
-		// Exact match against request's own origin.
 		if ($origin === $this->getRequestOrigin()) {
 			return true;
 		}
@@ -919,22 +853,20 @@ class Csrf extends BaseService {
 
 
 	/**
-	 * Check if a normalized origin is configured in trusted_origins.
+	 * Check whether an origin is in cfg security.csrf.trusted_origins.
 	 *
-	 * Matching order:
-	 * 1) Exact match against trusted full origins (entries configured with "://").
-	 * 2) Host-only match against trusted bare hostnames (entries configured without "://").
+	 * Behavior:
+	 * - True when the origin equals a trusted full origin, or its host equals a trusted
+	 *   hostname, whatever its scheme and port.
 	 *
-	 * @param string $origin Normalized origin (from normalizeOrigin()).
-	 * @return bool True if the origin is a trusted origin.
+	 * @param  string  $origin  Origin as normalizeOrigin() returns it.
+	 * @return bool
 	 */
 	private function isTrustedOrigin(string $origin): bool {
-		// Exact match against configured full origins.
 		if (\in_array($origin, $this->trustedFullOrigins, true)) {
 			return true;
 		}
 
-		// Host-only fallback for bare hostname trusted entries.
 		if ($this->trustedHosts !== []) {
 			$host = \parse_url($origin, \PHP_URL_HOST);
 			if (\is_string($host) && \in_array(\strtolower($host), $this->trustedHosts, true)) {
@@ -947,10 +879,10 @@ class Csrf extends BaseService {
 
 
 	/**
-	 * Check if the request's Origin header names a trusted origin.
+	 * Check whether the request's Origin header names a trusted origin.
 	 *
-	 * @return bool False when no trusted origins are configured, or when Origin is
-	 *              absent, "null" or not an http(s) origin.
+	 * @return bool  False also when Origin is absent, "null" or not an http or https origin.
+	 * @see \CitOmni\Http\Service\Csrf::isTrustedOrigin()  When an origin is trusted.
 	 */
 	private function requestOriginIsTrusted(): bool {
 		if ($this->trustedFullOrigins === [] && $this->trustedHosts === []) {
@@ -968,11 +900,14 @@ class Csrf extends BaseService {
 
 
 	/**
-	 * Build and cache the request's own normalized origin (scheme://host[:port]).
+	 * Return the request's own origin, built once per instance.
 	 *
-	 * Reads from the request service which is proxy-aware (trusted proxies).
+	 * Behavior:
+	 * - Lowercase scheme://host, followed by :port only when the port is not the scheme's
+	 *   default and not 0.
 	 *
-	 * @return string Normalized origin string.
+	 * @return string
+	 * @see \CitOmni\Http\Service\Request::host()  How the host is resolved, behind a proxy too.
 	 */
 	private function getRequestOrigin(): string {
 		if ($this->requestOrigin !== null) {
@@ -1008,22 +943,21 @@ class Csrf extends BaseService {
 	// ----------------------------------------------------------------
 
 	/**
-	 * Log a CSRF verification failure via the log service.
+	 * Write one failure record to the log service.
+	 *
+	 * Leaves a trail of rejected requests without changing their outcome.
 	 *
 	 * Behavior:
-	 * - Writes one structured JSONL event when logging is enabled and the log service exists.
-	 * - Includes generic request/security context from failureLogContext().
-	 * - Merges caller-supplied context from verify()/requireValid() for adapter-specific
-	 *   details such as controller action, record id, or payload key names.
-	 * - Never adds CSRF token values to the log context itself.
-	 *   Caller-supplied context is written as provided and should not contain secrets.
-	 * - Silently returns if logging is disabled/unavailable and swallows log failures.
+	 * - Writes nothing unless cfg security.csrf.log_failures is true and the log service is
+	 *   registered.
+	 * - Writes category csrf.failure with the reason value as the message, to the file named by
+	 *   cfg security.csrf.log_channel.
+	 * - The context is failureLogContext() with the caller's keys added; a caller key never
+	 *   replaces a key of failureLogContext().
+	 * - Never throws: A failed write is dropped.
 	 *
-	 * Notes:
-	 * - Logging must never mask or change the CSRF verification result.
-	 *
-	 * @param CsrfFailureReason $reason  The specific failure reason.
-	 * @param array<string,mixed> $context  Additional developer-supplied log context.
+	 * @param  CsrfFailureReason    $reason
+	 * @param  array<string,mixed>  $context  Caller context, written as given.
 	 * @return void
 	 */
 	private function logFailure(CsrfFailureReason $reason, array $context = []): void {
@@ -1040,20 +974,20 @@ class Csrf extends BaseService {
 			);
 
 		} catch (\Throwable) {
-			// Logging failure must not mask the CSRF verification result.
+			// A failed log write must not replace the verification result.
 		}
 	}
 
 
 	/**
-	 * Build generic, non-secret log context for a CSRF verification failure.
+	 * Return the request fields of a failure record.
 	 *
 	 * Behavior:
-	 * - Captures request metadata that is useful when investigating rejected requests.
-	 * - Records both transport-facing and app-facing paths when supported by Request.
-	 * - Includes CSRF field/header names, but never submitted token values or session token values.
+	 * - Holds the token's field and header names, never a token value.
+	 * - path_raw falls back to the URI, and path_from_app_root to null, when the request service
+	 *   lacks pathRaw() or pathFromAppRoot().
 	 *
-	 * @return array<string,mixed> Generic CSRF failure log context.
+	 * @return array{method:string,uri:string,path_raw:string,path_from_app_root:?string,ip:string,referer:?string,user_agent:?string,origin:?string,sec_fetch_site:?string,content_type:?string,field_name:string,header_name:string}
 	 */
 	private function failureLogContext(): array {
 		$pathRaw = \method_exists($this->app->request, 'pathRaw')

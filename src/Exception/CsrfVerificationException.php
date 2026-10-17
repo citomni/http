@@ -19,21 +19,25 @@ use CitOmni\Http\Enum\CsrfFailureReason;
 
 
 /**
- * CsrfVerificationException: Thrown when a CSRF verification check fails.
+ * CsrfVerificationException: Exception for a request that a CSRF check rejected.
  *
- * Carries a CsrfFailureReason enum that identifies the exact defense layer
- * and failure mode. The reason is available for logging, debugging, and
- * structured error responses without parsing message strings.
+ * Lets callers tell a rejected request from a server-side CSRF failure, and tells them why in
+ * a machine-readable reason, so an adapter can map it to a response without parsing the
+ * message. Choosing that response belongs to the adapter.
  *
- * Typical usage:
- *   try {
- *       $this->app->csrf->requireValid();
- *   } catch (CsrfVerificationException $e) {
- *       $reason = $e->reason; // CsrfFailureReason::TokenMismatch etc.
- *   }
+ * Rules:
+ * - Carry the reason as a CsrfFailureReason, never only in the message.
  */
 class CsrfVerificationException extends CsrfException {
 
+	/**
+	 * Create the exception with the reason for the rejection.
+	 *
+	 * @param  CsrfFailureReason  $reason    Why the request was rejected.
+	 * @param  string             $message   Human-readable message; '' gives "CSRF verification failed: " followed by the reason value.
+	 * @param  int                $code
+	 * @param  \Throwable|null    $previous  Lower-layer cause, when translated.
+	 */
 	public function __construct(public readonly CsrfFailureReason $reason, string $message = '', int $code = 0,	?\Throwable $previous = null) {
 		parent::__construct(
 			$message !== '' ? $message : 'CSRF verification failed: ' . $reason->value,

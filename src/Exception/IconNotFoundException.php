@@ -16,21 +16,16 @@ declare(strict_types=1);
 namespace CitOmni\Http\Exception;
 
 /**
- * IconNotFoundException: Requested icon file or icon id was not found.
+ * IconNotFoundException: Exception for an icon file or icon id that does not exist.
  *
- * Thrown when the icon service cannot resolve a requested icon resource from
- * the given id, file, and layer.
+ * Lets a caller tell a missing icon from a malformed one. It marks a reference to an icon
+ * that its layer does not ship, a mistake in code, not in the request: Let it reach the global
+ * error handler. Code for which an icon is optional checks with Icon::has() first.
  *
- * Behavior:
- * - Used when the icon file itself is missing.
- * - Used when the icon file exists, but the requested id is not defined.
- *
- * Notes:
- * - Missing icons are treated as developer errors and should fail fast.
- * - Optional icon checks should use Icon::has() before calling Icon::get().
- *
- * Typical usage:
- *   throw new IconNotFoundException('Icon "home" not found.');
+ * Rules:
+ * - Never use it for an icon file or value that exists but is malformed: That is
+ *   IconConfigException.
+ * - Name the icon file and the layer in the message, so it points at the reference to fix.
  */
 class IconNotFoundException extends \RuntimeException {
 }

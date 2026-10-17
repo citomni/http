@@ -15,30 +15,22 @@ declare(strict_types=1);
 
 namespace CitOmni\Http\Boot;
 
+/**
+ * Registry: Boot contributions of citomni/http, the HTTP mode baseline.
+ *
+ * Declares the services, cfg baseline and routes of HTTP mode as constant arrays. Merging them
+ * with providers and the app, and deciding what wins, belongs to the kernel.
+ *
+ * Rules:
+ * - Constants only: No IO, no runtime branching and no environment reads.
+ * - Ship a baseline for every cfg path of its own that the package reads, with a comment on
+ *   what each key controls and its unit.
+ * - Ship defaults that are safe in every environment.
+ */
 class Registry {
 	
 
-	/**
-	 * Vendor baseline service map for HTTP mode.
-	 *
-	 * Behavior:
-	 * - This is tier 1 in the deterministic HTTP service map merge:
-	 *   1) Vendor baseline: \CitOmni\Http\Boot\Registry::MAP_HTTP
-	 *   2) Providers: /config/providers.php (MAP_COMMON, then MAP_HTTP)
-	 *   3) App common map: /config/services.php
-	 *   4) App HTTP map: /config/services_http.php
-	 * - Service merge semantics use PHP array union (`+`) with each later
-	 *   source placed on the left, so later sources override earlier sources.
-	 *
-	 * Notes:
-	 * - Service IDs are resolved via $this->app->{id}.
-	 * - Services are instantiated lazily and kept as singletons per request/process.
-	 * - Definitions must be either:
-	 *   - 'id' => FQCN
-	 *   - 'id' => ['class' => FQCN, 'options' => [...]]
-	 * - /config/services_http.php has highest precedence in HTTP mode, followed by
-	 *   /config/services.php, providers, and the vendor baseline.
-	 */
+	/** Services for HTTP. */
 	public const array MAP_HTTP = [
 
 		'errorHandler'	=> \CitOmni\Http\Service\ErrorHandler::class,
@@ -49,9 +41,7 @@ class Registry {
 		'flash'			=> \CitOmni\Http\Service\Flash::class,
 		'datetime'		=> \CitOmni\Http\Service\Datetime::class,
 		'cookie'		=> \CitOmni\Http\Service\Cookie::class,
-		// 'view'		=> \CitOmni\Http\Service\View::class,  // Replaced by TemplateEngine, but kept for now for back compat
 		'tplEngine'		=> \CitOmni\Http\Service\TemplateEngine::class,
-		// 'security'		=> \CitOmni\Http\Service\Security::class,   // Replaced by the newer CSRF-service, but kept for now for back compat
 		'csrf'			=> \CitOmni\Http\Service\Csrf::class,
 		'captcha'		=> \CitOmni\Http\Service\Captcha::class,
 		'nonce'			=> \CitOmni\Http\Service\Nonce::class,
@@ -69,98 +59,36 @@ class Registry {
 
 
 
-	/**
-	 * Vendor baseline configuration for HTTP mode.
-	 *
-	 * Behavior:
-	 * - This is tier 1 in the deterministic HTTP config merge:
-	 *   1) Vendor baseline: \CitOmni\Http\Boot\Registry::CFG_HTTP
-	 *   2) Providers: /config/providers.php (CFG_COMMON, then CFG_HTTP)
-	 *   3) App common: /config/citomni_cfg.php
-	 *   4) App HTTP: /config/citomni_http_cfg.php
-	 *   5) App common env: /config/citomni_cfg.{ENV}.php
-	 *   6) App HTTP env: /config/citomni_http_cfg.{ENV}.php
-	 * - Config merge semantics are deep associative merge with last wins.
-	 *
-	 * Notes:
-	 * - The baseline must contain the stable top-level HTTP config tree expected by
-	 *   CitOmni\Http services and controllers.
-	 * - CITOMNI_APP_PATH must be defined before boot.
-	 * - In stage/prod, prefer an explicit absolute http.base_url (or
-	 *   CITOMNI_PUBLIC_ROOT_URL where that policy is used).
-	 * - Providers may extend or override this baseline, and the application layer
-	 *   remains the final authority.
-	 */
+	/** Cfg baseline for HTTP. */
 	public const array CFG_HTTP = [
 
-		/*
-		 *------------------------------------------------------------------
-		 * HTTP SETTINGS (bootstrap policy & runtime toggles)
-		 *------------------------------------------------------------------
-		 *
-		 * CITOMNI_PUBLIC_ROOT_URL / http.base_url
-		 * - Base URL resolution is prioritized as:
-		 *     1) CITOMNI_PUBLIC_ROOT_URL (constant; if defined and non-empty)
-		 *     2) http.base_url (absolute URL, no trailing slash)
-		 *     3) Best-effort computed from the current request (scheme/host/port)
-		 * - Kernel policy:
-		 *     DEV:
-		 *       * If http.base_url is absolute, it is used.
-		 *       * Otherwise Kernel auto-detects from server vars (optionally proxy-aware).
-		 *     STAGE/PROD (non-DEV):
-		 *       * Require an absolute http.base_url (no trailing slash).
-		 *       * Missing/invalid -> RuntimeException (fail fast).
-		 *
-		 * trust_proxy (bool)
-		 * - When true, Request may honor proxy headers for scheme/host/port/client IP,
-		 *   but ONLY if the peer (REMOTE_ADDR) is trusted per http.trusted_proxies.
-		 * - Keep false by default; enable only behind a trusted reverse proxy/LB.
-		 *
-		 * trusted_proxies (array of CIDR/IP)
-		 * - Allowlist used by Request to decide whether to accept proxy-provided values.
-		 * - The current peer (REMOTE_ADDR) must match one of these entries for
-		 *   proxy headers to be considered.
-		 * - IMPORTANT: An empty list means "trust NO proxies". There is no "trust all" mode.
-		 * - An entry that is not a valid IP or CIDR (e.g., a missing or non-decimal mask)
-		 *   matches nothing.
-		 * - Examples: ['10.0.0.0/8', '192.168.0.0/16', '::1']
-		 *
-		 * Proxy headers considered (when trust_proxy=true AND REMOTE_ADDR is trusted):
-		 * - Scheme:   Forwarded: proto=..., X-Forwarded-Proto, X-Forwarded-SSL,
-		 *             X-Forwarded-Scheme, Front-End-Https, X-URL-Scheme, CF-Visitor
-		 * - Host:     X-Forwarded-Host (first), or Forwarded: host=... (first hop)
-		 * - Port:     X-Forwarded-Port (>0), or parsed from Forwarded host token
-		 * - Client IP: X-Forwarded-For, read from the right. Entries are skipped while they
-		 *   are trusted proxies; the first other entry is the client, and everything to its
-		 *   left (supplied by the client) is ignored. Without X-Forwarded-For: REMOTE_ADDR.
-		 *   A private/reserved result becomes "unknown".
-		 * - List every proxy in the chain (load balancer, CDN ranges). The first unlisted
-		 *   proxy is taken as the client.
-		 *
-		 * router_case_insensitive (bool)
-		 * - When true, Router:
-		 *     1) strips base prefix case-insensitively,
-		 *     2) matches exact routes through a lowered key map,
-		 *     3) compiles regex routes with the 'i' flag.
-		 * - Intended for local Windows/XAMPP convenience. Default false (recommended
-		 *   for STAGE/PROD). When false, paths are case-sensitive (conventional).
-		 *
-		 * Notes
-		 * - Never include a trailing slash in http.base_url.
-		 * - Prefer lowercase URL paths in your app to avoid cross-OS surprises.
-		 * - Request enforces an ASCII-only guard for paths (defense in depth).
-		 */
 		'http' => [
-			'base_url'                => '',          // Absolute public base URL without trailing slash, e.g. https://www.example.com. Empty: DEV auto-detects it; non-DEV needs it unless CITOMNI_PUBLIC_ROOT_URL is defined.
-			'trust_proxy'             => false,       // Enable only behind a trusted proxy/LB listed below.
-			'trusted_proxies'         => ['10.0.0.0/8', '192.168.0.0/16', '::1'], // Empty list means; trust NO proxies.
-			'router_case_insensitive' => false,       // Local dev convenience; keep false in STAGE/PROD.
+			// Public root URL of the app, absolute and without a trailing slash, such as
+			// https://www.example.com. '' derives it from the request in dev; in any other
+			// environment, boot then fails unless the constant CITOMNI_PUBLIC_ROOT_URL is defined.
+			'base_url'                => '',
+
+			// true lets proxy headers, such as Forwarded and X-Forwarded-*, set the scheme,
+			// host, port and client IP of a request; Request takes them only from a peer in
+			// trusted_proxies. When dev derives the public root URL from the request, the
+			// X-Forwarded headers count from any peer. Enable it only behind a reverse proxy or
+			// load balancer.
+			'trust_proxy'             => false,
+
+			// IP addresses and CIDR ranges, IPv4 or IPv6, of the proxies whose headers are
+			// trusted; [] trusts none, and an invalid entry matches nothing. List every proxy
+			// of the chain, such as the load balancer and the CDN ranges.
+			'trusted_proxies'         => ['10.0.0.0/8', '192.168.0.0/16', '::1'],
+
+			// true matches request paths in any letter case, for routes and fetch_metadata
+			// exemptions alike. A local development convenience; keep false in stage and prod.
+			'router_case_insensitive' => false,
 
 			// Slugger policy. Service-map options of the slugger service override each key.
 			'slug' => [
-				'separator'      => '-',               // Text that replaces disallowed characters and joins words.
+				'separator'      => '-',               // Text that replaces disallowed characters and joins words; not empty.
 				'lowercase'      => true,              // Lowercase slugs; validate() then rejects uppercase.
-				'maxLength'      => 140,               // Maximum slug length in bytes; slugify() shortens longer slugs, validate() rejects them.
+				'maxLength'      => 140,               // Maximum slug length in bytes, at least 1; slugify() shortens longer slugs, validate() rejects them.
 				'transliterate'  => true,              // Transliterate to ASCII before disallowed characters are replaced.
 				'reserved'       => [],                // Slugs that validate() rejects, compared case-insensitively.
 				'allowedPattern' => '/[^a-z0-9\-]+/i', // PCRE that matches the disallowed characters slugify() replaces with the separator.
@@ -168,762 +96,351 @@ class Registry {
 
 			// Tags policy. Service-map options of the tags service override each key.
 			'tags' => [
-				'delimiters'         => [',', ';'],    // Label separators for parse(): one entry splits on that string, several split on each of their characters.
-				'maxLabelLength'     => 80,            // Maximum label length in characters; validateLabel() rejects longer labels.
+				'delimiters'         => [',', ';'],    // Label separators for parse(), at least one: One entry splits on that string, several split on each of their characters.
+				'maxLabelLength'     => 80,            // Maximum label length in characters, at least 1; validateLabel() rejects longer labels.
 				'caseMode'           => 'preserve',    // Label casing: preserve, title (each word capitalized, the rest lowercased) or lower.
 				'collapseWhitespace' => true,          // Replace runs of whitespace in a label with one space.
 				'disallowedPattern'  => null,          // PCRE that makes validateLabel() reject a label when it matches; null for none.
-				'maxTagsPerEntity'   => null,          // Maximum labels parse() returns; null for no limit.
+				'maxTagsPerEntity'   => null,          // Maximum labels parse() returns, at least 1; null for no limit.
 			],
 		],
 
 
-		/*
-		 *------------------------------------------------------------------
-		 * ERROR HANDLER (HTTP)
-		 *------------------------------------------------------------------
-		 *
-		 * Not configurable:
-		 *   - These are logged (JSONL with size-based rotation) and rendered whatever render.trigger
-		 *     and log.trigger say:
-		 *       * Uncaught exceptions,
-		 *       * Shutdown fatals (E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR, E_USER_ERROR),
-		 *       * Terminal request/router HTTP errors (413/404/405/5xx via httpError(...)).
-		 *   - Both are best effort: A full disk or a process killed from outside can still lose
-		 *     the record or the response.
-		 *
-		 * Rendering of non-fatal PHP errors (warnings/notices/etc.) is optional and generally
-		 * only desirable in DEV. Therefore the baseline keeps it OFF; enable in your dev overlay.
-		 *
-		 * Templates:
-		 *   - Optional: Plain-PHP files receiving $data with:
-		 *       language, status, status_text, error_id, title, message, details|null, request_id, year
-		 *   - If missing/unreadable, the handler falls back to a built-in minimal HTML page.
-		 */
+		// The errorHandler service; its service-map options override any key. Uncaught
+		// exceptions, fatal errors and httpError() are logged and rendered whatever the
+		// triggers say; the triggers cover only non-fatal PHP errors.
 		'error_handler' => [
 
 			'render' => [
 
-				/*
-				 * Which non-fatal PHP errors (bitmask) should trigger **rendering**?
-				 * - 0 (baseline): do not render non-fatal errors (prod/stage-friendly).
-				 * - The active PHP error_reporting() mask is honored first.
-				 * - DO NOT include fatal classes (E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR, E_USER_ERROR).
-				 *   The handler will sanitize those away even if misconfigured.
-				 *
-				 * Typical DEV overlay:
-				 *   E_WARNING | E_NOTICE | E_CORE_WARNING | E_COMPILE_WARNING
-				 * | E_USER_WARNING | E_USER_NOTICE | E_RECOVERABLE_ERROR
-				 * | E_DEPRECATED | E_USER_DEPRECATED
-				 */
+				// Bitmask of the non-fatal PHP error levels that end the request with an error
+				// response, within error_reporting(); 0 for none. Fatal levels in the mask are
+				// ignored. Usually set only in a dev overlay, such as to E_ALL.
 				'trigger' => 0,
 
 				'detail' => [
 
-					/*
-					 * How much detail to show to the client?
-					 * 0 = minimal client message (prod/stage).
-					 * 1 = developer details (stack traces, structured context) – ONLY active when
-					 *     CITOMNI_ENVIRONMENT === 'dev'. In non-dev envs this behaves as 0.
-					 *
-					 * This flag gates client-facing detail only; logging is never gated by it.
-					 * (Logged exception traces are still bounded by the 'trace' caps below.)
-					 */
+					// What a client sees of an error beyond its status: 0 no internals; 1 or
+					// more also exception and PHP error messages, the log record and the
+					// httpError() context, but only when CITOMNI_ENVIRONMENT is 'dev'. Logging
+					// does not depend on it.
 					'level' => 0,
 
-					/*
-					 * Trace formatting limits. These caps ALWAYS bound the trace written to the
-					 * exception log (http_err_exception.jsonl), in every environment - they are the
-					 * only control over logged trace depth/size. The value caps apply only when
-					 * log.trace_args lets argument values in. detail.level + 'dev' additionally
-					 * gate whether the same bounded exception trace is exposed to the client; they
-					 * do not widen the caps.
-					 */
+					// Limits of every exception trace, in the log and in the developer detail.
+					// max_arg_strlen and max_depth apply to argument values, which only
+					// log.trace_args lets in.
 					'trace' => [
-						'max_frames'      => 120,   // Maximum number of frames included in traces.
-						'max_arg_strlen'  => 512,   // Maximum characters shown per string argument.
-						'max_array_items' => 20,    // Maximum array items per level.
-						'max_depth'       => 3,     // Maximum recursion depth when dumping arrays/objects.
-						'ellipsis'        => '...', // Ellipsis marker for truncated strings/arrays.
+						'max_frames'      => 120,   // Maximum number of frames in a trace.
+						'max_arg_strlen'  => 512,   // Maximum bytes shown of a string argument value.
+						'max_array_items' => 20,    // Maximum arguments shown per frame, and items per array value.
+						'max_depth'       => 3,     // Maximum nesting depth shown of an argument value.
+						'ellipsis'        => '...', // Marker for what a limit cut off an argument list or value.
 					],
 				],
 
-				/*
-				 * Optional override of PHP error_reporting() at install time.
-				 * - null respects the current runtime settings.
-				 * - In dev overlay you typically set this to E_ALL.
-				 */
 				'force_error_reporting' => null, // Int mask that install() passes to error_reporting(); null keeps the current level.
 			],
 
 			'log' => [
 
-				/*
-				 * Which non-fatal PHP errors (bitmask) should be **logged**?
-				 * - Baseline: allow all active non-fatal PHP errors through the log mask (E_ALL).
-				 * - The active PHP error_reporting() mask is honored first.
-				 * - Exceptions, shutdown fatals and terminal HTTP errors are logged independently
-				 *   of this mask.
-				 * - Router errors use separate files:
-				 *   http_router_404.jsonl, http_router_405.jsonl, http_router_5xx.jsonl,
-				 *   http_router_other.jsonl
-				 * - HTTP errors with context source 'request' use http_request.jsonl.
-				 */
+				// Bitmask of the non-fatal PHP error levels that are logged, within
+				// error_reporting(); 0 for none.
 				'trigger'   => E_ALL,
 
-				/*
-				 * Whether logged exception traces include argument values (bool).
-				 * - false (baseline): Each argument is logged as its type, such as string(15) or
-				 *   array(3), never its value. Arguments can carry passwords and tokens, and PHP
-				 *   keeps them in traces unless zend.exception_ignore_args is on.
-				 * - true: Values are logged within the render.detail.trace caps. Suits dev only.
-				 */
+				// true logs the values of trace arguments, within render.detail.trace; false
+				// logs only their types, such as string(15) or array(3). Values can hold
+				// passwords and tokens, so true suits dev only.
 				'trace_args' => false,
 
-				/*
-				 * Log directory (absolute). Files are JSONL with size-guarded rotation.
-				 * An empty or whitespace-only value falls back to CITOMNI_APP_PATH . '/var/logs'.
-				 * Rotation strategy: sidecar lock + copy+truncate; rotated files are timestamped.
-				 * Retention: see 'max_files' below (live file is never deleted by prune()).
-				 */
-				'path'      => \CITOMNI_APP_PATH . '/var/logs',
+				'path'      => \CITOMNI_APP_PATH . '/var/logs', // Absolute directory of the JSONL error logs, created when missing; empty or whitespace means CITOMNI_APP_PATH . '/var/logs'.
 
-				/*
-				 * Rotate before the next write would exceed this many bytes.
-				 * A single record larger than this is written whole (an empty live file is not rotated).
-				 * Keep conservative to protect disk on shared hosts.
-				 */
-				'max_bytes' => 2_000_000, // ~2 MB
+				// Bytes a live log file may grow to: A write that would pass it rotates the
+				// file first. One larger record is still written whole. Keep it low on shared
+				// hosts.
+				'max_bytes' => 2_000_000,
 
-				/*
-				 * Maximum number of rotated files to keep per base (live file excluded); 0 keeps all.
-				 * Example: Keep the last 10 http_err_exception.<timestamp>.jsonl rotations.
-				 */
-				'max_files' => 10,
+				'max_files' => 10, // Rotated files kept per log file, the live file not counted; 0 keeps all.
 			],
 
 			'templates' => [
 
-				/*
-				 * Optional primary HTML template for error pages (plain PHP).
-				 * If missing/unreadable, the handler tries 'html_failsafe', then falls back inline.
-				 */
+				// Plain PHP template of the HTML error page, which gets the page values in
+				// $data; null or '' for none. When it is missing or throws, html_failsafe is
+				// tried, then a built-in page.
 				'html'          => __DIR__ . '/../../templates/errors/error.php',
 
-				/*
-				 * Optional failsafe HTML template (plain PHP). Leave null to skip.
-				 */
-				'html_failsafe' => __DIR__ . '/../../templates/errors/error_failsafe.php',
+				'html_failsafe' => __DIR__ . '/../../templates/errors/error_failsafe.php', // Plain PHP template tried when html fails; null or '' for none.
 			],
 
 			'status_defaults' => [
-
-				/*
-				 * Default HTTP status codes used by the handler when a specific mapping is not set.
-				 * - 'exception' and 'shutdown' are almost always 500.
-				 * - 'php_error' applies when rendering non-fatal PHP errors (usually only in dev).
-				 */
-				'exception' => 500,
-				'shutdown'  => 500,
-				'php_error' => 500,
+				'exception' => 500, // HTTP status of the response to an uncaught exception.
+				'shutdown'  => 500, // HTTP status of the response to a fatal error.
+				'php_error' => 500, // HTTP status of the response to a non-fatal PHP error that render.trigger covers.
 			],
 		],
 
 
-		/*
-		 *------------------------------------------------------------------
-		 * SESSION
-		 *------------------------------------------------------------------
-		 *
-		 * Storage:
-		 * - gc_maxlifetime is how long PHP keeps idle session data (storage
-		 *   retention), not a login lifetime. citomni/authenticate raises it to
-		 *   its idle timeout.
-		 * - gc_probability/gc_divisor is the chance per session start that PHP
-		 *   collects garbage. It is set explicitly because Debian and Ubuntu ship
-		 *   gc_probability=0 and clean only their php.ini save paths from cron,
-		 *   never this save_path. Use 0 only when a scheduled job cleans save_path.
-		 *
-		 * Session cookie:
-		 * - The attributes come from Cookie::attributes() (cfg.cookie). A
-		 *   non-null cookie_* value overrides one attribute for the session
-		 *   cookie only. cookie_domain '' forces host-only even when cookie.domain
-		 *   is set.
-		 * - cookie_httponly stays true whatever cookie.httponly says: Scripts
-		 *   must not read the session id.
-		 * - The lifetime is always 0 (until the browser closes).
-		 *
-		 * Removed:
-		 * - rotate_interval and fingerprint. Session throws when either is still
-		 *   enabled in an application or provider config.
-		 */
-
+		// PHP's native session, as the session service starts it.
 		'session' => [
 			// Storage
-			'name'                    => 'CITSESSID',
-			'save_path'               => CITOMNI_APP_PATH . '/var/state/php_sessions',
-			'gc_maxlifetime'          => 1440,      // Seconds PHP keeps idle session data.
-			'gc_probability'          => 1,         // With gc_divisor: GC chance per session start (1/1000).
+			'name'                    => 'CITSESSID', // Name of the session cookie; '' keeps PHP's session.name.
+			'save_path'               => CITOMNI_APP_PATH . '/var/state/php_sessions', // Directory of the session files, created when missing; '' keeps PHP's session.save_path.
+
+			// Seconds of inactivity after which PHP may delete the data of a session. It is
+			// storage retention, not a login lifetime: A login that may stay idle longer needs a
+			// higher value.
+			'gc_maxlifetime'          => 1440,
+
+			// gc_probability / gc_divisor is the chance per session start that PHP deletes
+			// expired session data. Set explicitly: Debian and Ubuntu ship gc_probability 0 and
+			// clean only the save paths of their php.ini from cron, never this save_path. Set
+			// gc_probability to 0 only when a scheduled job cleans save_path.
+			'gc_probability'          => 1,
 			'gc_divisor'              => 1000,
-			'use_strict_mode'         => true,
-			'use_only_cookies'        => true,
-			'lazy_write'              => true,
 
-			// Session cookie overrides; null takes the attribute from cfg.cookie
-			'cookie_secure'           => null,      // null: As cookie.secure (inferred when that is null too)
-			'cookie_httponly'         => true,      // Pinned: Scripts must not read the session id.
-			'cookie_samesite'         => null,      // null: As cookie.samesite. 'Lax'|'Strict'|'None' (None requires Secure)
-			'cookie_path'             => null,      // null: As cookie.path
-			'cookie_domain'           => null,      // null: As cookie.domain; '' forces host-only
+			'use_strict_mode'         => true,      // PHP session.use_strict_mode: true replaces a session id that storage does not know with a new one.
+			'use_only_cookies'        => true,      // PHP session.use_only_cookies: true takes the session id only from the cookie, never from the URL.
+			'lazy_write'              => true,      // PHP session.lazy_write: true writes session data only when it changed.
+
+			// Session cookie overrides; null takes the attribute from cfg cookie.
+			'cookie_secure'           => null,      // Secure: true or false; null: As cookie.secure.
+			'cookie_httponly'         => true,      // HttpOnly: true keeps scripts from reading the session id, whatever cookie.httponly says; null: As cookie.httponly.
+			'cookie_samesite'         => null,      // SameSite: 'Lax', 'Strict' or 'None' (None requires Secure); null: As cookie.samesite.
+			'cookie_path'             => null,      // Path; null: As cookie.path.
+			'cookie_domain'           => null,      // Domain; null: As cookie.domain; '' makes the session cookie host-only even when cookie.domain is set.
 		],
 
 
-		/*
-		 *------------------------------------------------------------------
-		 * COOKIE
-		 *------------------------------------------------------------------
-		 *
-		 * Default attributes of every cookie, the session cookie included (see
-		 * Cookie::attributes()).
-		 *
-		 * - secure null infers: True when http.base_url or CITOMNI_PUBLIC_ROOT_URL
-		 *   is https, or when the request is HTTPS (proxy-aware).
-		 * - domain null is host-only: No Domain attribute, so the browser returns
-		 *   the cookie only to the host that set it. A domain shares the cookie
-		 *   with every subdomain; set one only for that purpose. Earlier versions
-		 *   derived it from http.base_url.
-		 * - samesite accepts Lax, Strict or None; anything else throws.
-		 */
-
+		// Default attributes of the cookies that the cookie service sets, and of the session
+		// cookie. Service-map options of the cookie service override each key.
 		'cookie' => [
-			'secure'   => null,     // null: Inferred; true|false: Explicit
-			'httponly' => true,
-			'samesite' => 'Lax',
-			'path'     => '/',
-			'domain'   => null,     // null: Host-only. 'example.com' shares the cookies with its subdomains.
+			'secure'   => null,     // Secure attribute: true or false; null sets it when the site uses HTTPS by its configured URL or by the request.
+			'httponly' => true,     // HttpOnly attribute: true keeps the cookie from scripts.
+			'samesite' => 'Lax',    // SameSite attribute: 'Lax', 'Strict' or 'None', in any case; None requires secure.
+			'path'     => '/',      // Path attribute; null or '' means '/'.
+
+			// Domain attribute. null or '': Host-only, so the browser returns the cookie only to
+			// the host that set it. A domain such as 'example.com' shares the cookie with every
+			// subdomain; set one only for that purpose.
+			'domain'   => null,
 		],
 
 
-		/*
-		 *------------------------------------------------------------------
-		 * SECURITY
-		 *------------------------------------------------------------------
-		 */
+		// Protection of requests against forgery and bots.
 		'security' => [
 
-			// Global Fetch Metadata policy: Kernel::run() rejects disallowed request contexts
-			// (403) before maintenance and routing. Decisions: Policy\FetchMetadataPolicy.
-			// Independent of security.csrf.fetch_metadata, which only runs inside CSRF verification.
+			// Fetch Metadata check of every request: A request that FetchMetadataPolicy refuses
+			// under these keys gets 403. Separate from csrf.fetch_metadata, which applies only
+			// within CSRF verification.
 			'fetch_metadata' => [
-				'enabled'         => false, // Off for existing apps; enable per app.
-				'allow_same_site' => false, // true trusts sibling subdomains (Sec-Fetch-Site: same-site).
-				'allow_missing'   => true,  // Requests without (or with an unknown) Sec-Fetch-Site: old browsers, server-to-server calls such as signed webhooks.
-				'exempt'          => [],    // Named rules: 'name' => ['path' => '/x', 'match' => 'exact'|'prefix', 'methods' => ['GET', 'HEAD']]; false removes an inherited rule.
+				'enabled'         => false, // true turns the check on.
+				'allow_same_site' => false, // true allows Sec-Fetch-Site same-site, which trusts sibling subdomains.
+				'allow_missing'   => true,  // true allows requests without Sec-Fetch-Site or with an unknown value: Old browsers, and server-to-server calls such as signed webhooks.
+
+				// Named rules that let a request through by path and method. A rule:
+				//   'name' => ['path' => '/x', 'match' => 'exact'|'prefix', 'methods' => ['GET']]
+				// false as the rule removes an inherited rule of that name.
+				'exempt'          => [],
 			],
 		
 			'csrf' => [
-				'enabled'                      => true,                              // Enable or disable CSRF protection globally.
-				'field_name'                   => '_csrf',                           // Hidden form field name used for CSRF token submission.
-				'header_name'                  => 'X-CSRF-Token',                    // HTTP header name used by AJAX/API clients to submit the CSRF token.
-				'session_key'                  => '_csrf',                           // Session key where the raw CSRF token is stored.
-				'token_bytes'                  => 32,                                // Number of random bytes used when generating a new CSRF token.
-				'protect_methods'              => ['POST', 'PUT', 'PATCH', 'DELETE'], // HTTP methods that require CSRF verification.
+				'enabled'                      => true,                              // true verifies the requests of protect_methods; false lets every request pass.
+				'field_name'                   => '_csrf',                           // Form field that carries the token in a POST body.
+				'header_name'                  => 'X-CSRF-Token',                    // Request header that carries the token; it wins over the form field.
+				'session_key'                  => '_csrf',                           // Session key of the token.
+				'token_bytes'                  => 32,                                // Random bytes per token; at least 16.
+				'protect_methods'              => ['POST', 'PUT', 'PATCH', 'DELETE'], // HTTP methods whose requests are verified; other methods pass.
 
-				'origin_check'                 => true,                              // Enable Origin/Referer validation as an additional CSRF defense layer.
-				'referer_fallback_on_https'    => true,                              // Use Referer validation on HTTPS requests when the Origin header is missing.
-				'allow_missing_origin_on_http' => true,                              // Allow missing Origin header on plain HTTP requests (useful for local/dev setups).
-				'trusted_origins'              => [],                                // Additional trusted origins or hostnames allowed by Origin/Referer validation; requests from them also pass fetch metadata.
+				'origin_check'                 => true,                              // true also checks Origin, or Referer, against the request's own origin and trusted_origins.
+				'referer_fallback_on_https'    => true,                              // true checks the Referer like Origin when an HTTPS request has no Origin; false rejects such a request.
+				'allow_missing_origin_on_http' => true,                              // true lets a plain HTTP request without Origin pass the origin check.
+
+				// Other sites whose requests pass the origin check and csrf.fetch_metadata: A
+				// full origin such as 'https://app.example.com' matches exactly; a bare
+				// hostname matches that host over http or https on any port.
+				'trusted_origins'              => [],
 
 				'fetch_metadata' => [
-					'enabled'                   => true,                              // Enable Fetch Metadata validation via the Sec-Fetch-Site header.
-					'allow_same_site'           => true,                              // Allow same-site requests to pass Fetch Metadata validation.
+					'enabled'                   => true,                              // true rejects a request whose Sec-Fetch-Site is not same-origin or none, unless allow_same_site or a trusted Origin admits it; a request without the header passes.
+					'allow_same_site'           => true,                              // true lets Sec-Fetch-Site same-site pass.
 				],
 
-				'mask_tokens'                  => true,                              // Return masked tokens to reduce BREACH-style compression attack exposure.
+				'mask_tokens'                  => true,                              // true hands out the token masked with new random bytes on every call, against BREACH-style compression attacks, and accepts only masked tokens.
 
-				'rotate_on_login'              => true,                              // Rotate the CSRF token after successful login.
-				'rotate_on_logout'             => true,                              // Rotate the CSRF token during logout flow before session teardown or redirect.
+				// Switches for rotating the CSRF token at login and at logout, for the package
+				// that handles login. The csrf service rotates only when rotate() is called.
+				'rotate_on_login'              => true,
+				'rotate_on_logout'             => true,
 
-				'log_failures'                 => true,                              // Log CSRF verification failures through the log service.
-				'log_channel'                  => 'security',                        // Logical log channel/destination used for CSRF failure logging.
+				'log_failures'                 => true,                              // true logs every rejected request through the log service, when one is registered.
+				'log_channel'                  => 'security',                        // Log file name that the rejections are written to through the log service.
 			],
 			
 			
 			// Anti-bots
-			'captcha_protection'	=> true, // true | false; Enforces the captcha service (security.captcha) where forms use it. Needs citomni/image.
-			'honeypot_protection'	=> true, // true | false; Enables honeypot protection to prevent automated bot submissions.	
-			'form_action_switching'	=> true, // true | false; Enables dynamic form action switching to prevent bot submissions.
+			'captcha_protection'	=> true, // true makes the captcha service check answers; false accepts every answer, and the captcha image and template helpers give nothing. Challenges need the captchaImage service of citomni/image.
+			'honeypot_protection'	=> true, // Provided to templates as $honeypot_protection, for forms with a honeypot field.
+			'form_action_switching'	=> true, // Provided to templates as $form_action_switching, for forms that switch their action against bots.
 
-			// Captcha challenges (Service\Captcha). The image route is opt-in: the app
-			// routes image_path to CaptchaController::image in config/citomni_http_routes.php.
+			// Captcha challenges. The package routes no captcha image: An app that uses captcha
+			// routes image_path to CaptchaController::image for GET.
 			'captcha' => [
-				'session_key'	=> '_captcha',		// Session key holding the pending challenges.
-				'ttl'			=> 1200,			// Seconds a challenge stays valid; keep it below session.gc_maxlifetime.
-				'max_pending'	=> 5,				// Pending challenges per session (tabs, forms); issuing beyond this drops the oldest.
-				'id_field'		=> 'captcha_id',	// Hidden form field with the challenge id ($captchaField()).
-				'answer_field'	=> 'captcha',		// Form field with the user's answer.
-				'image_path'	=> '/captcha.png',	// App path routed to CaptchaController::image ($captchaUrl()).
+				'session_key'	=> '_captcha',		// Session key of the pending challenges.
+				'ttl'			=> 1200,			// Seconds a challenge stays valid, at least 1; keep it below session.gc_maxlifetime.
+				'max_pending'	=> 5,				// Pending challenges kept per session, for several tabs or forms, at least 1; a new one beyond it drops the oldest.
+				'id_field'		=> 'captcha_id',	// Form field with the challenge id, as $captchaField() renders it.
+				'answer_field'	=> 'captcha',		// Form field with the visitor's answer; it must differ from id_field.
+				'image_path'	=> '/captcha.png',	// App path of the challenge images, starting with "/", without query, fragment or whitespace; $captchaUrl() links to it.
 			],
 		],
 
 
 		
-		/*
-		 *------------------------------------------------------------------
-		 * VIEW / CONTENT / TEMPLATE ENGINE
-		 *------------------------------------------------------------------
-		 */
+		// The tplEngine service. Service-map options of tplEngine override cache_enabled,
+		// trim_whitespace, remove_html_comments, allow_php_tags and asset_version.
 		'view' => [
 
-			// -------------------------------------------------
-			// Template roots / layers
-			// -------------------------------------------------
-			//
-			// Each key is a "layer" slug used in template refs like:
-			//   "member/home.html@app"
-			//   "admin/layout.html@citomni/admin"
-			//
-			// Each value is an absolute directory path where that layer's
-			// templates live (no trailing slash required; we'll rtrim it).
-			//
-			// NOTE: You MUST provide at least 'app' here in the final app config,
-			// otherwise nothing can render. Core/provider layers (citomni/auth etc.)
-			// are registered by those packages.
-			//
+			// Template roots by layer, referenced as "path/file.html@layer": 'app' or a
+			// 'vendor/package' slug, each mapped to an absolute directory. A package that ships
+			// templates adds its own layer.
 			'template_layers' => [			
-				'app' 			=> \CITOMNI_APP_PATH . '/templates',
-				'citomni/http'	=> \CITOMNI_APP_PATH . '/vendor/citomni/http/templates',
+				'app' 			=> \CITOMNI_APP_PATH . '/templates',  // The app's own templates, referenced as file@app.
+				'citomni/http'	=> \CITOMNI_APP_PATH . '/vendor/citomni/http/templates',  // This package's templates, referenced as file@citomni/http.
 			],
 
 
-			// -------------------------------------------------
-			// Cache / compilation
-			// -------------------------------------------------
-			//
-			// cache_enabled:
-			//   true  = compile template -> write to /var/cache -> reuse if fresh
-			//   false = always recompile (dev convenience, slower)
-			//
-			'cache_enabled'         => true,
+			'cache_enabled'         => true,  // true reuses a compiled template while its sources are unchanged; false compiles on every render.
 
-			// trim_whitespace:
-			//   Collapse redundant whitespace in the FINAL HTML output
-			//   (outside <pre>, <code>, <textarea>, <script>, <style>).
-			//   Good for prod if you like "pretty lean markup".
-			//
-			'trim_whitespace'       => false,
+			'trim_whitespace'       => false, // true collapses runs of whitespace in the literal markup of templates when they compile; pre, code, textarea, script and style stay as they are.
 
-			// remove_html_comments:
-			//   Strip <!-- ... --> comments from the FINAL HTML output
-			//   (but keep IE conditional comments etc.).
-			//
-			'remove_html_comments'  => false,
+			'remove_html_comments'  => false, // true removes HTML comments from templates when they compile; conditional comments stay.
 
-			// allow_php_tags:
-			//   Controls `{? ... ?}` and `{?= ... ?}` inline PHP in templates.
-			//   We default to true. Set false for paranoid deployments.
-			//
-			'allow_php_tags'        => true,
+			'allow_php_tags'        => true,  // true compiles "{? code ?}" and "{?= expr ?}" to PHP; false compiles them to nothing. Native PHP tags work either way.
 
 
-			// -------------------------------------------------
-			// Asset/versioning helpers
-			// -------------------------------------------------
-			//
-			// asset_version:
-			//   Cache-buster token used by $asset('/css/app.css') -> /css/app.css?v=123
-			//   Can be commit hash, build id, timestamp string, whatever.
-			//
-			'asset_version'         => '',
+			'asset_version'         => '',    // Version that $asset() appends to asset URLs as "v=", such as a build id or commit hash; '' appends none.
 
 
-			// -------------------------------------------------
-			// Global head/scripts snippet
-			// -------------------------------------------------
-			//
-			// marketing_scripts:
-			//   Raw HTML/JS snippet injected into templates via the global var
-			//   `marketing_scripts`. Typical use: analytics tags, marketing pixels,
-			//   cookie consent loader, etc.
-			//
-			'marketing_scripts'     => '',
+			'marketing_scripts'     => '',    // Trusted markup, such as analytics tags, that templates get as $marketing_scripts to output unescaped.
 
 
-			// -------------------------------------------------
-			// Scoped per-request view vars
-			// -------------------------------------------------
-			//
-			// 'vars' is a map of declarative rules, keyed by variable name, that say:
-			//   "Inject this variable into the template scope
-			//    IF AND ONLY IF the current request path matches."
-			//
-			// Each entry describes:
-			//   - the variable name: the entry's key (becomes $<name> in templates),
-			//   - how/where to get its value,
-			//   - which request paths it applies to.
-			//
-			// Because the map is keyed by name, providers and the app each add their own
-			// entries, and a later layer replaces an entry by using the same name (cfg
-			// merge, last wins). There is no 'var' field. Entries in a list would get
-			// numeric keys, which never become template variables, and a list replaces
-			// the whole map before it on merge.
-			//
-			// Shape per entry:
-			// 'header' => [                     // the key becomes $header in the template scope
-			//
-			//     'type'    => 'dynamic',       // required, either "dynamic" or "static"
-			//
-			//     'include' => ['*'],           // optional
-			//                                   // list of allowed path patterns
-			//                                   // (see "Path matching rules" below)
-			//
-			//     'exclude' => ['~^/admin/~'],  // optional
-			//                                   // list of forbidden path patterns
-			//
-			//     'source'  => [                // required
-			//         // For type "dynamic":
-			//         //   - how to compute the value at request time.
-			//         //
-			//         // Supported callable forms:
-			//         //   1) "FQCN::method"
-			//         //        Static call. Will be invoked as:
-			//         //        FQCN::method(App $app)
-			//         //
-			//         //   2) ['class' => FQCN, 'method' => 'm']
-			//         //        We construct: new FQCN($app), then call ->m()
-			//         //
-			//         //   3) ['service' => 'id', 'method' => 'm']
-			//         //        We reuse an existing service:
-			//         //          $this->app->id->m()
-			//         //
-			//         // For type "static":
-			//         //   - literal data structure to inject directly (array/scalar/etc.).
-			//         //
-			//
-			//         // Example for "dynamic":
-			//         'service' => 'sitewide',
-			//         'method'  => 'headerPayload',
-			//
-			//         // Example for "static":
-			//         // 'sidebar' => [
-			//         //     [ 'title' => 'Main', 'items' => [...]],
-			//         //     [ 'title' => 'System', 'items' => [...]],
-			//         // ],
-			//     ],
-			// ],
-			//
-			//
-			// Path matching rules:
-			// - We evaluate the *app-relative* request path, e.g. "/admin/users" or "/".
-			//
-			// - 'include':
-			//     * If 'include' is missing or empty => "included by default".
-			//     * If 'include' has patterns        => path must match at least one.
-			//
-			// - 'exclude':
-			//     * If path matches ANY exclude pattern => var is NOT injected.
-			//
-			// Pattern syntax:
-			//   "*"           => match everything
-			//   "/"           => only the frontpage "/"
-			//   "/foo/*"      => prefix/glob match
-			//   "news"        => treated as "/news" (for convenience)
-			//   "~^/admin/~"  => raw PCRE if it starts and ends with "~"
-			//
-			//
-			// Runtime behavior:
-			// - For each request, TemplateEngine picks all entries whose include/exclude
-			//   rules match the current path.
-			//
-			// - For "static" entries:
-			//     The 'source' block is injected directly, e.g.
-			//     $admin_nav = [ 'sidebar' => [...] ] in that template render only.
-			//
-			// - For "dynamic" entries:
-			//     TemplateEngine calls the described provider and injects the return
-			//     value. The provider is expected to be read-only / cheap. If it is
-			//     missing or invalid, we fail fast (RuntimeException).
-			//
-			// - Result: Templates just do `{{ $header['title'] }}` or loop `$admin_nav['sidebar']`,
-			//   and those vars only exist on pages where they are relevant.
-			//
-			// Example usage:
-			// // Dynamic header model for most public pages
-			// 'header' => [
-			//     'type'    => 'dynamic',
-			//     'include' => ['*'],
-			//     'exclude' => ['~^/admin/~'],
-			//     'source'  => [
-			//         'service' => 'sitewide',
-			//         'method'  => 'header',
-			//     ],
-			// ],
-			//
-			// // Static admin sidebar, only on /admin/*
-			// 'admin_nav' => [
-			//     'type'    => 'static',
-			//     'include' => ['~^/admin/~'],
-			//     'exclude' => [],
-			//     'source'  => [
-			//         'sidebar' => [
-			//             [
-			//                 'title' => 'System',
-			//                 'items' => [
-			//                     [
-			//                         'label' => 'Users',
-			//                         'icon'  => 'user',
-			//                         'url'   => 'admin/users.html',
-			//                         'match' => ['admin/users', 'admin/users.html'],
-			//                     ],
-			//                 ],
-			//             ],
-			//         ],
-			//     ],
-			// ],
-			//
+			// Template variables for the pages of the app, keyed by variable name, so each
+			// package and the app add their own; a later layer overrides the keys of an entry
+			// by its name. An entry:
+			//   'header' => [
+			//       'type'    => 'dynamic',      // 'static' or 'dynamic'.
+			//       'source'  => ['service' => 'sitewide', 'method' => 'header'],
+			//       'include' => ['*'],          // Optional; empty or missing covers every page.
+			//       'exclude' => ['/admin/*'],   // Optional.
+			//   ],
+			// A static source is the value itself. A dynamic source is called on every render
+			// of a page that the entry covers: "FQCN::method" with the App, ['class' => FQCN,
+			// 'method' => 'm'] on a new FQCN($app), or ['service' => 'id', 'method' => 'm'] on
+			// a registered service. include and exclude are path patterns: '*' for every page,
+			// '/' for the front page, '/admin/*' or '/admin' for a prefix, '~regex~' for a
+			// regular expression. An entry covers a page that include matches, unless exclude
+			// matches it.
 			'vars' => [
-				// (your entries go here, keyed by variable name)
 			],
 
 		],
 
 
 
-		/**
-		 * ------------------------------------------------------------------
-		 * MAINTENANCE FLAG
-		 * ------------------------------------------------------------------
-		 */
-		 
+		// The maintenance service, whose flag file holds the current state.
 		'maintenance' => [
 			'flag' => [
-				'path' => CITOMNI_APP_PATH . '/var/flags/maintenance.php', // Absolute filesystem path to the flag file. This file is atomically rewritten whenever maintenance mode is toggled.			
-				'template' => __DIR__ . '/../../templates/public/maintenance.php',  // Branded template for maintenance mode guard page
+				'path' => CITOMNI_APP_PATH . '/var/flags/maintenance.php', // Absolute path of the flag file, a PHP file that returns the state; enabling or disabling maintenance rewrites it. '' means var/flags/maintenance.php under CITOMNI_APP_PATH.
+				'template' => __DIR__ . '/../../templates/public/maintenance.php',  // Plain PHP template of the 503 maintenance page; '' or a missing file gives a built-in page.
 				
-				// Whitelist of client IPs allowed to bypass maintenance mode
+				// Client IP addresses, such as '203.0.113.10', that bypass maintenance mode while
+				// the flag file has no list of its own; [] for none. Only exact public addresses
+				// match, as Request::ip() reports them; in dev, 'unknown' admits every client
+				// without one.
 				'allowed_ips' => [
-					// '127.0.0.1',      // localhost
-					// '192.168.1.100',  // example LAN IP
 				],
 				
-				'default_retry_after' => 300, // Default number of seconds for the Retry-After header when the flag file does not provide a value. Should reflect the typical duration of short maintenance windows (e.g. 300–900 seconds).
+				// Seconds sent as Retry-After while the flag file holds none, and written to
+				// the flag by a toggle unless setRetryAfter() chose a value. Set it to the
+				// typical length of a short maintenance window.
+				'default_retry_after' => 300,
 			],
-			// Controls lightweight rotation of generated maintenance flag files.
+			// Backups of the flag file that a toggle replaces.
 			'backup' => [			
-				'enabled' => true,
-				'keep' => 3, // number of versions to keep (e.g., 0..5)
-				'dir' => CITOMNI_APP_PATH . '/var/backups/flags/'
+				'enabled' => true, // true backs up the flag file before a toggle replaces it.
+				'keep' => 3, // Number of backups kept, newest first; 0 writes none.
+				'dir' => CITOMNI_APP_PATH . '/var/backups/flags/' // Directory of the backups, created when missing; must be a non-empty string.
 			],
 			'log' => [
-				'filename' => 'maintenance.json',
+				'filename' => 'maintenance.json', // Log file name passed to the log service, when one is registered, for the toggle records; '' means 'maintenance.json'.
 			],
 		],
 
 
-		/*
-		 *------------------------------------------------------------------
-		 * ADMIN WEBHOOKS (HMAC auth + replay protection)
-		 *------------------------------------------------------------------
-		 *
-		 * Purpose
-		 * - Remote control endpoints for system/admin operations (e.g., cache warmup,
-		 *   maintenance toggles, deploy hooks, scheduled pruning).
-		 * - Auth model: HMAC over a canonical base string, timestamp freshness,
-		 *   optional source IP allow-list, and a nonce ledger to prevent replays.
-		 *
-		 * Secrets & file policy (IMPORTANT)
-		 * - Do NOT put secrets in cfg. The HMAC secret is loaded from a side-effect-free
-		 *   PHP file that returns a plain array (see contract below).
-		 * - Default location: CITOMNI_APP_PATH . '/var/secrets/webhooks.secret.php'
-		 * - Commit only the template: /var/secrets/webhooks.secret.php.tpl
-		 *   Never commit the real secret file to Git.
-		 *
-		 * Secret file contract (side-effect free; returns array):
-		 *   return [
-		 *     'secret' => '<hex>',            // REQUIRED: hex string; recommended 64 chars for sha256 or 128 for sha512
-		 *     'algo'   => 'sha256'|'sha512',  // OPTIONAL: used when cfg.webhooks.algo is null
-		 *     // Optional metadata for ops visibility (ignored by verifier):
-		 *     // 'rotated_at_utc' => '2025-10-17T11:12:00Z',
-		 *     // 'generator'      => 'CitOmni DevKit',
-		 *   ];
-		 *
-		 * Algo precedence
-		 * - cfg.webhooks.algo > secret file 'algo' > 'sha256'.
-		 * - The baseline uses 'algo' => null so the secret file may choose the algo.
-		 * - Set cfg.webhooks.algo explicitly only when the app should override the
-		 *   secret file's algo.
-		 *
-		 * Canonical signature base string (selected by 'bind_context')
-		 * - Simple mode (bind_context=false):
-		 *     "<timestamp>.<nonce>.<rawBody>"
-		 * - Context-bound mode (bind_context=true; default):
-		 *     ts + "\n" + nonce + "\n" + METHOD + "\n" + PATH + "\n" + QUERY + "\n" + sha256(rawBody)
-		 *
-		 * Notes:
-		 * - Context-bound mode is stricter and binds the signature to method, path,
-		 *   query string, and body hash. Clients must mirror the exact shape.
-		 * - The body hash is always SHA-256, independent of HMAC algo.
-		 * - Raw body bytes are signed. Clients must not sign pretty-printed JSON and
-		 *   send minified JSON, or vice versa. Bytes are bytes. Annoying, but loyal.
-		 *
-		 * Required headers (server keys as seen in $_SERVER; names configurable below)
-		 * - X-Citomni-Timestamp : UNIX seconds when the signature was created.
-		 * - X-Citomni-Nonce     : Unique, single-use identifier (replay-protected).
-		 * - X-Citomni-Signature : Hex HMAC of the canonical base string.
-		 *
-		 * Timestamp and nonce window
-		 * - ttl_seconds controls the accepted request age.
-		 * - ttl_clock_skew_tolerance allows limited clock drift in both directions.
-		 * - Internally, the nonce ledger keeps webhook nonces for:
-		 *     ttl_seconds + (2 * ttl_clock_skew_tolerance)
-		 *   This covers the full timestamp acceptance window and prevents edge-case
-		 *   replay when the sender's clock is ahead of the verifier's clock.
-		 *
-		 * IP allow-list semantics
-		 * - allowed_ips empty => IP check is disabled (no IP restriction).
-		 * - allowed_ips non-empty => source IP must match an entry:
-		 *     * exact IPv4/IPv6 match, or
-		 *     * IPv4/IPv6 CIDR, e.g. '203.0.113.0/24' or '2001:db8::/32'.
-		 * - Source IP resolution:
-		 *     1) Request::ip(), which honors the configured trusted-proxy whitelist
-		 *        for public traffic.
-		 *     2) Fallback to $_SERVER['REMOTE_ADDR'] for private/internal peers,
-		 *        Docker, LAN, localhost cron, and similar non-public sources.
-		 *
-		 * Logging
-		 * - Failure/success logging is best-effort and only used when the log service
-		 *   is registered. Logging failures never change the auth result.
-		 * - log_successes should normally stay false unless debugging integration.
-		 *
-		 * Guarantees
-		 * - Deterministic verification.
-		 * - Constant-time HMAC comparison.
-		 * - Replay protection through the shared Nonce service.
-		 * - Stale/future requests rejected before nonce filesystem writes.
-		 * - Garbage signatures rejected before nonce filesystem writes.
-		 *
-		 * Required when enabled
-		 * - webhooks.secret_file must exist and be readable.
-		 * - nonce.dir must be writable because replay protection is mandatory.
-		 *
-		 * Typical app overrides (env files):
-		 *   'webhooks' => [
-		 *     'enabled' => true,
-		 *     'secret_file' => CITOMNI_APP_PATH . '/var/secrets/webhooks.secret.php',
-		 *     'allowed_ips' => ['203.0.113.10', '198.51.100.0/24'], // leave empty to disable IP check
-		 *     // 'ttl_seconds' => 180,
-		 *     // 'ttl_clock_skew_tolerance' => 30,
-		 *     // 'algo' => 'sha512',
-		 *     // 'bind_context' => true,
-		 *   ],
-		 *
-		 *   'nonce' => [
-		 *     'dir' => CITOMNI_APP_PATH . '/var/nonces',
-		 *   ],
-		 */
+		// The webhooksAuth service, which authenticates signed webhook requests, such as those
+		// to the protected /_system/ routes. The HMAC secret never goes in cfg: It is read from
+		// secret_file.
 		'webhooks' => [
 
-			// Master switch. Keep disabled unless actively used.
-			// Disabled means every verification fails with reason "Disabled".
+			// true verifies signed requests; false rejects every request with reason Disabled.
 			'enabled' => false,
 
-			// Filesystem path to the secret file.
-			// The file must be side-effect free and return an array per the contract above.
+			// Absolute path of a PHP file without side effects that returns an array with
+			// 'secret', a hex string, and optionally 'algo'. Read only while enabled. Keep the
+			// file out of version control.
 			'secret_file' => CITOMNI_APP_PATH . '/var/secrets/webhooks.secret.php',
 
-			// Freshness window and clock-skew tolerance in seconds.
-			// Defaults accept requests up to 5 minutes old plus 1 minute of clock drift.
-			'ttl_seconds' => 300,
-			'ttl_clock_skew_tolerance' => 60,
+			// A timestamp is accepted from ttl_seconds plus ttl_clock_skew_tolerance seconds
+			// old to ttl_clock_skew_tolerance seconds ahead.
+			'ttl_seconds' => 300, // Maximum age of a request in seconds, at least 1.
+			'ttl_clock_skew_tolerance' => 60, // Tolerated clock difference to the sender in seconds, in either direction; at least 0.
 
-			// Optional allow-list of source IPs. Empty = no IP restriction.
-			// Supports exact IPv4/IPv6 and IPv4/IPv6 CIDR. Malformed entries match nothing.
+			// Source IP addresses and CIDR ranges, IPv4 or IPv6, such as '203.0.113.10' or
+			// '198.51.100.0/24', that may send webhooks; [] allows every source. An invalid
+			// entry matches nothing.
 			'allowed_ips' => [
-				// '203.0.113.10',
-				// '198.51.100.0/24',
-				// '2001:db8::/32',
 			],
 
-			// HMAC algorithm override.
-			// Precedence: explicit cfg value > secret file 'algo' > 'sha256'.
-			// Null means this cfg layer defers to the secret file, or to 'sha256' if the file has no algo.
-			// Allowed explicit values: 'sha256' or 'sha512'.
+			// HMAC algorithm: 'sha256' or 'sha512'. null uses the secret file's algo, or
+			// 'sha256' when the file names none.
 			'algo' => null,
 
-			// Bind signature to METHOD + PATH + QUERY + sha256(rawBody).
-			// Stronger default; clients must mirror the canonical base string exactly.
+			// true binds the signature to the method, path, query and body hash, besides the
+			// timestamp and nonce; false covers only the timestamp, nonce and raw body. Senders
+			// must sign the same string.
 			'bind_context' => true,
 
-			// Header keys as seen in $_SERVER.
-			// Override only if your environment rewrites incoming headers.
+			// $_SERVER keys of the signature, timestamp and nonce headers. Change them only
+			// where the server rewrites incoming headers.
 			'header_signature' => 'HTTP_X_CITOMNI_SIGNATURE',
 			'header_timestamp' => 'HTTP_X_CITOMNI_TIMESTAMP',
 			'header_nonce' => 'HTTP_X_CITOMNI_NONCE',
 
-			// Best-effort structured logging through the log service, when registered.
-			'log_failures' => true,
-			'log_successes' => false,
-			'log_file' => 'webhooks.jsonl',
+			// Logging through the log service, when one is registered.
+			'log_failures' => true, // true logs every rejected request.
+			'log_successes' => false, // true logs every accepted request; for debugging an integration.
+			'log_file' => 'webhooks.jsonl', // Log file name passed to the log service.
 		],
 
 
-		/*
-		 *------------------------------------------------------------------
-		 * NONCE LEDGER (single-use token storage)
-		 *------------------------------------------------------------------
-		 *
-		 * Purpose
-		 * - Shared filesystem-backed ledger for single-use tokens.
-		 * - Used by WebhooksAuth for replay protection.
-		 * - Can be reused by other short- or long-lived single-use flows by using
-		 *   separate namespaces.
-		 *
-		 * Storage layout
-		 * - <dir>/<namespace>/<sha256(nonce)>.nonce
-		 * - The raw nonce is never written to disk; only its hash is used as filename.
-		 * - First writer wins via atomic fopen('x').
-		 *
-		 * Runtime behavior
-		 * - checkAndStore(namespace, nonce, ttlSeconds) returns:
-		 *     true  => first use, or previous entry expired and was reaped.
-		 *     false => replay, malformed input, or storage failure.
-		 * - Storage failures intentionally return false. From an auth perspective,
-		 *   "could not prove single-use" means "reject".
-		 *
-		 * Nonce format
-		 * - Configurable maximum length, default 128 bytes.
-		 * - Accepted characters cover common URL-safe tokens:
-		 *     A-Z a-z 0-9 _ . : -
-		 * - This includes hex, UUID-like values, ULID-like values, JWT-ish segments,
-		 *   and base64url tokens without padding.
-		 *
-		 * Directory policy
-		 * - The service lazily creates per-namespace subdirectories.
-		 * - The root dir and namespace dirs must be writable at runtime.
-		 * - Keep this directory out of VCS.
-		 *
-		 * Cleanup
-		 * - Opportunistic purge runs inside checkAndStore() with bounded work.
-		 * - CLI cron may call purgeExpired(namespace, ttlSeconds) for deterministic
-		 *   cleanup of busy or long-lived ledgers.
-		 */
+		// The nonce service, a file ledger of used single-use tokens, such as webhook nonces.
 		'nonce' => [
-			// Root directory for all namespaced nonce ledgers.
-			// Default matches CitOmni's /var structure.
+			// Directory of the ledgers, one subdirectory per namespace, created on first use.
+			// It must be writable; keep it out of version control.
 			'dir' => CITOMNI_APP_PATH . '/var/nonces',
 
-			// Maximum byte length of accepted nonce strings.
+			// Maximum length of an accepted nonce in bytes, from 8 to 1024.
 			'max_len' => 128,
 
-			// Opportunistic cleanup probability: 1 in N checkAndStore() calls.
-			// Keep > 1 for busy systems; use CLI pruning for deterministic cleanup.
+			// Chance of a purge of expired entries after a stored nonce, as 1 in this number;
+			// at least 1. For a busy or long-lived ledger, purge from a scheduled job as well.
 			'purge_probability' => 50,
 
-			// Maximum directory entries scanned during one opportunistic purge.
+			// Maximum number of entries that the purge after a stored nonce scans, at least 1.
 			'purge_limit' => 25,
 
-			// Modes used for lazily created directories and nonce files.
-			// Effective permissions may still be narrowed by the process umask.
+			// Permission modes of created directories and nonce files; the process umask may
+			// narrow the directory mode.
 			'dir_mode' => 0775,
 			'file_mode' => 0660,
 		],
@@ -935,26 +452,10 @@ class Registry {
 
 
 
-	/**
-	 * Vendor baseline route map for HTTP mode.
-	 *
-	 * Behavior:
-	 * - This is tier 1 in the deterministic HTTP route merge:
-	 *   1) Vendor baseline: \CitOmni\Http\Boot\Registry::ROUTES_HTTP
-	 *   2) Providers: /config/providers.php (their ROUTES_HTTP blocks)
-	 *   3) App base: /config/citomni_http_routes.php
-	 *   4) Env overlay: /config/citomni_http_routes.{ENV}.php
-	 * - Route merge semantics are deep associative merge with last wins.
-	 *
-	 * Notes:
-	 * - Routes live in the dedicated route map, not inside CFG_HTTP.
-	 * - The array shape must match the Router contract used by CitOmni\Http.
-	 * - Providers may contribute additional routes, while the app layer may
-	 *   override or replace vendor/provider routes by path key.
-	 * - Empty arrays are ignored during merge.
-	 */
+	/** HTTP routes. */
 	public const array ROUTES_HTTP = [
 	
+		// Welcome page of a new installation.
 		'/' => [
 			'controller' => \CitOmni\Http\Controller\PublicController::class,
 			'action' => 'index',
@@ -962,16 +463,13 @@ class Registry {
 			'template_file' => 'public/index.html',
 			'template_layer' => 'citomni/http'
 		],
+		// Website content license page; /legal/website-license/index.html redirects to it
+		// permanently.
 		'/legal/website-license' => [
 			'controller' => \CitOmni\Http\Controller\PublicController::class,
 			'action' => 'websiteLicense',
 			'methods' => ['GET']
 		],
-		// '/legal/website-license' => [
-			// 'controller' => \CitOmni\Http\Controller\PublicController::class,
-			// 'action' => 'redirectWebsiteLicense',
-			// 'methods' => ['GET']
-		// ],
 		'/legal/website-license/index.html' => [
 			'controller' => \CitOmni\Http\Controller\PublicController::class,
 			'action' => 'redirectWebsiteLicense',
@@ -979,7 +477,7 @@ class Registry {
 		],
 		
 		
-		// --- System/ops routes ---
+		// System endpoints for uptime monitors and diagnostics, without authentication.
 		'/_system/ping' => [
 			'controller' => \CitOmni\Http\Controller\SystemController::class,
 			'action' => 'ping',
@@ -1011,7 +509,7 @@ class Registry {
 			'methods' => ['GET'],
 		],
 
-		// Protected ops (HMAC via WebhooksAuth):
+		// System operations and status reports, for webhook-signed requests only; see cfg webhooks.
 		'/_system/reset-cache' => [
 			'controller' => \CitOmni\Http\Controller\SystemController::class,
 			'action' => 'resetCache',
@@ -1043,12 +541,15 @@ class Registry {
 			'methods' => ['POST'],
 		],
 
+		// Diagnosis of webhook signing: It answers unsigned requests too, with facts that are
+		// not secret.
 		'/_system/_debug/webhook' => [
 			'controller' => \CitOmni\Http\Controller\SystemController::class,
 			'action'     => 'webhookDebug',
 			'methods'    => ['POST'],
 		],
 		
+		// Application information as a page and as JSON, for development.
 		'/_system/appinfo.html' => [
 			'controller' => \CitOmni\Http\Controller\SystemController::class,
 			'action' => 'appinfoHtml',
@@ -1062,34 +563,8 @@ class Registry {
 			'methods' => ['GET'],
 		],
 		
-		// --- Regex routes (matches BEFORE top-level placeholders) ---
+		// Placeholder routes, such as '/user/{id}'; see Router::run() for the placeholders.
 		'regex' => [
-			// '/user/{id}' => [
-				// 'controller' => 'CitOmni\\Http\\Controller\\UserController',
-				// 'action' => 'getUser',
-				// 'methods' => ['GET'],
-				// 'template_file' => 'public/example.html',
-				// 'template_layer' => 'citomni/http',
-			// ],
-			// '/email/{email}' => [
-				// 'controller' => 'CitOmni\\Http\\Controller\\EmailController',
-				// 'action' => 'validateEmail',
-				// 'methods' => ['GET'],
-				// 'template_file' => 'public/example.html',
-				// 'template_layer' => 'citomni/http',
-			// ],
-			// '/slug/{urlslug}' => [
-				// 'controller' => 'CitOmni\\Http\\Controller\\SlugController',
-				// 'action' => 'getSlug',
-				// 'methods' => ['GET'],
-				// 'template_file' => 'public/example.html',
-				// 'template_layer' => 'citomni/http',
-			// ],
-			// '/code/{code}' => [
-				// 'controller' => 'CitOmni\\Http\\Controller\\CodeController',
-				// 'action' => 'processCode',
-				// 'methods' => ['POST'],
-			// ],
 		],
 
 	];

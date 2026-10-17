@@ -19,82 +19,58 @@ use CitOmni\Kernel\Controller\BaseController;
 use CitOmni\Kernel\Support\AppInfo;
 
 /**
- * SystemController: Minimal operations and observability endpoints for HTTP mode.
+ * SystemController: HTTP adapter for operations and diagnostics endpoints.
  *
- * Responsibilities:
- * - Expose tiny, deterministic endpoints for admin tasks, uptime, and smoke tests.
- * - Offer protected maintenance/cache controls and diagnostics via HMAC-based WebhooksAuth.
- * - Expose HTTP application-information endpoints backed by Kernel Support\AppInfo.
+ * Gives monitors, deployment tooling and developers small endpoints for liveness, runtime
+ * facts, caches and maintenance mode. It shapes the answers and guards the actions; verifying
+ * a signed request belongs to WebhooksAuth, the cache files to the App, the maintenance state
+ * to the Maintenance service, and the application snapshot with its secret masking to AppInfo.
  *
- * Collaborators:
- * - Reads: Request, Response, TemplateEngine, ErrorHandler, Maintenance, WebhooksAuth, and Kernel Support\AppInfo.
- * - Writes: Response (JSON/text/HTML), Maintenance state, cache files (reset/warmup).
- *
- * Security note:
- * - Protected system actions use WebhooksAuth::requireOrAbort().
- * - Do NOT store webhook secrets in cfg. The HMAC secret is loaded from:
- *   CITOMNI_APP_PATH . '/var/secrets/webhooks.secret.php'
- * - The actual secret file must not be committed; keep only the `.tpl` template in VCS.
- * - Replay protection is handled by the shared Nonce service via cfg.nonce.
- *
- * Configuration keys (via $this->app->cfg):
- * - webhooks.* - HMAC verification, headers, TTL, IP allow-list, logging, and secret file path.
- * - nonce.* - filesystem-backed single-use token ledger used for replay protection.
- * - http.base_url (string) - fallback for canonical links when CITOMNI_PUBLIC_ROOT_URL is unset.
- *
- * Routing:
- * - Route definitions no longer live under cfg.
- *   They are merged separately by App::buildRoutes() and exposed as $this->app->routes.
- *   AppInfo supplies route and command data to the HTTP diagnostics endpoints.
- *
- * Error handling:
- * - Fail-fast: Errors bubble to the global error handler.
- * - Protected endpoints deliberately fail with 404 to avoid route disclosure.
- * - No broad try/catch blocks here; logging is centralized.
- *
- * Typical usage:
- * - Called by deployment tooling, monitors, and CI smoke tests to verify liveness and perform safe ops.
- *
- * Examples:
- * - Core (liveness): GET /_system/ping  -> "OK 2025-10-16T22:31:00Z"
- * - Scenario (protected): POST /_system/reset-cache with valid HMAC -> { "ok": true, ... }
- *
- * Failure:
- * - Unauthorized protected calls return 404 via ErrorHandler->httpError(404) to hide presence.
+ * Rules:
+ * - Send no-cache headers with every answer.
+ * - Change the App's cache files, maintenance mode or other application state only after
+ *   WebhooksAuth::requireOrAbort(PROTECTED_FAIL_STATUS) has accepted the request. What
+ *   verification itself records, such as a used nonce, belongs to WebhooksAuth.
+ * - Answer a request that a guard rejects with 404, as for a missing route, so the endpoint
+ *   is not disclosed.
+ * - An action without a guard answers every client: Never put filesystem paths, secrets or
+ *   credentials in its answer.
  */
 class SystemController extends BaseController {
 
-	/**
-	 * Chosen, consistent failure status for protected endpoints.
-	 * 404 hides the endpoint existence in all environments.
-	 */
+	/** Status of a rejected protected request; 404 makes the endpoint look like a missing route. */
 	private const PROTECTED_FAIL_STATUS = 404;
 
 	/**
-	 * Called once per request by BaseController.
-	 * We keep it empty to avoid any implicit I/O.
+	 * Run setup and guards that every action needs.
+	 *
+	 * Notes:
+	 * - Holds no guard, so an action without a guard of its own is exactly as exposed as its
+	 *   route. A guard added here applies to every action.
+	 *
+	 * @return void
+	 * @see \CitOmni\Kernel\Controller\BaseController::__construct()  Calls it before every action.
 	 */
 	protected function init(): void {
-		// Intentionally empty (no I/O). Each action sets no-cache explicitly.
+		// Intentionally empty: No implicit I/O before an action.
 	}
 	
 
 
 	/**
-	 * Render the dev-only application information page.
+	 * Render the application information page.
 	 *
 	 * Behavior:
-	 * - Conceals the endpoint with 404 outside dev.
-	 * - Maps ?raw=1 or ?unredacted=1 to AppInfo unredacted output only in dev.
-	 * - Delegates shared application/runtime introspection and masking to AppInfo.
-	 * - Includes fresh dev/stage/prod configuration projections for the diagnostic page.
-	 * - Applies noindex/no-cache headers and renders the configured HTTP template.
+	 * - 404 through httpError() when CITOMNI_ENVIRONMENT is defined and is not dev.
+	 * - Otherwise renders the route's template with noindex and no-cache headers and the AppInfo
+	 *   snapshot, including the dev, stage and prod cfg projections.
+	 * - Secrets in the snapshot are masked unless appInfoUnredactedRequested() is true.
 	 *
 	 * Notes:
-	 * - The active cfg and environment projections retain the semantics defined by AppInfo.
-	 * - This method owns HTTP exposure only; it does not inspect or mask application data itself.
+	 * - Requires template_file and template_layer on its route.
 	 *
 	 * @return void
+	 * @see \CitOmni\Kernel\Support\AppInfo::snapshot()  The snapshot, its secret masking and its failures.
 	 */
 	public function appinfoHtml(): void {
 		if (\defined('CITOMNI_ENVIRONMENT') && \CITOMNI_ENVIRONMENT !== 'dev') {
@@ -113,19 +89,16 @@ class SystemController extends BaseController {
 
 
 	/**
-	 * Emit the dev-only AppInfo snapshot as JSON.
+	 * Answer the application information as JSON.
 	 *
 	 * Behavior:
-	 * - Conceals the endpoint with 404 outside dev.
-	 * - Maps ?raw=1 or ?unredacted=1 to AppInfo unredacted output only in dev.
-	 * - Includes the established dev/stage/prod configuration projections.
-	 * - Returns the AppInfo snapshot directly with no-cache headers.
-	 *
-	 * Notes:
-	 * - Historical flat/PHP-export artifacts are intentionally not recreated.
-	 * - Shared introspection and secret masking remain exclusively in AppInfo.
+	 * - 404 through httpError() when CITOMNI_ENVIRONMENT is defined and is not dev.
+	 * - Otherwise 200 with no-cache headers and the AppInfo snapshot, including the dev, stage
+	 *   and prod cfg projections.
+	 * - Secrets in the snapshot are masked unless appInfoUnredactedRequested() is true.
 	 *
 	 * @return void
+	 * @see \CitOmni\Kernel\Support\AppInfo::snapshot()  The snapshot, its secret masking and its failures.
 	 */
 	public function appinfoJson(): void {
 		if (\defined('CITOMNI_ENVIRONMENT') && \CITOMNI_ENVIRONMENT !== 'dev') {
@@ -144,14 +117,16 @@ class SystemController extends BaseController {
 
 
 	/**
-	 * Determine whether the current request explicitly asks for unredacted AppInfo output.
+	 * Check whether the request asks for unredacted AppInfo output.
 	 *
 	 * Behavior:
-	 * - Fails closed outside dev, independent of the calling endpoint guard.
-	 * - Accepts standard boolean query values for ?raw or ?unredacted.
-	 * - Rejects non-scalar query values instead of coercing arrays or objects.
+	 * - False unless CITOMNI_ENVIRONMENT is defined and is dev, whatever the calling action
+	 *   checked.
+	 * - In dev, true when the query value raw or unredacted is a scalar that
+	 *   FILTER_VALIDATE_BOOL reads as true, such as 1, true, on or yes. An array value counts
+	 *   as false.
 	 *
-	 * @return bool True when unredacted AppInfo output is explicitly requested in dev.
+	 * @return bool
 	 */
 	private function appInfoUnredactedRequested(): bool {
 		if (!\defined('CITOMNI_ENVIRONMENT') || \CITOMNI_ENVIRONMENT !== 'dev') {
@@ -172,9 +147,14 @@ class SystemController extends BaseController {
 
 
 	/**
-	 * Render an AppInfo snapshot with HTTP-only presentation metadata.
+	 * Render the route's template with an AppInfo snapshot and the page texts.
 	 *
-	 * @param array<string,mixed> $snapshot AppInfo snapshot to expose in the template.
+	 * Behavior:
+	 * - Sends noindex and no-cache headers.
+	 * - The canonical URL is /_system/appinfo.html under CITOMNI_PUBLIC_ROOT_URL, or under cfg
+	 *   http.base_url when the constant is not defined. The page's route must have that path.
+	 *
+	 * @param  array<string,mixed>  $snapshot  AppInfo snapshot, passed to the template as appInfo.
 	 * @return void
 	 */
 	private function renderAppInfo(array $snapshot): void {
@@ -213,30 +193,15 @@ class SystemController extends BaseController {
 
 
 	/**
-	 * Return the resolved client IP address (proxy-aware).
+	 * Answer the client IP address as the Request service resolves it.
+	 *
+	 * Helps to check proxy and load balancer settings.
 	 *
 	 * Behavior:
-	 * - Uses Request service trust rules (trusted proxies, headers).
-	 * - Emits {"ip": "..."} with no-cache headers.
-	 *
-	 * Notes:
-	 * - No remote I/O; constant-time response.
-	 *
-	 * Typical usage:
-	 *   Diagnose proxy chains and LB configuration during rollout.
-	 *
-	 * Examples:
-	 *
-	 *   // Direct client
-	 *   GET /_system/clientip  -> { "ip": "203.0.113.7" }
-	 *
-	 *   // Behind proxy
-	 *   GET /_system/clientip  -> { "ip": "198.51.100.10" }
-	 *
-	 * Failure:
-	 * - None; falls back to Request->ip() semantics.
+	 * - 200 with {"ip": "..."}.
 	 *
 	 * @return void
+	 * @see \CitOmni\Http\Service\Request::ip()  How the address is resolved, and its "unknown" value.
 	 */
 	public function clientIp(): void {
 		$this->app->response->noCache();
@@ -248,27 +213,10 @@ class SystemController extends BaseController {
 
 
 	/**
-	 * Return a tiny liveness signal.
+	 * Answer a plain text liveness signal.
 	 *
 	 * Behavior:
-	 * - Returns "OK <utc>" as plain text with 200.
-	 *
-	 * Notes:
-	 * - Simplest possible endpoint for external uptime checks.
-	 *
-	 * Typical usage:
-	 *   Used by monitors to verify HTTP reachability without JSON parsing.
-	 *
-	 * Examples:
-	 *
-	 *   // Happy path
-	 *   GET /_system/ping -> "OK 2025-10-16T22:31:00Z"
-	 *
-	 *   // Idempotent
-	 *   GET /_system/ping -> will give you the same shape with a new timestamp
-	 *
-	 * Failure:
-	 * - None; purely computed response.
+	 * - 200 with "OK " and the current UTC time, such as "OK 2025-10-16T22:31:00Z".
 	 *
 	 * @return void
 	 */
@@ -279,37 +227,16 @@ class SystemController extends BaseController {
 	
 	 
 	/**
-	 * Return a shallow health snapshot without external calls.
+	 * Answer runtime facts of the PHP process as JSON.
 	 *
 	 * Behavior:
-	 * - Emits PHP/runtime metadata, OPcache policy, server time, and timezone.
-	 * - Avoids DB and network I/O for speed and determinism.
-	 *
-	 * Notes:
-	 * - Exposes operational runtime settings only; no filesystem paths, secrets, or credentials are returned.
-	 * - Returns:
-	 * 		- php_version
-	 * 		- php_sapi
-	 * 		- environment (CITOMNI_ENVIRONMENT, if defined)
-	 * 		- opcache_enabled (ini + function_exists check)
-	 * 		- opcache (timestamp policy and reset/invalidation capabilities)
-	 * 		- realpath_cache_ttl
-	 * 		- server_time_utc (RFC3339)
-	 * 		- timezone (default PHP TZ)
-	 *
-	 * Typical usage:
-	 *   Called by CI/CD tooling to confirm runtime flags and clock sanity.
-	 *
-	 * Examples:
-	 *
-	 *   // Baseline
-	 *   GET /_system/health -> { "php_version":"8.2.x", ... }
-	 *
-	 *   // With opcache disabled
-	 *   GET /_system/health -> { "opcache_enabled": false, ... }
-	 *
-	 * Failure:
-	 * - None; data is computed from local runtime only.
+	 * - 200 with php_version, php_sapi, environment, opcache_enabled, opcache
+	 *   (validate_timestamps, revalidate_freq, file_update_protection, revalidate_path, use_cwd,
+	 *   reset_available, invalidate_available), realpath_cache_ttl, server_time_utc and timezone.
+	 *     - environment is CITOMNI_ENVIRONMENT, or "unknown" when it is not defined.
+	 *     - opcache_enabled is true only when opcache.enable is on and opcache_get_status() exists.
+	 *     - server_time_utc is ISO 8601; timezone is PHP's default timezone.
+	 * - Reads only the PHP process: No database, network or filesystem access.
 	 *
 	 * @return void
 	 */
@@ -344,11 +271,13 @@ class SystemController extends BaseController {
 
 
 	/**
-	 * Report application/framework version markers without I/O.
+	 * Answer the framework and app version markers as JSON.
 	 *
-	 * Typical markers:
-	 * - CITOMNI_VERSION (if you define it in your kernel/build)
-	 * - APP_VERSION     (optionally from app)
+	 * Behavior:
+	 * - 200 with {"citomni": ..., "app": ...}: The constants CITOMNI_VERSION and APP_VERSION as
+	 *   strings, each null when it is not defined.
+	 *
+	 * @return void
 	 */
 	public function version(): void {
 		$this->app->response->noCache();
@@ -364,27 +293,13 @@ class SystemController extends BaseController {
 
 
 	/**
-	 * Return server time in UTC and local timezone.
+	 * Answer the server time as JSON.
+	 *
+	 * Helps to detect drift between a client's clock and the server's, such as before signing
+	 * a webhook request with a timestamp.
 	 *
 	 * Behavior:
-	 * - Emits time_utc (RFC3339), time_local, and timezone.
-	 *
-	 * Notes:
-	 * - Helps detect drift between client and server clocks.
-	 *
-	 * Typical usage:
-	 *   Used as sanity-check before HMAC timestamp validation.
-	 *
-	 * Examples:
-	 *
-	 *   // Baseline
-	 *   GET /_system/time -> { "time_utc":"...", "time_local":"...", "timezone":"..." }
-	 *
-	 *   // Idempotent
-	 *   GET /_system/time -> Same keys, fresh values
-	 *
-	 * Failure:
-	 * - None; values are computed locally.
+	 * - 200 with time_utc and time_local in ISO 8601, and timezone, PHP's default timezone.
 	 *
 	 * @return void
 	 */
@@ -400,42 +315,29 @@ class SystemController extends BaseController {
 
 
 	/**
-	 * Echo minimal request metadata (dev/stage only).
+	 * Answer selected fields of the request as JSON in dev and stage.
+	 *
+	 * Helps to check X-Forwarded-* headers and load balancer behavior.
 	 *
 	 * Behavior:
-	 * - Returns selected headers and routing fields to aid proxy debugging.
-	 * - Non-dev/stage requests receive 404 to avoid route disclosure.
-	 *
-	 * Notes:
-	 * - Only exposes a minimal, non-sensitive subset of server vars.
-	 *
-	 * Typical usage:
-	 *   Validate X-Forwarded-* headers and LB behavior during rollout.
-	 *
-	 * Examples:
-	 *
-	 *   // Dev
-	 *   GET /_system/request-echo -> { "remote_addr":"...", "forwarded":"...", ... }
-	 *
-	 *   // Prod
-	 *   GET /_system/request-echo -> 404
-	 *
-	 * Failure:
-	 * - None; either returns data or delegates 404.
+	 * - 404 through httpError() unless CITOMNI_ENVIRONMENT is dev or stage; an undefined
+	 *   CITOMNI_ENVIRONMENT counts as prod.
+	 * - Otherwise 200 with remote_addr, forwarded, x_forwarded_for, x_forwarded_host,
+	 *   x_forwarded_proto, user_agent, method, host and uri, each the raw server value or ""
+	 *   when it is absent.
 	 *
 	 * @return void
 	 */
 	public function requestEcho(): void {
 		$this->app->response->noCache();
 
-		// Only allow this to run in dev and stage
 		$env = \defined('CITOMNI_ENVIRONMENT') ? \CITOMNI_ENVIRONMENT : 'prod';
 		if ($env !== 'dev' && $env !== 'stage') {
 			$this->app->errorHandler->httpError(404, ['title' => 'Not Found']);
 			return;
 		}
 
-		$server = $_SERVER; // read-only dump, filtered below
+		$server = $_SERVER;
 		$out = [
 			'remote_addr'        => (string)($server['REMOTE_ADDR'] ?? ''),
 			'forwarded'          => (string)($server['HTTP_FORWARDED'] ?? ''),
@@ -453,56 +355,40 @@ class SystemController extends BaseController {
 
 
 	/**
-	 * Reset OPcache and remove the HTTP cache files (protected by WebhooksAuth).
+	 * Remove the App's HTTP cache files and reset the web server's OPcache.
+	 *
+	 * For a deploy where OPcache does not validate timestamps. It runs in the web server's PHP
+	 * process, so the invalidation and the reset reach the web server's OPcache, which a call
+	 * from the CLI cannot.
 	 *
 	 * Behavior:
-	 * - Verifies HMAC via WebhooksAuth; unauthorized returns 404.
-	 * - Files: removes this App's HTTP cache files through App::clearCache(), which owns
-	 *   the file names and invalidates each file in OPcache before unlinking it.
-	 *   Missing files are ignored.
-	 * - Accepts an optional JSON body with absolute file paths to invalidate in OPcache.
-	 *   These files are only invalidated, never removed:
-	 *   Body:
-	 *     (optional) JSON { "paths": ["/abs/extra/file1.php", ...] }
-	 * - OPcache: calls opcache_reset() last and reports availability and the result.
-	 *
-	 * Notes:
-	 * - Fail-fast: a cache file that exists but cannot be removed throws from
-	 *   App::clearCache() and reaches the global error handler; opcache_reset() is not
-	 *   called in that case.
-	 * - "ok" is always true and "failed" always empty in a response; both keys are kept
-	 *   for compatibility. "invalidated" and "opcache.invalidation_failed" list extra
-	 *   paths only.
-	 * - Extra paths must be absolute and must exist; other entries are skipped.
-	 * - Runs in the web server's PHP process, so the invalidation and the reset reach
-	 *   the web server's OPcache, unlike cache:clear from the CLI.
-	 * - Idempotent: a repeated call returns an empty "removed" list.
-	 *
-	 * Typical usage:
-	 *   Triggered post-deploy when OPcache timestamps are disabled.
-	 *
-	 * Examples:
-	 *
-	 *   // Happy path
-	 *   POST /_system/reset-cache  (HMAC ok) -> { "ok": true, "removed":[...], ... }
-	 *
-	 *   // Extra file invalidation
-	 *   POST body: { "paths": ["/abs/file.php"] }
-	 *
-	 * Failure:
-	 * - HMAC guard failure -> 404 via ErrorHandler (endpoint remains undisclosed).
-	 * - Cache file that cannot be removed -> \RuntimeException via ErrorHandler.
+	 * - PROTECTED_FAIL_STATUS through WebhooksAuth::requireOrAbort() when the request is not
+	 *   accepted. No cache is touched.
+	 * - Otherwise removes the cache files through App::clearCache(), then invalidates the extra
+	 *   files that an optional JSON body {"paths": ["/abs/file.php", ...]} lists, then calls
+	 *   opcache_reset(), and answers 200 with:
+	 *     - removed: The cache files removed; empty when none was present.
+	 *     - invalidated: The extra files invalidated in OPcache. They are never removed.
+	 *     - opcache: invalidate_available, invalidation_failed (extra files that OPcache did not
+	 *       invalidate), reset_available, and reset_succeeded (null without opcache_reset()).
+	 *     - ok: Always true; failed: Always empty.
+	 * - An extra path that does not start with the directory separator or is not an existing
+	 *   file is skipped. Without opcache_invalidate() all extra paths are skipped.
+	 * - When App::clearCache() throws, its exception ends the request before any extra file is
+	 *   invalidated or OPcache is reset.
 	 *
 	 * @return void
+	 * @see \CitOmni\Http\Service\WebhooksAuth::requireOrAbort()  Which requests are accepted.
+	 * @see \CitOmni\Kernel\App::clearCache()  Which files are removed, and its failures.
 	 */
 	public function resetCache(): void {
 		$this->app->response->noCache();
 		$raw = $this->app->webhooksAuth->requireOrAbort(self::PROTECTED_FAIL_STATUS);
 
-		// -- 1. Remove the HTTP cache files (the kernel owns the paths) --------
+		// -- 1. Remove the HTTP cache files ------------------------------
 		$removed = \array_values(\array_filter($this->app->clearCache()));
 
-		// -- 2. Invalidate optional extra files from the JSON body -------------
+		// -- 2. Invalidate the extra files from the JSON body ------------
 		$invalidated = [];
 		$invalidationFailed = [];
 		$canInvalidate = \function_exists('opcache_invalidate');
@@ -513,7 +399,7 @@ class SystemController extends BaseController {
 			foreach ($body['paths'] as $p) {
 				$p = (string)$p;
 
-				// Security: only allow absolute paths to avoid cwd tricks
+				// Security: Only allow absolute paths to avoid cwd tricks
 				if ($p === '' || $p[0] !== \DIRECTORY_SEPARATOR || !\is_file($p)) {
 					continue;
 				}
@@ -526,7 +412,7 @@ class SystemController extends BaseController {
 			}
 		}
 
-		// -- 3. Reset the web server's OPcache ---------------------------------
+		// -- 3. Reset the web server's OPcache ---------------------------
 		$canReset = \function_exists('opcache_reset');
 		$resetSucceeded = $canReset ? @\opcache_reset() : null;
 
@@ -546,31 +432,20 @@ class SystemController extends BaseController {
 
 
 	/**
-	 * Warm up CitOmni caches (protected by WebhooksAuth)
+	 * Write the App's HTTP cache files anew.
+	 *
+	 * Runs in the web server's PHP process, so each written file is invalidated in the web
+	 * server's OPcache when opcache_invalidate() exists.
 	 *
 	 * Behavior:
-	 * - Verifies HMAC; unauthorized returns 404.
-	 * - Calls App::warmCache(overwrite: true, opcacheInvalidate: true).
-	 * - Returns number of cache files written.
-	 *
-	 * Notes:
-	 * - Deterministic: cache content depends only on cfg/service maps.
-	 *
-	 * Typical usage:
-	 *   Run post-deploy to ensure next request runs hot (OPcache already primed).
-	 *
-	 * Examples:
-	 *
-	 *   // Happy path
-	 *   POST /_system/warmup-cache -> { "written": 2, "status":"ok" }
-	 *
-	 *   // Idempotent
-	 *   POST again -> written may be equal (overwrites enabled)
-	 *
-	 * Failure:
-	 * - HMAC guard failure -> 404 via ErrorHandler.
+	 * - PROTECTED_FAIL_STATUS through WebhooksAuth::requireOrAbort() when the request is not
+	 *   accepted. No cache is touched.
+	 * - Otherwise overwrites every cache file through App::warmCache() and answers 200 with
+	 *   {"written": n, "status": "ok"}, n being the number of files written.
 	 *
 	 * @return void
+	 * @see \CitOmni\Http\Service\WebhooksAuth::requireOrAbort()  Which requests are accepted.
+	 * @see \CitOmni\Kernel\App::warmCache()  Which files are written, and its failures.
 	 */
 	public function warmupCache(): void {
 		$this->app->response->noCache();
@@ -586,31 +461,20 @@ class SystemController extends BaseController {
 
 
 	/**
-	 * Return the effective upload limits of the HTTP context (protected by WebhooksAuth).
+	 * Answer the upload limits of the web server's PHP process as JSON.
 	 *
 	 * Behavior:
-	 * - Verifies HMAC; unauthorized returns 404.
-	 * - Emits upload_max_filesize and post_max_size as the raw INI values PHP reports,
-	 *   and max_file_uploads as an integer.
+	 * - PROTECTED_FAIL_STATUS through WebhooksAuth::requireOrAbort() when the request is not
+	 *   accepted.
+	 * - Otherwise 200 with upload_max_filesize and post_max_size as the raw INI strings, such
+	 *   as "64M", and max_file_uploads as an integer.
 	 *
 	 * Notes:
-	 * - Values belong to the web server's PHP process serving this request, including FPM
-	 *   pool settings, PHP_VALUE, and per-directory overrides (.user.ini, .htaccess).
-	 *   The CLI SAPI can report different values.
-	 * - No filesystem paths, secrets, or credentials are returned.
-	 *
-	 * Typical usage:
-	 *   Verify a remote host's upload limits after provisioning or a PHP configuration change.
-	 *
-	 * Examples:
-	 *
-	 *   // Happy path
-	 *   GET /_system/upload-limits.json  (HMAC ok) -> { "upload_max_filesize":"64M", "post_max_size":"72M", "max_file_uploads":20 }
-	 *
-	 * Failure:
-	 * - HMAC guard failure -> 404 via ErrorHandler (endpoint remains undisclosed).
+	 * - The values include FPM pool settings, PHP_VALUE and per-directory overrides such as
+	 *   .user.ini and .htaccess. The CLI can report different values.
 	 *
 	 * @return void
+	 * @see \CitOmni\Http\Service\WebhooksAuth::requireOrAbort()  Which requests are accepted.
 	 */
 	public function uploadLimitsJson(): void {
 		$this->app->response->noCache();
@@ -625,29 +489,16 @@ class SystemController extends BaseController {
 
 
 	/**
-	 * Return current maintenance snapshot (protected by WebhooksAuth).
+	 * Answer the maintenance state as JSON.
 	 *
 	 * Behavior:
-	 * - Verifies HMAC; returns enabled, allowed_ips, retry_after, source.
-	 *
-	 * Notes:
-	 * - Read-only; does not modify maintenance state.
-	 *
-	 * Typical usage:
-	 *   Confirm who is allowed during a scheduled maintenance window.
-	 *
-	 * Examples:
-	 *
-	 *   // Baseline
-	 *   GET /_system/maintenance -> { "enabled":true, "allowed_ips":[...], ... }
-	 *
-	 *   // Disabled
-	 *   GET /_system/maintenance -> { "enabled":false, ... }
-	 *
-	 * Failure:
-	 * - HMAC guard failure -> 404 via ErrorHandler.
+	 * - PROTECTED_FAIL_STATUS through WebhooksAuth::requireOrAbort() when the request is not
+	 *   accepted.
+	 * - Otherwise 200 with enabled, allowed_ips, retry_after and source. Nothing changes.
 	 *
 	 * @return void
+	 * @see \CitOmni\Http\Service\WebhooksAuth::requireOrAbort()  Which requests are accepted.
+	 * @see \CitOmni\Http\Service\Maintenance::snapshot()  The meaning of the fields.
 	 */
 	public function maintenance(): void {
 		$this->app->response->noCache();
@@ -665,35 +516,25 @@ class SystemController extends BaseController {
 
 
 	/**
-	 * Enable maintenance mode (protected by WebhooksAuth).
+	 * Enable maintenance mode with the allowlist and Retry-After from the request body.
+	 *
+	 * Lets deployment tooling open a maintenance window while the operators' addresses stay
+	 * allowed.
 	 *
 	 * Behavior:
-	 * - Verifies HMAC; parses JSON body { allowed_ips?:[], retry_after?:int }.
-	 * - Optionally sets retry_after hint; enables maintenance with allowlist.
-	 *
-	 * Notes:
-	 * - IPs are taken verbatim; validation lives in the Maintenance service.
-	 * - Body (JSON):
-	 * 		{
-	 *   		"allowed_ips": ["1.2.3.4", "2001:db8::1", "unknown"],  // optional
-	 *   		"retry_after": 300  // optional
-	 * 		}
-	 *
-	 * Typical usage:
-	 *   Prepare a deploy window while allowing operator IPs through.
-	 *
-	 * Examples:
-	 *
-	 *   // Allow current office IP, set retry hint
-	 *   POST /_system/maintenance/enable  body: {"allowed_ips":["203.0.113.5"],"retry_after":300}
-	 *
-	 *   // Minimal
-	 *   POST /_system/maintenance/enable  body: {}
-	 *
-	 * Failure:
-	 * - HMAC guard failure -> 404 via ErrorHandler.
+	 * - PROTECTED_FAIL_STATUS through WebhooksAuth::requireOrAbort() when the request is not
+	 *   accepted. The maintenance state does not change.
+	 * - Otherwise enables maintenance and answers 200 with {"status": "enabled", "allowed_ips":
+	 *   [...], "retry_after": ...} as stored.
+	 * - The body is optional JSON {"allowed_ips": ["203.0.113.5", ...], "retry_after": 300}:
+	 *     - allowed_ips goes to the Maintenance service as given; it is empty when absent or
+	 *       not an array.
+	 *     - retry_after is cast to an integer and stored when it is 0 or more; otherwise the
+	 *       Maintenance service's default applies.
 	 *
 	 * @return void
+	 * @see \CitOmni\Http\Service\WebhooksAuth::requireOrAbort()  Which requests are accepted.
+	 * @see \CitOmni\Http\Service\Maintenance::enable()  How the allowlist is checked and stored, and its failures.
 	 */
 	public function maintenanceEnable(): void {
 		$this->app->response->noCache();
@@ -720,34 +561,20 @@ class SystemController extends BaseController {
 
 
 	/**
-	 * Disable maintenance mode (protected by WebhooksAuth).
+	 * Disable maintenance mode.
 	 *
 	 * Behavior:
-	 * - Verifies HMAC; optionally sets retry_after hint for clients.
-	 * - Disables maintenance and returns new snapshot.
-	 *
-	 * Notes:
-	 * - retry_after is advisory and does not delay disabling.
-	 * - Body (JSON):
-	 * 		{
-	 *   		"retry_after": 120 // optional (hint to clients)
-	 * 		}
-	 *
-	 * Typical usage:
-	 *   End a maintenance window and restore normal access.
-	 *
-	 * Examples:
-	 *
-	 *   // Provide a short retry_after hint for caches
-	 *   POST /_system/maintenance/disable  body: {"retry_after":120}
-	 *
-	 *   // Minimal
-	 *   POST /_system/maintenance/disable  body: {}
-	 *
-	 * Failure:
-	 * - HMAC guard failure -> 404 via ErrorHandler.
+	 * - PROTECTED_FAIL_STATUS through WebhooksAuth::requireOrAbort() when the request is not
+	 *   accepted. The maintenance state does not change.
+	 * - Otherwise disables maintenance at once and answers 200 with {"status": "disabled",
+	 *   "allowed_ips": [...], "retry_after": ...} as stored.
+	 * - The body is optional JSON {"retry_after": 120}. Cast to an integer, a value of 0 or more
+	 *   is stored as the Retry-After hint; it does not delay disabling. Otherwise the
+	 *   Maintenance service's default applies.
 	 *
 	 * @return void
+	 * @see \CitOmni\Http\Service\WebhooksAuth::requireOrAbort()  Which requests are accepted.
+	 * @see \CitOmni\Http\Service\Maintenance::disable()  What is stored, and its failures.
 	 */
 	public function maintenanceDisable(): void {
 		$this->app->response->noCache();
@@ -773,21 +600,26 @@ class SystemController extends BaseController {
 
 
 	/**
-	 * Diagnose webhook authentication for the current request.
+	 * Diagnose webhook authentication of the current request as JSON.
+	 *
+	 * Lets a client find out, also in production, why its signed requests are rejected. Unlike
+	 * the protected actions, it answers every request, whether WebhooksAuth accepts it or not,
+	 * so it reports only facts that are not secret.
 	 *
 	 * Behavior:
-	 * - Uses the real WebhooksAuth verification engine.
-	 * - Returns structured, non-secret diagnostics for production troubleshooting.
-	 * - Does not expose the raw body, canonical base string, secret, signature value,
-	 *   or calculated HMAC.
-	 *
-	 * Notes:
-	 * - A successful debug request consumes the nonce like any other webhook request.
-	 * - This endpoint should live under /_system/ and must be treated as diagnostic
-	 *   infrastructure. It uses the same webhook auth headers as real system endpoints,
-	 *   but returns controlled diagnostics instead of hiding every failure.
+	 * - 200 with:
+	 *     - authorized, reason (the WebhooksAuth failure reason value, or null) and message.
+	 *     - request: Method, URI, remote address, client IP, content type and length, and the
+	 *       body length in bytes.
+	 *     - headers: Whether the signature, timestamp and nonce headers are present, the
+	 *       lengths of the signature and the nonce, and the timestamp with its age in seconds.
+	 *     - webhooks: Whether verification is enabled, bind_context, ttl_seconds,
+	 *       ttl_clock_skew_tolerance, and whether cfg webhooks.allowed_ips has a non-empty entry.
+	 * - Never contains the body, the signature, the secret or the computed HMAC.
+	 * - A request that WebhooksAuth accepts uses up its nonce, like any accepted request.
 	 *
 	 * @return void
+	 * @see \CitOmni\Http\Service\WebhooksAuth::verify()  Which requests are accepted, and the side effects.
 	 */
 	public function webhookDebug(): void {
 		$this->app->response->noCache();

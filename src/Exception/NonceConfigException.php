@@ -16,16 +16,14 @@ declare(strict_types=1);
 namespace CitOmni\Http\Exception;
 
 /**
- * NonceConfigException: Invalid configuration for the Nonce service.
+ * NonceConfigException: Exception for nonce ledger settings that cannot work.
  *
- * Thrown during init() when:
- * - cfg.nonce.dir is empty or contains a null byte.
- * - The required internal hash algorithm is not supported by ext-hash.
- * - max_len, purge_probability, or purge_limit are out of valid range.
+ * Marks an error in the host app's configuration or PHP environment, such as an invalid nonce
+ * cfg value, not a rejected nonce: Let it reach the global error handler. Fixing it belongs to
+ * the host app.
  *
- * Notes:
- * - Directory creation and writability are checked lazily at runtime.
- * - Runtime storage failures are signalled via false from Nonce::checkAndStore().
+ * Rules:
+ * - Name the cfg key or the missing PHP capability to fix in the message.
  */
 class NonceConfigException extends NonceException {
 }

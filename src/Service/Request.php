@@ -19,143 +19,55 @@ use CitOmni\Kernel\Service\BaseService;
 
 
 /**
- * Request: Deterministic HTTP request facade (method, URI, headers, input, JSON, IP).
+ * Request: HTTP service that reads the current request from PHP's request globals.
  *
- * NOTE:
- * - This service does not perform or know about route matching.
- *   The effective routing table is assembled by \CitOmni\Kernel\App
- *   into $app->routes (vendor + providers + app + env, last-wins).
- *   Request's job is only "what came in from the client", not "which controller did we pick".
+ * Gives controllers and services one read-only view of what the client sent, including which
+ * proxy headers to believe. Matching the request to a route belongs to Router; decoding paths
+ * and validating input belong to the caller. Behind a trusted proxy, Request believes the scheme,
+ * host and port headers as they arrive; removing those the client sent belongs to the proxy.
  *
- * Responsibilities:
- * - Provide a lean, read-only API over PHP SAPI globals for controllers/services.
- *   1) Method and URI resolution (front controller owns routing; no rewriting here).
- *   2) Access to GET/POST maps with null-safe lookups and simple sanitization.
- *   3) JSON body decoding (lazy, single-pass).
- *   4) Case-insensitive header reads and header enumeration.
- *   5) Client IP resolution with optional trusted-proxy awareness.
- *   6) URL parts and predicates: scheme, host, port, path, query string, full URL, base URL, isHttps(), isAjax().
- *   7) Declared body length and PHP's POST size limit (metadata only; never reads the body).
- *
- * Collaborators:
- * - $this->app->cfg->http->trust_proxy       (bool) Toggle proxy-aware scheme/IP detection.
- * - $this->app->cfg->http->trusted_proxies   (array) IP/CIDR allowlist for proxy trust.
- * - $this->app->cfg->http->base_url          (string) Absolute base URL; '' means not set.
- * - CITOMNI_PUBLIC_ROOT_URL                  (const) Optional absolute base URL (stage/prod recommended).
- *
- * Configuration keys (read-only):
- * - http.trust_proxy       (bool)   Default: false. When true, honor proxy headers from trusted peers.
- * - http.trusted_proxies   (array)  IPs/CIDRs considered trusted for X-Forwarded-* and Forwarded.
- * - http.base_url          (string) Absolute canonical base URL; alternative to CITOMNI_PUBLIC_ROOT_URL.
- *
- * Behavior:
- * - Method:
- *   1) method(): string - uppercased $_SERVER['REQUEST_METHOD'] (defaults to "GET").
- * - URI and URL parts:
- *   1) uri(): string - raw REQUEST_URI (path + query).
- *   2) path(): string - path only (leading slash kept; no decoding).
- *   3) queryString(): string - raw query without leading '?' (or empty).
- *   4) scheme(): "https"|"http" - proxy-aware if trust_proxy and peer is trusted.
- *   5) host(): string - host without port.
- *   6) port(): int - SERVER_PORT or default by scheme (80/443).
- *   7) fullUrl(): string - scheme://host[:port]/path?query (default ports omitted).
- *   8) baseUrl(): string - CITOMNI_PUBLIC_ROOT_URL > cfg.http.base_url > computed best-effort.
- * - Input and JSON:
- *   1) get()/post(): mixed - array or value by key; null if missing.
- *   2) input(): mixed - source 'auto' (POST unless GET), or explicit 'get'/'post'.
- *   3) sanitize(): ?string - trim + htmlspecialchars (UTF-8); null if missing.
- *   4) json(): ?array - parses body if Content-Type includes application/json; null on empty/invalid.
- * - Headers, cookies, server:
- *   1) header(name): ?string - case-insensitive; supports Content-Type/Length without HTTP_ prefix.
- *      Returns $default (null by default) when the header is missing.
- *   2) headers(): array<string,string> - best-effort enumeration.
- *   3) cookie(name, default): mixed - value or default.
- *   4) server(key, default): mixed - raw $_SERVER access.
- *   5) contentType(): ?string - lowercased Content-Type, or null when absent.
- *   6) referer(): ?string - HTTP referrer if present.
- *   7) getUserAgent(): ?string - user agent if present.
- * - Client IP:
- *   1) ip(?bool $trustProxy = null): string - "CLI" in CLI; public IP if resolvable; "unknown" otherwise.
- *   2) Honors X-Forwarded-For only when trust_proxy is enabled AND REMOTE_ADDR is trusted. The list
- *      is read from the right, past trusted proxies; the first other entry is the client.
- *   3) getClientIp() is an alias of ip().
- * - Predicates:
- *   1) isHttps(): bool - proxy-aware if allowed and trusted.
- *   2) isSecure(): bool - alias of isHttps().
- *   3) isAjax(): bool - X-Requested-With == XMLHttpRequest.
- *
- * Error handling:
- * - Public APIs return null/empty values for user mistakes (e.g., missing keys, invalid JSON).
- * - Unexpected internal errors bubble to the global error handler (fail fast; no blanket try/catch).
- *
- * Performance:
- * - Read-only facade; no global mutation.
- * - JSON parsing is single-pass and only attempted for JSON content type.
- * - Proxy logic is branch-minimal and executed only when enabled.
- * - (Note) Implementations may read cfg via a wrapper instead of toArray() to avoid materializing large arrays.
- *
- * Typical usage:
- *   $method = $this->app->request->method();      // "GET"
- *   $path   = $this->app->request->path();        // "/contact"
- *   $q      = $this->app->request->get();         // array of query params
- *   $email  = (string)($this->app->request->post('email') ?? '');
- *   if ($this->app->request->isAjax()) { // return compact JSON }
- *   $payload = $this->app->request->json() ?? []; // validate before use
- *   $ip = $this->app->request->ip();              // proxy-aware if cfg says so
- *   $full = $this->app->request->fullUrl();       // absolute URL for logs
- *
- * Examples:
- *   // A) Safe reads with defaults
- *   $page = (int)($this->app->request->get('page') ?? 1);
- *   $term = (string)($this->app->request->sanitize('q') ?? '');
- *
- *   // B) Enable proxy trust at runtime (in bootstrap or env-specific provider)
- *   $this->app->request->setTrustedProxies(['10.0.0.0/8', '192.168.0.0/16']);
- *   $realIp = $this->app->request->ip(true);
- *
- * Notes:
- * - Do not URL-decode path() here; routers/controllers decide decoding policy.
- * - Backwards-compatibility aliases (e.g., getClientIp()) are thin wrappers around canonical methods.
+ * Rules:
+ * - Never write to $_SERVER, $_GET, $_POST or $_COOKIE.
+ * - Derive the scheme, a URL part or the client IP from a proxy header only behind a trusted
+ *   proxy: Proxy trust is on (cfg http.trust_proxy, or the caller's choice where a method
+ *   takes it as an argument) and REMOTE_ADDR matches an entry of the trusted proxy list
+ *   (cfg http.trusted_proxies, unless replaced through setTrustedProxies()).
+ * - Answer missing or malformed client input with null, a default or a documented fallback;
+ *   never throw on it.
+ * - Read php://input only in json(), and only once per instance.
  */
 class Request extends BaseService {
 
 
-/*
- *---------------------------------------------------------------
- * STATE & CONSTANTS - Hot-path fields
- *---------------------------------------------------------------
- * PURPOSE
- *   Keep minimal runtime state; avoid allocations on hot paths.
- *
- * NOTES
- *   - trustedProxies is seeded from cfg in init().
- *   - (Optional) jsonCache memoizes parsed request JSON.
- */
+	// ----------------------------------------------------------------
+	// State
+	// ----------------------------------------------------------------
 
-	/** Explicitly configured trusted proxies (CIDR or IP). */
+	/** @var list<string> Trusted proxy list: IP addresses and CIDR blocks, IPv4 or IPv6; empty trusts no proxy. */
 	protected array $trustedProxies = [];
 	
-	/** Parsed JSON payload cache (null when none/invalid). */
+	/** Decoded JSON body as json() returns it; meaningful only once jsonParsed is true. */
 	private ?array $jsonCache = null;
 
-	/** Whether we already attempted to parse php://input (memoization guard). */
+	/** Whether json() has read the body, so jsonCache holds its result. */
 	private bool $jsonParsed = false;
 
 
-/*
- *---------------------------------------------------------------
- * CONSTRUCTION - Bootstrap & cfg seeding
- *---------------------------------------------------------------
- * PURPOSE
- *   Initialize from cfg (trusted proxies), no heavy work here.
- */
+	// ----------------------------------------------------------------
+	// Setup
+	// ----------------------------------------------------------------
 
 	/**
-	 * Initial actions
+	 * Take the trusted proxy list from cfg http.trusted_proxies.
+	 *
+	 * Behavior:
+	 * - An empty list, or a map instead of a list, leaves no proxy trusted.
+	 *
+	 * @return void
+	 * @see \CitOmni\Kernel\Service\BaseService::__construct()  Calls it once per instance.
 	 */
 	protected function init(): void {
-		// Seed trusted proxies from cfg (keeps setTrustedProxies() useful later). An empty
-		// list is a Cfg node, not an array, and leaves the allowlist empty.
+		// An empty list is a Cfg node, not an array, and leaves the list empty.
 		$proxies = $this->app->cfg->http->trusted_proxies;
 
 		if (\is_array($proxies)) {
@@ -165,16 +77,14 @@ class Request extends BaseService {
 
 
 
-/*
- *---------------------------------------------------------------
- * CORE CONFIG HELPERS - Proxy trust & whitelists
- *---------------------------------------------------------------
- * PURPOSE
- *   Centralize proxy trust checks and whitelist management.
- */
+	// ----------------------------------------------------------------
+	// Proxy trust
+	// ----------------------------------------------------------------
 
 	/**
-	 * Whether to trust proxy headers for scheme/IP.
+	 * Return cfg http.trust_proxy as a bool.
+	 *
+	 * @return bool
 	 */
 	protected function trustProxy(): bool {
 		return (bool)$this->app->cfg->http->trust_proxy;
@@ -182,8 +92,11 @@ class Request extends BaseService {
 
 
 	/**
-	 * Set explicit proxy whitelist (CIDR or IP).
-	 * @param array<int,string> $proxies
+	 * Replace the trusted proxy list, including the one init() took from cfg.
+	 *
+	 * @param  list<string>  $proxies  IP addresses and CIDR blocks, IPv4 or IPv6. An entry that is neither matches nothing; an empty list trusts no proxy.
+	 * @return void
+	 * @see \CitOmni\Http\Service\Request::ipInCidr()  How an entry matches an address.
 	 */
 	public function setTrustedProxies(array $proxies): void {
 		$this->trustedProxies = $proxies;
@@ -191,7 +104,9 @@ class Request extends BaseService {
 
 
 	/**
-	 * @return array<int,string>
+	 * Return the trusted proxy list.
+	 *
+	 * @return list<string>
 	 */
 	public function getTrustedProxies(): array {
 		return $this->trustedProxies;
@@ -199,16 +114,14 @@ class Request extends BaseService {
 
 
 
-/*
- *---------------------------------------------------------------
- * METHOD & INPUT - GET/POST accessors and helpers
- *---------------------------------------------------------------
- * PURPOSE
- *   Deterministic reads from superglobals (no mutation).
- */
+	// ----------------------------------------------------------------
+	// Method and input
+	// ----------------------------------------------------------------
 
 	/**
-	 * HTTP method (uppercased, defaults to GET).
+	 * Return the request method, uppercased.
+	 *
+	 * @return string  "GET" when REQUEST_METHOD is missing.
 	 */
 	public function method(): string {
 		$m = $_SERVER['REQUEST_METHOD'] ?? 'GET';
@@ -217,14 +130,15 @@ class Request extends BaseService {
 
 
 	/**
-	 * Return the SAPI-declared request body length in bytes.
+	 * Return the declared request body length in bytes.
 	 *
-	 * Notes:
-	 * - Reads CONTENT_LENGTH only; never reads or buffers php://input.
-	 * - Missing, malformed, negative or unrepresentable lengths return null.
-	 * - A declared length of zero is valid; leading zeroes are accepted.
+	 * Behavior:
+	 * - Reads CONTENT_LENGTH only, never the body.
+	 * - Null when the length is missing, neither an int nor a string of decimal digits,
+	 *   negative, or larger than PHP_INT_MAX.
+	 * - Zero is a valid length; leading zeroes are accepted.
 	 *
-	 * @return int|null Non-negative byte count, or null when unavailable/invalid.
+	 * @return int|null  Non-negative byte count, or null when the length is unavailable or invalid.
 	 */
 	public function contentLength(): ?int {
 		$value = $_SERVER['CONTENT_LENGTH'] ?? null;
@@ -249,14 +163,13 @@ class Request extends BaseService {
 
 
 	/**
-	 * Return PHP's configured post_max_size in bytes using PHP's own INI parser.
+	 * Return PHP's post_max_size in bytes, parsed as PHP parses INI quantities.
 	 *
 	 * Notes:
-	 * - Non-positive values disable this size limit in PHP 8.5.
-	 * - Suppresses duplicate parser diagnostics: PHP already interpreted the INI
-	 *   value at startup, including legacy fallback behavior for invalid syntax.
+	 * - Emits no warning for an invalid value: PHP already interpreted it, with its own
+	 *   fallback, when it read the INI setting at startup.
 	 *
-	 * @return int Parsed byte limit; values <= 0 mean no active limit.
+	 * @return int  Byte limit; 0 or less means PHP enforces no limit.
 	 */
 	public function postMaxSize(): int {
 		return @\ini_parse_quantity((string)\ini_get('post_max_size'));
@@ -264,14 +177,15 @@ class Request extends BaseService {
 
 
 	/**
-	 * Determine whether this POST body's declared length exceeds PHP's active limit.
+	 * Check whether the declared length of a POST body exceeds post_max_size.
 	 *
 	 * Behavior:
-	 * - Applies only to POST, independent of Content-Type and parsed superglobals.
-	 * - Requires a valid CONTENT_LENGTH and a positive post_max_size.
-	 * - Equal-to-limit bodies are accepted; missing lengths are not guessed.
+	 * - True only for a POST request whose contentLength() is above a positive postMaxSize(),
+	 *   whatever the Content-Type.
+	 * - False for any other method, for a missing, invalid or zero length, and for a body of
+	 *   exactly the limit.
 	 *
-	 * @return bool True only when the declared POST body exceeds the active limit.
+	 * @return bool
 	 */
 	public function exceedsPostMaxSize(): bool {
 		if ($this->method() !== 'POST') {
@@ -288,8 +202,10 @@ class Request extends BaseService {
 
 
 	/**
-	 * $_GET accessor (null key = whole array).
-	 * @return mixed
+	 * Return one query parameter, or all of them.
+	 *
+	 * @param  string|null  $key  Parameter name; null for the whole $_GET array.
+	 * @return mixed  The raw value as PHP parsed it (a string or an array), the whole $_GET array, or null when the key is missing.
 	 */
 	public function get(?string $key = null): mixed {
 		return $key === null ? $_GET : ($_GET[$key] ?? null);
@@ -297,8 +213,10 @@ class Request extends BaseService {
 
 
 	/**
-	 * $_POST accessor (null key = whole array).
-	 * @return mixed
+	 * Return one form body field, or all of them.
+	 *
+	 * @param  string|null  $key  Field name; null for the whole $_POST array.
+	 * @return mixed  The raw value as PHP parsed it (a string or an array), the whole $_POST array, or null when the key is missing.
 	 */
 	public function post(?string $key = null): mixed {
 		return $key === null ? $_POST : ($_POST[$key] ?? null);
@@ -306,9 +224,17 @@ class Request extends BaseService {
 
 
 	/**
-	 * Unified input: 'auto' = POST on non-GET else GET.
-	 * @param mixed $default
-	 * @return mixed
+	 * Return one input value, or all input, from the query or the form body.
+	 *
+	 * Behavior:
+	 * - Source 'auto' reads the query for a GET request and the form body for every other
+	 *   method, HEAD included.
+	 * - Source 'get' reads the query; any other value reads the form body.
+	 *
+	 * @param  string|null  $key  Input name; null for the whole source array.
+	 * @param  mixed  $default  Returned when the key is missing or its value is null.
+	 * @param  string  $source  'auto', 'get' or 'post'.
+	 * @return mixed  The raw value, the whole source array, or $default.
 	 */
 	public function input(?string $key = null, mixed $default = null, string $source = 'auto'): mixed {
 		if ($source === 'auto') {
@@ -322,29 +248,34 @@ class Request extends BaseService {
 
 
 	/**
-	 * Fast boolean presence check across GET/POST.
+	 * Check whether the query or the form body has a key, whatever its value.
+	 *
+	 * @param  string  $key
+	 * @return bool
 	 */
 	public function has(string $key): bool {
 		return \array_key_exists($key, $_GET) || \array_key_exists($key, $_POST);
 	}
 
 
-	/** True if a POST key exists (even if empty string). */
+	/**
+	 * Check whether the form body has a key, whatever its value.
+	 *
+	 * @param  string  $key
+	 * @return bool
+	 */
 	public function hasPost(string $key): bool {
 		return \array_key_exists($key, $_POST);
 	}
 
 
-	/** True if a file was uploaded for $key (not UPLOAD_ERR_NO_FILE). */
-	/*
-	public function hasFile(string $key): bool {
-		return $this->app->files->has($key);
-	}
-	*/
-
 	/**
-	 * Whitelist subset from GET/POST (auto source).
-	 * @param array<int,string> $keys
+	 * Return the input entries whose keys are listed.
+	 *
+	 * @param  list<string>  $keys  Keys to keep; a missing key is left out of the result.
+	 * @param  string  $source  As in input(): 'auto', 'get' or 'post'.
+	 * @return array<string,mixed>  The kept entries, in the order of $keys.
+	 * @see \CitOmni\Http\Service\Request::input()  Which source 'auto' reads.
 	 */
 	public function only(array $keys, string $source = 'auto'): array {
 		$bag = (array)$this->input(null, [], $source);
@@ -359,8 +290,12 @@ class Request extends BaseService {
 
 
 	/**
-	 * Everything except blacklist keys from GET/POST (auto source).
-	 * @param array<int,string> $keys
+	 * Return all input entries except those whose keys are listed.
+	 *
+	 * @param  list<string>  $keys  Keys to leave out.
+	 * @param  string  $source  As in input(): 'auto', 'get' or 'post'.
+	 * @return array<string,mixed>
+	 * @see \CitOmni\Http\Service\Request::input()  Which source 'auto' reads.
 	 */
 	public function except(array $keys, string $source = 'auto'): array {
 		$bag = (array)$this->input(null, [], $source);
@@ -372,16 +307,17 @@ class Request extends BaseService {
 
 
 	/**
-	 * Simple sanitizer (trim + htmlspecialchars). Returns null if missing.
+	 * Return one input value trimmed and HTML-escaped.
 	 *
 	 * Behavior:
-	 * - $method 'get', 'post' or 'both' (query first, then form body).
-	 * - Only string values count. Array-shaped input (PHP parses "?q[]=x" into an
-	 *   array) is treated as missing, so 'both' falls through to the form body.
+	 * - 'both' reads the query first and falls through to the form body.
+	 * - Only string values count. Array-shaped input (PHP parses "?q[]=x" into an array) is
+	 *   treated as missing, so 'both' falls through to the form body.
+	 * - Escapes with htmlspecialchars(), ENT_QUOTES | ENT_SUBSTITUTE, UTF-8.
 	 *
-	 * @param string $key    Input key.
-	 * @param string $method 'get', 'post' or 'both'.
-	 * @return ?string Trimmed, HTML-escaped value, or null when no string value exists.
+	 * @param  string  $key  Input name.
+	 * @param  string  $method  'get', 'post' or 'both'; any other value reads nothing.
+	 * @return string|null  Trimmed, escaped value, or null when no string value exists.
 	 */
 	public function sanitize(string $key, string $method = 'both'): ?string {
 		$value = null;
@@ -396,119 +332,96 @@ class Request extends BaseService {
 
 
 
-/*
- *---------------------------------------------------------------
- * FILES & JSON - Upload map + JSON payload
- *---------------------------------------------------------------
- * PURPOSE
- *   Safe access to $_FILES and (lazy) JSON body parsing.
- */
+	// ----------------------------------------------------------------
+	// JSON body
+	// ----------------------------------------------------------------
 
 
 	/**
-	 * Parse the request body as JSON (associative array) with caching.
+	 * Return the request body decoded as JSON.
 	 *
 	 * Behavior:
-	 * - Only parses when Content-Type is JSON: "application/json", "text/json", or any subtype ending in "+json".
-	 * - Reads php://input exactly once per request; result is cached for subsequent calls.
-	 * - Returns null if body is empty, Content-Type is not JSON, decoding fails, or top-level is not an array/object.
-	 * - Large integers are preserved as strings via JSON_BIGINT_AS_STRING (no precision loss).
-	 *
-	 * Notes:
-	 * - Idempotent and side-effect free after first call.
-	 * - Does not throw; failures return null by design.
+	 * - Decodes only when contentType() is "application/json", "text/json" or ends in "+json".
+	 * - A UTF-8 BOM at the start of the body and whitespace around the JSON are ignored.
+	 * - Objects become associative arrays; integers too large for an int stay strings.
+	 * - Null when the media type is not JSON, the body is empty or unreadable, the JSON is
+	 *   invalid or nested 512 or more levels deep, or its top level is not an object or array.
+	 * - Reads php://input on the first call only; later calls return the same result.
 	 *
 	 * Typical usage:
-	 *   $data = $this->app->request->json();
-	 *   if ($data !== null) { /* use $data */ /* }
+	 *   $payload = $this->app->request->json() ?? [];
 	 *
-	 * @return array<string,mixed>|list<mixed>|null Decoded JSON as assoc array, or null if not available/valid.
+	 * @return array<mixed>|null  Decoded object or array, or null when no valid JSON body exists.
 	 */
 	public function json(): ?array {
 		
-		// Fast path: already parsed
 		if ($this->jsonParsed) {
 			return $this->jsonCache;
 		}
 		$this->jsonParsed = true;
 
-		// Accept standard JSON media types (parameters already stripped in contentType())
+		// contentType() has already stripped the parameters.
 		$ct = $this->contentType();
 		if ($ct === null) {
 			return $this->jsonCache = null;
 		}
 		if ($ct !== 'application/json' && $ct !== 'text/json' && !\str_ends_with($ct, '+json')) {
-			return $this->jsonCache = null; // Not a JSON request
+			return $this->jsonCache = null;
 		}
 
-		// Read raw body (once); guard against failures and empty payloads
 		$raw = \file_get_contents('php://input');
 		if ($raw === false) {
 			return $this->jsonCache = null;
 		}
 
-		// Strip UTF-8 BOM (rare but happens) and trim whitespace
 		$raw = \ltrim($raw, "\xEF\xBB\xBF");
 		$raw = \trim($raw);
 		if ($raw === '') {
 			return $this->jsonCache = null;
 		}
 
-		// Decode as associative array; keep big integers as strings
 		$decoded = \json_decode($raw, true, 512, \JSON_BIGINT_AS_STRING);
 
-		// If decoding failed or top-level is not array/object, standardize to null
 		if (\json_last_error() !== \JSON_ERROR_NONE || !\is_array($decoded)) {
 			return $this->jsonCache = null;
 		}
 
-		// Cache and return
 		return $this->jsonCache = $decoded;
 	}
 
 
 
 
-/*
- *---------------------------------------------------------------
- * HEADERS, COOKIES & SERVER - Case-insensitive reads
- *---------------------------------------------------------------
- * PURPOSE
- *   Best-effort header enumeration and direct access helpers.
- */
+	// ----------------------------------------------------------------
+	// Headers, cookies and server values
+	// ----------------------------------------------------------------
 
 
 	/**
-	 * Fetch a single HTTP header value (case-insensitive).
-	 *
-	 * Looks up the header in $_SERVER using the conventional "HTTP_*" key and
-	 * returns the first value if present. Handles the two special CGI keys that
-	 * are not prefixed with "HTTP_": Content-Type and Content-Length.
+	 * Return one request header.
 	 *
 	 * Behavior:
-	 * - Normalizes the header name to "HTTP_FOO_BAR".
-	 * - Returns $default (which may be null) when the header is not set.
-	 * - Does not attempt to parse multi-value headers.
+	 * - The name is case-insensitive.
+	 * - Content-Type and Content-Length are also found without the HTTP_ prefix, as CGI and
+	 *   FPM provide them.
+	 * - Returns the value as the server provides it; a repeated header is not split.
 	 *
 	 * Typical usage:
-	 *   $ctype = $this->app->request->header('Content-Type'); // e.g. "application/json"
+	 *   $token = $this->app->request->header('X-CSRF-Token');
 	 *
-	 * @param string     $name    Header name (case-insensitive), e.g. "Content-Type".
-	 * @param string|null $default Value to return when the header is missing (default: null).
-	 * @return string|null Header value or $default when not present.
+	 * @param  string  $name  Header name, such as "Content-Type".
+	 * @param  string|null  $default  Returned when the header is missing.
+	 * @return string|null
 	 */
 	public function header(string $name, ?string $default = null): ?string {
 		
-		// Convert "X-Requested-With" -> "HTTP_X_REQUESTED_WITH" for $_SERVER lookup.
 		$key = 'HTTP_' . \strtoupper(\str_replace('-', '_', $name));
 
-		// Fast path: standard HTTP_* server key present.
 		if (isset($_SERVER[$key])) {
 			return (string)$_SERVER[$key];
 		}
 
-		// Special cases: PHP exposes these without the HTTP_ prefix under CGI/FPM.
-		// Return $default (possibly null) when the key is absent.
+		// PHP exposes these two without the HTTP_ prefix under CGI/FPM.
 		return match (\strtolower($name)) {
 			'content-type'   => isset($_SERVER['CONTENT_TYPE'])   ? (string)$_SERVER['CONTENT_TYPE']   : $default,
 			'content-length' => isset($_SERVER['CONTENT_LENGTH']) ? (string)$_SERVER['CONTENT_LENGTH'] : $default,
@@ -518,8 +431,14 @@ class Request extends BaseService {
 
 
 	/**
-	 * All HTTP-like headers (best-effort).
-	 * @return array<string,string>
+	 * Return every request header the server provides.
+	 *
+	 * Behavior:
+	 * - Names are lowercased with "-" between words, such as "x-requested-with".
+	 * - Includes content-type and content-length when the server provides them without the
+	 *   HTTP_ prefix.
+	 *
+	 * @return array<string,string>  Header name to value.
 	 */
 	public function headers(): array {
 		$out = [];
@@ -540,8 +459,11 @@ class Request extends BaseService {
 
 
 	/**
-	 * Cookie accessor.
-	 * @return mixed
+	 * Return one request cookie.
+	 *
+	 * @param  string  $key  Cookie name.
+	 * @param  mixed  $default  Returned when the cookie is missing or null.
+	 * @return mixed  The raw value from $_COOKIE, or $default.
 	 */
 	public function cookie(string $key, mixed $default = null): mixed {
 		return $_COOKIE[$key] ?? $default;
@@ -549,7 +471,10 @@ class Request extends BaseService {
 
 
 	/**
-	 * Raw server value.
+	 * Return one raw $_SERVER value.
+	 *
+	 * @param  string  $key  $_SERVER key, such as "REMOTE_ADDR".
+	 * @param  mixed  $default  Returned when the key is missing or null.
 	 * @return mixed
 	 */
 	public function server(string $key, mixed $default = null): mixed {
@@ -558,9 +483,9 @@ class Request extends BaseService {
 
 
 	/**
-	 * Get normalized MIME type from Content-Type (lowercased, no parameters).
+	 * Return the media type of the Content-Type header.
 	 *
-	 * @return string|null e.g. "application/json" or null if missing.
+	 * @return string|null  Lowercased and trimmed, without parameters, such as "application/json"; null when the header is missing.
 	 */
 	public function contentType(): ?string {
 		$ct = $this->header('Content-Type');
@@ -576,7 +501,9 @@ class Request extends BaseService {
 
 
 	/**
-	 * HTTP referrer (if provided).
+	 * Return the Referer header.
+	 *
+	 * @return string|null  Null when the header is missing or empty.
 	 */
 	public function referer(): ?string {
 		$ref = (string)($_SERVER['HTTP_REFERER'] ?? '');
@@ -585,7 +512,9 @@ class Request extends BaseService {
 
 
 	/**
-	 * User agent string (if provided).
+	 * Return the User-Agent header.
+	 *
+	 * @return string|null  Null when the header is missing; an empty header stays "".
 	 */
 	public function getUserAgent(): ?string {
 		$ua = $_SERVER['HTTP_USER_AGENT'] ?? null;
@@ -594,20 +523,16 @@ class Request extends BaseService {
 
 
 
-/*
- *---------------------------------------------------------------
- * TRANSPORT & URL PARTS - Scheme/host/port/path/query
- *---------------------------------------------------------------
- * PURPOSE
- *   Compute canonical parts and absolute/full URLs.
- *
- * NOTES
- *   - Host/port may be proxy-aware if trust is enabled + remote is trusted.
- */
+	// ----------------------------------------------------------------
+	// URL parts
+	// ----------------------------------------------------------------
 
 
 	/**
-	 * URL scheme ('https' or 'http').
+	 * Return the scheme of the request.
+	 *
+	 * @return string  "https" when isHttps() is true, otherwise "http".
+	 * @see \CitOmni\Http\Service\Request::isHttps()  Which signals count as HTTPS.
 	 */
 	public function scheme(): string {
 		return $this->isHttps() ? 'https' : 'http';
@@ -615,61 +540,50 @@ class Request extends BaseService {
 
 
 	/**
-	 * Resolve the effective request host (without port).
+	 * Return the host the client addressed, without the port.
 	 *
 	 * Behavior:
-	 * - Starts from `HTTP_HOST`, falls back to `SERVER_NAME` when missing.
-	 * - If proxy trust is enabled *and* the calling peer is trusted, prefers
-	 *   the client-facing host from `X-Forwarded-Host` (first entry) or
-	 *   RFC 7239 `Forwarded` header's `host=` parameter.
-	 * - Strips any `:port` suffix.
-	 * - Handles bracketed IPv6 literals: "[2001:db8::1]:8443" -> "2001:db8::1".
-	 * - For safety, the result is sanitized to a conservative character set.
+	 * - Reads the Host header, or SERVER_NAME when the header is missing.
+	 * - Behind a trusted proxy, a proxy header wins, in this order:
+	 *     1) The first entry of X-Forwarded-Host, when the header is not empty.
+	 *     2) The host parameter of the first hop of Forwarded (RFC 7239), quotes removed,
+	 *        when it is present and not empty.
+	 * - Keeps only ASCII letters, digits, ".", "-", "[", "]" and ":", so control characters
+	 *   and other header text never pass.
+	 * - Strips a port. A bracketed IPv6 literal is returned without brackets
+	 *   ("[2001:db8::1]:8443" gives "2001:db8::1"); an unbracketed one is returned whole.
+	 * - "localhost" when no host is left.
 	 *
 	 * Notes:
-	 * - We do not lowercase or punycode the host; callers can normalize if needed.
-	 * - Proxy-derived values are only used when both:
-	 *     1) http.trust_proxy is true, and
-	 *     2) REMOTE_ADDR is in the trusted proxies allowlist.
+	 * - Neither lowercased nor converted to punycode.
 	 *
-	 * @return string Hostname or IP literal (without port). Falls back to "localhost" if empty.
+	 * @return string  Host name or IP literal.
 	 */
 	public function host(): string {
-		// Base host from server globals
 		$h = (string)($_SERVER['HTTP_HOST'] ?? $_SERVER['SERVER_NAME'] ?? '');
 
-		// Proxy-aware override when explicitly allowed and the peer is trusted
 		if ($this->trustProxy() && $this->clientIpIsTrusted($this->trustedProxies)) {
 			
 			if (!empty($_SERVER['HTTP_X_FORWARDED_HOST'])) {
 				
-				// e.g. "example.com, proxy.local" -> take first
 				$h = \trim(\explode(',', (string)$_SERVER['HTTP_X_FORWARDED_HOST'])[0]);
 				
 			} elseif (!empty($_SERVER['HTTP_FORWARDED'])) {
 				
-				// RFC 7239 "Forwarded" can contain multiple hops separated by commas.
-				// Example:
-				//   Forwarded: for=203.0.113.43;proto=https;host=example.com,
-				//              for=192.0.2.1;proto=https;host=proxy.local
-				// We only care about the first hop (the client-facing proxy).
+				// RFC 7239: Hops are separated by commas and parameters by semicolons. Only the
+				// first hop counts: Assumes the proxy that faces the client replaced any Forwarded
+				// header the client sent.
 				$first = \explode(',', (string)$_SERVER['HTTP_FORWARDED'], 2)[0];
 
 				foreach (\explode(';', $first) as $pair) {
 					
-					// Each hop is a semicolon-separated list of key=value parameters.
-					// Split the current "key=value" pair into its parts. If "=" is missing
-					// (malformed input), pad with empty strings so $k/$v are always defined.
-					// Then trim both to normalize whitespace around keys/values.
+					// A pair without "=" is padded, so $k and $v are always defined.
 					[$k, $v] = \array_map('trim', \explode('=', $pair, 2) + ['', '']);
 
 					// Parameter names are case-insensitive per RFC 7239.
-					// We are only interested in "host" and require a non-empty value.
 					if (\strtolower($k) === 'host' && $v !== '') {
 						
-						// The host parameter may be a quoted-string (e.g., host="example.com:8443").
-						// Remove surrounding single/double quotes only; keep the inner content intact.
-						// Any ":port" part is handled by later normalization logic.
+						// The value may be a quoted-string; a port is stripped below.
 						$h = \trim($v, "\"'");
 						break;
 					}
@@ -677,77 +591,64 @@ class Request extends BaseService {
 			}
 		}
 
-		// Sanitize to a conservative set; keep [] and : for subsequent parsing
-		// to avoid header smuggling or control chars.
+		// Brackets and ":" stay for the IPv6 and port parsing below.
 		$h = (string)\preg_replace('/[^a-zA-Z0-9\.\-\[\]:]/', '', $h);
 
 		// Bracketed IPv6: "[2001:db8::1]:8443" or "[2001:db8::1]"
 		if ($h !== '' && $h[0] === '[') {
 			$rb = \strpos($h, ']');
 			if ($rb !== false) {
-				$inside = \substr($h, 1, $rb - 1); // content between '[' and ']'
+				$inside = \substr($h, 1, $rb - 1);
 				return $inside !== '' ? $inside : 'localhost';
 			}
 			// Malformed bracketed form; fall through to generic handling.
 		}
 
-		// If there are multiple ":" characters and no brackets, this is most likely
-		// a raw (non-bracketed) IPv6 literal without a port. Per RFC, IPv6 in Host
-		// should be bracketed when used with a port, so leave it as-is.
+		// Several ":" without brackets: An IPv6 literal without a port. A Host header must
+		// bracket IPv6 when it adds a port, so the value is left as it is.
 		$firstColon = \strpos($h, ':');
 		if ($firstColon !== false) {
 			$lastColon = \strrpos($h, ':');
 			if ($firstColon !== $lastColon) {
 				return $h !== '' ? $h : 'localhost';
 			}
-			// Single ":" -> treat as host:port and strip the port part.
+			// One ":" is host:port.
 			$hostPart = \substr($h, 0, $firstColon);
 			return $hostPart !== '' ? $hostPart : 'localhost';
 		}
 
-		// No port delimiter present; return sanitized host or a safe fallback.
 		return $h !== '' ? $h : 'localhost';
 	}
 
 
 	/**
-	 * Resolve the effective client-facing server port.
+	 * Return the port the client addressed.
 	 *
 	 * Behavior:
-	 * - If proxies are trusted AND the peer is on the whitelist:
-	 *   1) Use X-Forwarded-Port when present (>0).
-	 *   2) Else parse RFC 7239 Forwarded header's host token for ":port"
-	 *      (supports bracketed IPv6: "[2001:db8::1]:8443").
-	 * - Otherwise fall back to SERVER_PORT when present.
-	 * - If SERVER_PORT conflicts with the resolved scheme, normalize common
-	 *   reverse-proxy mismatches:
-	 *   - https + 80  => 443
-	 *   - http  + 443 => 80
-	 * - If still unknown, infer from isHttps(): 443 (https) or 80 (http).
+	 * - Behind a trusted proxy, in this order:
+	 *     1) X-Forwarded-Port, when its integer value is positive.
+	 *     2) The port in the host parameter of the first hop of Forwarded (RFC 7239), also
+	 *        after a bracketed IPv6 literal ("[2001:db8::1]:8443").
+	 * - Otherwise SERVER_PORT when it is positive. 80 counts as 443 when isHttps() is true.
+	 * - Otherwise 443 when isHttps() is true, else 80.
 	 *
 	 * Notes:
-	 * - Proxy-derived data is only honored when both trustProxy() and
-	 *   clientIpIsTrusted(...) are true (defense in depth).
-	 * - This method returns the public-facing effective port, not necessarily
-	 *   the backend listener port seen by PHP-FPM or Apache behind a proxy.
+	 * - Behind a TLS-terminating proxy that is not trusted, SERVER_PORT is the port the proxy
+	 *   connects to, not the one the client used.
+	 * - A port from a proxy header or SERVER_PORT is not checked against 65535.
 	 *
-	 * Typical usage:
-	 *   $port = $this->app->request->port();
-	 *
-	 * @return int TCP port number (1..65535) or a sane default (80/443).
+	 * @return int  Positive port number.
 	 */
 	public function port(): int {
 		
-		// Proxy-aware path (only if we explicitly trust the proxy and the caller)
 		if ($this->trustProxy() && $this->clientIpIsTrusted($this->trustedProxies)) {
 			
-			// 1) X-Forwarded-Port: Direct and unambiguous
 			$xfp = (int)($_SERVER['HTTP_X_FORWARDED_PORT'] ?? 0);
 			if ($xfp > 0) {
 				return $xfp;
 			}
 
-			// 2) RFC 7239 Forwarded: host=example.com:8443 or host="[::1]:8443"
+			// RFC 7239 host parameter: host=example.com:8443 or host="[::1]:8443"
 			if (!empty($_SERVER['HTTP_FORWARDED'])) {
 				
 				$first = \explode(',', (string)$_SERVER['HTTP_FORWARDED'], 2)[0];
@@ -755,7 +656,7 @@ class Request extends BaseService {
 				foreach (\explode(';', $first) as $pair) {
 					[$k, $v] = \array_map('trim', \explode('=', $pair, 2) + ['', '']);
 					if (\strtolower($k) === 'host' && $v !== '') {
-						$v = \trim($v, "\"'"); // Strip potential quotes
+						$v = \trim($v, "\"'");
 
 						// Bracketed IPv6 literal: "[2001:db8::1]:8443"
 						if ($v !== '' && $v[0] === '[') {
@@ -769,7 +670,7 @@ class Request extends BaseService {
 							break;
 						}
 
-						// Non-bracketed: Take last ":" as delimiter (covers IPv4/hostnames)
+						// Not bracketed: The last ":" separates the port of an IPv4 address or name.
 						$pos = \strrpos($v, ':');
 						if ($pos !== false) {
 							$port = (int)\substr($v, $pos + 1);
@@ -782,12 +683,11 @@ class Request extends BaseService {
 			}
 		}
 
-		// Fallback: Direct server value
 		$p = (int)($_SERVER['SERVER_PORT'] ?? 0);
 		if ($p > 0) {
 			$isHttps = $this->isHttps();
 
-			// Normalize common backend/public port mismatches behind TLS terminators
+			// A TLS terminator may reach PHP on port 80 while the client used 443.
 			if ($isHttps && $p === 80) {
 				return 443;
 			}
@@ -798,13 +698,14 @@ class Request extends BaseService {
 			return $p;
 		}
 
-		// Last resort: Infer from scheme
 		return $this->isHttps() ? 443 : 80;
 	}
 
 
 	/**
-	 * Raw request URI (path + query).
+	 * Return the request target as the client sent it.
+	 *
+	 * @return string  REQUEST_URI, path and query, not decoded; "/" when it is missing.
 	 */
 	public function uri(): string {
 		return (string)($_SERVER['REQUEST_URI'] ?? '/');
@@ -812,7 +713,9 @@ class Request extends BaseService {
 
 
 	/**
-	 * Path part only (no query string), leading slash retained.
+	 * Return the path of the request target, without the query string.
+	 *
+	 * @return string  Not decoded; "/" when REQUEST_URI is missing.
 	 */
 	public function pathRaw(): string {
 		$uri = $this->uri();
@@ -822,7 +725,20 @@ class Request extends BaseService {
 
 
 	/**
-	 * Path with app base trimmed, e.g. "/subdir/admin/x.html" -> "/admin/x.html".
+	 * Return the path relative to the app's root.
+	 *
+	 * Behavior:
+	 * - Removes the path of baseUrl() from the front of pathRaw(), so "/app/users" gives
+	 *   "/users" for an app at /app; the root itself gives "/".
+	 * - Returns pathRaw() unchanged when the app is at the web root or the path does not start
+	 *   with the app's path.
+	 *
+	 * Notes:
+	 * - The app's path is matched as a string prefix, not by segment: For an app at /app,
+	 *   "/apple" gives "le".
+	 *
+	 * @return string  Not decoded.
+	 * @see \CitOmni\Http\Service\Request::baseUrl()  Where the app's root comes from.
 	 */
 	public function pathFromAppRoot(): string {
 		$path = $this->pathRaw();
@@ -839,7 +755,9 @@ class Request extends BaseService {
 
 
 	/**
-	 * Query string without '?' or empty string.
+	 * Return the raw query string.
+	 *
+	 * @return string  QUERY_STRING without the "?", not decoded; "" when it is missing.
 	 */
 	public function queryString(): string {
 		return (string)($_SERVER['QUERY_STRING'] ?? '');
@@ -847,9 +765,9 @@ class Request extends BaseService {
 
 
 	/**
-	 * Return all query parameters (shallow copy of $_GET).
+	 * Return all query parameters.
 	 *
-	 * @return array<string,mixed>
+	 * @return array<string,mixed>  A copy of $_GET.
 	 */
 	public function queryAll(): array {
 		return $_GET;
@@ -857,7 +775,11 @@ class Request extends BaseService {
 
 
 	/**
-	 * Full URL (scheme://host[:port]/path?query). Omits default ports.
+	 * Return the absolute URL of the request.
+	 *
+	 * @return string  scheme://host[:port] followed by uri(); the port only when it is not the scheme's default.
+	 * @see \CitOmni\Http\Service\Request::host()  The host, also behind a proxy.
+	 * @see \CitOmni\Http\Service\Request::port()  The port, also behind a proxy.
 	 */
 	public function fullUrl(): string {
 		$scheme = $this->scheme();
@@ -874,11 +796,23 @@ class Request extends BaseService {
 
 
 	/**
-	 * Base URL.
-	 * Priority:
-	 * 1) CITOMNI_PUBLIC_ROOT_URL constant (stage/prod recommended)
-	 * 2) $this->app->cfg->http->base_url (absolute)
-	 * 3) Computed from current request (best-effort)
+	 * Return the absolute URL of the app's root.
+	 *
+	 * Behavior:
+	 * - Precedence:
+	 *     1) The constant CITOMNI_PUBLIC_ROOT_URL, when it is defined and not empty.
+	 *     2) Cfg http.base_url, when it is not empty.
+	 *     3) scheme(), host() and port() of this request, the port only when it is not the
+	 *        scheme's default, followed by the directory of uri().
+	 * - 1) and 2) end in exactly one "/". 3) ends in "/" unless the directory is the web
+	 *   root; then it ends with the host or port.
+	 *
+	 * Notes:
+	 * - 1) and 2) are not checked to be absolute URLs.
+	 * - 3) is a guess: The directory of uri() is the app's root only for a request to a page
+	 *   directly below it.
+	 *
+	 * @return string
 	 */
 	public function baseUrl(): string {
 		
@@ -892,7 +826,6 @@ class Request extends BaseService {
 			return \rtrim($cfgBase, '/') . '/';
 		}
 		
-		// Fallback: scheme + host + (optional port) + detected webroot (shallow, but cheap)
 		$scheme = $this->scheme();
 		$host   = $this->host();
 		$port   = $this->port();
@@ -900,7 +833,7 @@ class Request extends BaseService {
 		if (($scheme === 'https' && $port !== 443) || ($scheme === 'http' && $port !== 80)) {
 			$portPart = ':' . $port;
 		}
-		// Best-effort: strip REQUEST_URI to directory (no disk IO)
+		// Derived from the URI alone, with no filesystem lookup.
 		$uri  = $this->uri();
 		$dir  = \rtrim(\dirname($uri), '/\\');
 		$dir  = $dir === '' ? '' : $dir . '/';
@@ -910,19 +843,30 @@ class Request extends BaseService {
 
 
 
-/*
- *---------------------------------------------------------------
- * PREDICATES - Transport and request intent
- *---------------------------------------------------------------
- * PURPOSE
- *   Quick booleans often used in controllers/services.
- */
+	// ----------------------------------------------------------------
+	// Predicates
+	// ----------------------------------------------------------------
 
 	/**
-	 * HTTPS detection (proxy-aware if enabled in cfg or forced).
+	 * Check whether the client reached the app over HTTPS.
+	 *
+	 * Behavior:
+	 * - True when the server reports HTTPS: HTTPS is set, not empty and not "off",
+	 *   REQUEST_SCHEME is "https", or SERVER_PORT is 443.
+	 * - Otherwise, only behind a trusted proxy, true when one of these headers says HTTPS
+	 *   (values compared case-insensitively):
+	 *     - Forwarded (RFC 7239): proto=https in the first hop, quotes removed.
+	 *     - X-Forwarded-Proto: First entry "https".
+	 *     - X-Forwarded-Ssl: "on".
+	 *     - X-Forwarded-Scheme: "https".
+	 *     - Front-End-Https: "on" or "1".
+	 *     - X-Url-Scheme: "https".
+	 *     - CF-Visitor: JSON whose scheme is "https".
+	 * - False otherwise.
+	 *
+	 * @return bool
 	 */
 	public function isHttps(): bool {
-		// Direct server signals:
 		$https = $_SERVER['HTTPS'] ?? '';
 		if ($https !== '' && \strtolower((string)$https) !== 'off') {
 			return true;
@@ -934,7 +878,6 @@ class Request extends BaseService {
 			return true;
 		}
 
-		// Proxy-aware path if allowed and remote is trusted:
 		if (!$this->trustProxy()) {
 			return false;
 		}
@@ -942,7 +885,6 @@ class Request extends BaseService {
 			return false;
 		}
 
-		// RFC 7239 Forwarded: proto=
 		$fw = $_SERVER['HTTP_FORWARDED'] ?? '';
 		if ($fw !== '') {
 			$first = \explode(',', (string)$fw, 2)[0];
@@ -986,7 +928,10 @@ class Request extends BaseService {
 
 
 	/**
-	 * Alias for isHttps().
+	 * Check whether the client reached the app over HTTPS.
+	 *
+	 * @return bool
+	 * @see \CitOmni\Http\Service\Request::isHttps()  Same result.
 	 */
 	public function isSecure(): bool {
 		return $this->isHttps();
@@ -994,7 +939,9 @@ class Request extends BaseService {
 
 
 	/**
-	 * True if X-Requested-With=XMLHttpRequest (AJAX).
+	 * Check whether the X-Requested-With header is "XMLHttpRequest", compared case-insensitively.
+	 *
+	 * @return bool
 	 */
 	public function isAjax(): bool {
 		return \strtolower((string)($this->header('X-Requested-With') ?? '')) === 'xmlhttprequest';
@@ -1004,35 +951,39 @@ class Request extends BaseService {
 
 
 
-/*
- *---------------------------------------------------------------
- * CLIENT IP (PROXY-AWARE) - Canonical remote address
- *---------------------------------------------------------------
- * PURPOSE
- *   Resolve client IP with optional trusted-proxy logic.
- */
+	// ----------------------------------------------------------------
+	// Client IP
+	// ----------------------------------------------------------------
 
 	/**
-	 * Client IP address, proxy-aware when allowed.
+	 * Return the public IP address of the client.
 	 *
 	 * Behavior:
-	 * - In CLI: always "CLI".
-	 * - Without proxy trust, or when REMOTE_ADDR is not a trusted proxy: REMOTE_ADDR.
-	 * - Behind a trusted proxy: X-Forwarded-For is read from the right. Each proxy
-	 *   appends the address it received the request from, so entries are skipped while
-	 *   they are trusted proxies, and the first other entry is the client. Entries to
-	 *   its left come from the client and are never used.
-	 * - Behind a trusted proxy without X-Forwarded-For: REMOTE_ADDR.
-	 * - The result is returned only when it is a public address; otherwise "unknown".
+	 * - "CLI" when PHP_SAPI is "cli".
+	 * - REMOTE_ADDR, unless proxy trust is on and REMOTE_ADDR matches the trusted proxy list.
+	 * - Behind a trusted proxy, X-Forwarded-For is read from the right: Entries that match
+	 *   the trusted proxy list are skipped, and the first other entry, trimmed, is the client.
+	 *   Entries to its left are never used.
+	 *     - REMOTE_ADDR when X-Forwarded-For is missing or empty.
+	 *     - "unknown" when every entry is a trusted proxy.
+	 * - The result is returned only when it is a valid IP address outside the private and
+	 *   reserved ranges; otherwise "unknown".
+	 * - No other header is read: Forwarded, Client-Ip, X-Cluster-Client-Ip and similar
+	 *   headers never count.
 	 *
 	 * Notes:
-	 * - Every proxy in the chain (load balancer, CDN) must be listed in
-	 *   http.trusted_proxies. The first unlisted one is taken as the client.
-	 * - Other client-IP headers (Client-Ip, X-Cluster-Client-Ip, ...) are not read;
-	 *   proxies pass them on from the client unchanged.
+	 * - Each proxy appends the address it received the request from, so the entries to the
+	 *   left of the last untrusted one may be forged by the client.
+	 * - Every proxy in the chain, such as a load balancer and a CDN, must be in the trusted
+	 *   proxy list. The first one missing from it is taken as the client, and a private
+	 *   address there gives "unknown".
 	 *
-	 * @param bool|null $trustProxy Overrides http.trust_proxy when not null.
-	 * @return string Public client IP, "unknown", or "CLI".
+	 * Typical usage:
+	 *   $ip = $this->app->request->ip();
+	 *
+	 * @param  bool|null  $trustProxy  Proxy trust for this call; null uses cfg http.trust_proxy.
+	 * @return string  Client IP, "unknown" or "CLI".
+	 * @see \CitOmni\Http\Service\Request::ipInCidr()  How a trusted proxy entry matches an address.
 	 */
 	public function ip(?bool $trustProxy = null): string {
 		if (\PHP_SAPI === 'cli') {
@@ -1046,7 +997,7 @@ class Request extends BaseService {
 		if ($useProxy && $remoteAddr !== '' && $this->clientIpIsTrusted($this->trustedProxies)) {
 			$xff = (string)($_SERVER['HTTP_X_FORWARDED_FOR'] ?? '');
 			if ($xff !== '') {
-				// Right to left: skip trusted proxies; the first other entry is the client.
+				// Right to left: Only entries appended by trusted proxies can be believed.
 				$client = '';
 				$hops = \explode(',', $xff);
 				for ($i = \count($hops) - 1; $i >= 0; $i--) {
@@ -1064,7 +1015,11 @@ class Request extends BaseService {
 
 
 	/**
-	 * Backwards-compatible alias for ip().
+	 * Return the public IP address of the client.
+	 *
+	 * @param  bool|null  $trustProxy  Proxy trust for this call; null uses cfg http.trust_proxy.
+	 * @return string  Client IP, "unknown" or "CLI".
+	 * @see \CitOmni\Http\Service\Request::ip()  Same result.
 	 */
 	public function getClientIp(?bool $trustProxy = null): string {
 		return $this->ip($trustProxy);
@@ -1072,22 +1027,16 @@ class Request extends BaseService {
 
 
 
-/*
- *---------------------------------------------------------------
- * INTERNALS - Helpers & predicates (private/protected)
- *---------------------------------------------------------------
- * PURPOSE
- *   Keep low-level helpers isolated and easy to audit.
- */
+	// ----------------------------------------------------------------
+	// Address matching
+	// ----------------------------------------------------------------
 
 	/**
-	 * Check if current REMOTE_ADDR is in the given trusted list.
+	 * Check whether REMOTE_ADDR matches an entry of a list.
 	 *
-	 * Iterates the whitelist and calls ipInCidr() for each entry; empty or
-	 * missing REMOTE_ADDR fails closed.
-	 *
-	 * @param array<int,string> $whitelist CIDR blocks or single IPs (IPv4/IPv6).
-	 * @return bool True if the client IP is trusted.
+	 * @param  list<string>  $whitelist  IP addresses and CIDR blocks, IPv4 or IPv6.
+	 * @return bool  False when REMOTE_ADDR is missing or empty.
+	 * @see \CitOmni\Http\Service\Request::ipInCidr()  How an entry matches.
 	 */
 	protected function clientIpIsTrusted(array $whitelist): bool {
 		$ip = (string)($_SERVER['REMOTE_ADDR'] ?? '');
@@ -1104,10 +1053,11 @@ class Request extends BaseService {
 
 
 	/**
-	 * Check whether an address is one of the trusted proxies (http.trusted_proxies).
+	 * Check whether an address matches an entry of the trusted proxy list.
 	 *
-	 * @param string $ip Candidate address, e.g. one X-Forwarded-For entry.
-	 * @return bool True if $ip matches a trusted proxy entry; false for invalid input.
+	 * @param  string  $ip  Candidate address, such as one X-Forwarded-For entry.
+	 * @return bool  False when the address is not a valid IP address.
+	 * @see \CitOmni\Http\Service\Request::ipInCidr()  How an entry matches.
 	 */
 	private function isTrustedProxy(string $ip): bool {
 		foreach ($this->trustedProxies as $cidr) {
@@ -1120,97 +1070,82 @@ class Request extends BaseService {
 
 
 	/**
-	 * Test whether an IP address belongs to a CIDR block (or equals a single IP).
-	 *
-	 * Supports IPv4 and IPv6. Returns false on invalid inputs or address-family
-	 * mismatch (e.g., IPv4 candidate vs IPv6 CIDR). This method treats a CIDR
-	 * without "/" as an exact-IP match.
+	 * Check whether an IP address lies in a CIDR block or equals a single address.
 	 *
 	 * Behavior:
-	 * - Uses inet_pton() for binary-safe comparisons (no string parsing pitfalls).
-	 * - Validates mask length against address family (0..32 for IPv4, 0..128 for IPv6).
-	 * - A mask that is not a decimal number ("10.0.0.0/", "10.0.0.0/x") matches nothing.
-	 * - Builds a byte mask and compares the network portions.
+	 * - An entry without "/" matches only the same address, compared in binary form, so
+	 *   "::1" and "0:0:0:0:0:0:0:1" are equal.
+	 * - An entry with "/" matches every address of the same family whose first N bits, N being
+	 *   the mask, equal those of the entry's address. Host bits in the entry are ignored.
+	 * - Never matches when the address or the entry's address is not a valid IP address, the
+	 *   families differ, or the mask is not a decimal bit count from 0 to 32 (IPv4) or 128
+	 *   (IPv6). Whitespace around the mask is allowed; around an address it is not.
 	 *
-	 * Typical usage:
-	 *   $ok = $this->ipInCidr('203.0.113.10', '203.0.113.0/24');   // true
-	 *   $ok = $this->ipInCidr('2001:db8::1',  '2001:db8::/32');    // true
-	 *   $ok = $this->ipInCidr('203.0.113.10', '2001:db8::/32');    // false (family mismatch)
-	 *
-	 * @param string $ip   Candidate IP address (IPv4 or IPv6).
-	 * @param string $cidr CIDR like "192.168.0.0/16" or a single IP literal.
-	 * @return bool True if $ip is contained in $cidr (or equals it when no mask given).
+	 * @param  string  $ip  Candidate address, IPv4 or IPv6.
+	 * @param  string  $cidr  CIDR block such as "192.168.0.0/16", or a single address.
+	 * @return bool
 	 */
 	protected function ipInCidr(string $ip, string $cidr): bool {
-		// Convert the candidate IP to packed binary form.
-		// inet_pton() returns false for invalid input.
 		$ipBin = @\inet_pton($ip);
 		if ($ipBin === false) {
-			return false; // Not a valid IP address.
+			return false;
 		}
 
-		// If $cidr has no "/", treat it as a single IP literal and compare directly.
 		if (!\str_contains($cidr, '/')) {
 			$single = @\inet_pton($cidr);
-			// Equal only if both parse and their binary forms match exactly.
 			return $single !== false && $single === $ipBin;
 		}
 
-		// Split "subnet/maskBits" (e.g., "192.168.0.0/16").
 		[$subnet, $maskBitsRaw] = \explode('/', $cidr, 2);
 
-		// Convert the subnet to packed binary. Must be same address family as $ipBin.
+		// A different length is a different address family.
 		$subBin = @\inet_pton($subnet);
 		if ($subBin === false || \strlen($subBin) !== \strlen($ipBin)) {
-			return false; // Invalid subnet or IPv4/IPv6 family mismatch.
+			return false;
 		}
 
 		// The mask must be a decimal bit count. (int) would read "" or "x" as 0, and a
 		// /0 mask matches every address.
 		$maskBitsRaw = \trim($maskBitsRaw);
 		if ($maskBitsRaw === '' || \strspn($maskBitsRaw, '0123456789') !== \strlen($maskBitsRaw)) {
-			return false; // Malformed mask.
+			return false;
 		}
 
-		// Validate mask length against the address family.
-		$maskBits = (int)$maskBitsRaw; // e.g., 16 for IPv4 or 64 for IPv6
+		$maskBits = (int)$maskBitsRaw;
 		$addrLen  = \strlen($ipBin);      // 4 bytes for IPv4, 16 bytes for IPv6.
-		$maxBits  = $addrLen * 8;         // 32 or 128.
+		$maxBits  = $addrLen * 8;
 		if ($maskBits < 0 || $maskBits > $maxBits) {
-			return false; // Out-of-range mask (e.g., /40 on IPv4).
+			return false;
 		}
 
-		// Build a byte mask with $maskBits leading 1s.
-		// Example (IPv4, /20): 11111111 11111111 11110000 00000000
-		$fullBytes = intdiv($maskBits, 8); // Number of 0xFF bytes.
-		$remBits   = $maskBits % 8;        // Remaining high bits in the next byte.
+		// Byte mask with $maskBits leading 1s; IPv4 /20 is 11111111 11111111 11110000 00000000.
+		$fullBytes = intdiv($maskBits, 8);
+		$remBits   = $maskBits % 8;
 
-		// Start with the full 0xFF bytes.
 		$mask = $fullBytes > 0 ? \str_repeat("\xFF", $fullBytes) : '';
 
-		// Append the partial byte if needed (e.g., remBits=3 -> 11100000).
 		if ($remBits > 0) {
 			$mask .= \chr((0xFF << (8 - $remBits)) & 0xFF);
 		}
 
-		// Pad with zero bytes to match the full address length.
 		if (\strlen($mask) < $addrLen) {
 			$mask .= \str_repeat("\x00", $addrLen - \strlen($mask));
 		}
 
-		// Apply the mask and compare network portions.
-		// String bitwise AND works byte-wise on packed binary strings.
+		// Bitwise AND on strings works byte by byte on the packed addresses.
 		return (($ipBin & $mask) === ($subBin & $mask));
 	}
 
 
 	/**
-	 * Determine if an IP is public (not private/reserved).
+	 * Check whether a string is a valid IP address outside the private and reserved ranges.
 	 *
-	 * Uses FILTER_VALIDATE_IP with NO_PRIV_RANGE and NO_RES_RANGE flags.
+	 * Notes:
+	 * - The ranges are those that PHP's FILTER_FLAG_NO_PRIV_RANGE and FILTER_FLAG_NO_RES_RANGE
+	 *   exclude.
 	 *
-	 * @param string $ip IPv4/IPv6 address.
-	 * @return bool True if syntactically valid and public.
+	 * @param  string  $ip  Candidate address, IPv4 or IPv6.
+	 * @return bool
 	 */
 	protected function isPublicIp(string $ip): bool {
 		return (bool)\filter_var($ip, \FILTER_VALIDATE_IP, \FILTER_FLAG_NO_PRIV_RANGE | \FILTER_FLAG_NO_RES_RANGE);

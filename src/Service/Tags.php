@@ -19,56 +19,58 @@ use CitOmni\Kernel\Cfg;
 use CitOmni\Kernel\Service\BaseService;
 
 /**
- * Tags: Deterministic parsing, normalization, validation, deduplication, diffing, and optional slugging for tags.
+ * Tags: Service that parses, normalizes, checks and compares tag labels.
  *
- * Intent:
- * - Provide a small, app-agnostic API for common tag text operations without any I/O or DB assumptions.
- * - Keep allocations low and sequencing deterministic.
+ * Gives every caller the same label policy, chosen once from the service options and cfg, and
+ * plans which tags an entity gains or loses. Slugs belong to the slugger service; storing tags
+ * belongs to the caller, which answers through a callback.
  *
- * Behavior:
- * - Immutable config loaded once at init(): options > cfg http.tags.
- * - Case policy: 'preserve' (keep user's casing), 'title' (ucfirst words), 'lower' (lowercase).
- * - Deduplication is performed on normalized labels (case-insensitive).
- *
- * Notes:
- * - Slugs are generated via the Slugger service; uniqueness is not handled here.
- * - For user input, map validation failures to 422 in controllers (do not let exceptions bubble to global handler).
+ * Rules:
+ * - Derive the policy only in init(); public methods never change it.
+ * - Reach no storage: Ask the caller's callback whenever a stored tag is needed.
+ * - Compare labels after normalizeLabel(), ignoring case.
  *
  * Typical usage:
- *   $labels  = $this->app->tags->parse($rawCsv);
- *   $labels  = $this->app->tags->deduplicate($labels);
- *   foreach ($labels as $label) { $this->app->tags->validateLabel($label); }
- *   $ids     = $this->app->tags->resolveTagIds($labels, fn($l,$s) => $repo->getOrCreateTagId($l,$s));
+ *   $labels  = $this->app->tags->parse($raw);
+ *   $ids     = $this->app->tags->resolveTagIds($labels, fn(string $label, string $slug): int => $repo->getOrCreateTagId($label, $slug));
  *   $changes = $this->app->tags->planPivotChanges($currentIds, $ids);
- *
- * @throws \InvalidArgumentException On invalid config or label inputs.
  */
 class Tags extends BaseService {
 	
-	/** @var string[] */
+	/** @var list<string> Label separators; non-empty and unique. */
 	private array $delimiters = [',',';'];
 	
-	/** @var int */
+	/** Maximum label length in characters, at least 1. */
 	private int $maxLabelLength = 80;
 	
-	/** @var string 'preserve'|'title'|'lower' */
+	/** Label casing: preserve, title or lower. */
 	private string $caseMode = 'preserve';
 	
-	/** @var bool */
+	/** Whether runs of whitespace in a label become one space. */
 	private bool $collapseWhitespace = true;
 	
-	/** @var string|null PCRE pattern to DISALLOW (if matches -> invalid) */
+	/** PCRE that a valid label must not match, or null for no such check. */
 	private ?string $disallowedPattern = null;
 	
-	/** @var int|null */
+	/** Maximum number of labels of one entity, or null for no limit. */
 	private ?int $maxTagsPerEntity = null;
 
 
 
 	/**
-	 * Read config, merge options, validate once, store as scalars.
+	 * Read and check the label policy once.
+	 *
+	 * Behavior:
+	 * - Each service option wins over the key of the same name in cfg http.tags.
+	 * - Drops duplicate delimiters.
+	 *
+	 * Notes:
+	 * - An option set to null counts as unset, so only cfg can set disallowedPattern or
+	 *   maxTagsPerEntity to null.
 	 *
 	 * @return void
+	 * @throws \InvalidArgumentException  When delimiters is not a non-empty array of non-empty strings, maxLabelLength is not an integer >= 1, caseMode is not preserve, title or lower, disallowedPattern is neither null nor a non-empty string, or maxTagsPerEntity is neither null nor an integer >= 1.
+	 * @see \CitOmni\Kernel\Service\BaseService::__construct()  Calls it once per instance.
 	 */
 	protected function init(): void {
 		$cfg = $this->app->cfg->http->tags;
@@ -122,10 +124,18 @@ class Tags extends BaseService {
 
 
 	/**
-	 * Parse a raw delimited string into an array of display labels.
+	 * Split typed text into normalized labels.
 	 *
-	 * @param string $raw User-provided input, e.g., "foo, bar;Baz".
-	 * @return array<int, string> Ordered labels after trimming/case policy; empty entries removed.
+	 * Behavior:
+	 * - Splits on the delimiter when there is one, and on each character of every delimiter
+	 *   when there are several.
+	 * - Normalizes each part with normalizeLabel() and drops empty ones, in input order.
+	 * - Keeps duplicates, and they count toward maxTagsPerEntity: Returns at most that many
+	 *   labels, the first ones.
+	 * - Does not validate the labels; validateLabel() does.
+	 *
+	 * @param  string  $raw  Typed text, such as "foo, bar;Baz".
+	 * @return list<string>
 	 */
 	public function parse(string $raw): array {
 		$s = \trim($raw);
@@ -154,10 +164,18 @@ class Tags extends BaseService {
 
 
 	/**
-	 * Normalize a single label deterministically (trim, collapse spaces, apply caseMode).
+	 * Normalize one label.
 	 *
-	 * @param string $label Raw label.
-	 * @return string Normalized label (may be empty).
+	 * Behavior:
+	 * - Trims the label, replaces each run of whitespace with one space when collapseWhitespace
+	 *   is on, and applies caseMode.
+	 * - Returns '' when nothing is left after trimming.
+	 *
+	 * Notes:
+	 * - Returns '' for invalid UTF-8 when collapseWhitespace is on.
+	 *
+	 * @param  string  $label
+	 * @return string
 	 */
 	public function normalizeLabel(string $label): string {
 		$s = \trim($label);
@@ -172,11 +190,14 @@ class Tags extends BaseService {
 
 
 	/**
-	 * Validate a label against current policy.
+	 * Check a label against the policy.
 	 *
-	 * @param string $label Candidate label (will be normalized before checks).
+	 * Notes:
+	 * - The exception means invalid input, not a failure: Catch it where labels come from a user.
+	 *
+	 * @param  string  $label  Normalized with normalizeLabel() before the checks.
 	 * @return void
-	 * @throws \InvalidArgumentException On empty, too long, or disallowed content.
+	 * @throws \InvalidArgumentException  When the normalized label is empty, longer than maxLabelLength characters, or matches disallowedPattern.
 	 */
 	public function validateLabel(string $label): void {
 		$s = $this->normalizeLabel($label);
@@ -193,10 +214,13 @@ class Tags extends BaseService {
 
 
 	/**
-	 * Deduplicate labels after normalization; keep first occurrence for display order.
+	 * Normalize labels and drop empty ones and duplicates.
 	 *
-	 * @param array<int, string> $labels Raw or semi-normalized labels.
-	 * @return array<int, string> De-duplicated, normalized labels in stable order.
+	 * Behavior:
+	 * - Labels that differ only in case are duplicates; the first one is kept, in input order.
+	 *
+	 * @param  array<string>  $labels
+	 * @return list<string>  Normalized labels.
 	 */
 	public function deduplicate(array $labels): array {
 		$seen = [];
@@ -217,11 +241,16 @@ class Tags extends BaseService {
 
 
 	/**
-	 * Diff two label lists as sets (normalized, case-insensitive).
+	 * Compare two label lists as sets.
 	 *
-	 * @param array<int, string> $current Current labels.
-	 * @param array<int, string> $desired Desired labels.
-	 * @return array{add: array<int, string>, remove: array<int, string>}
+	 * Behavior:
+	 * - Compares the lists after deduplicate(), so labels match when they differ only in case.
+	 * - add holds the desired labels missing from current, remove the current labels missing
+	 *   from desired, each normalized and in its list's order.
+	 *
+	 * @param  array<string>  $current
+	 * @param  array<string>  $desired
+	 * @return array{add:list<string>,remove:list<string>}
 	 */
 	public function diff(array $current, array $desired): array {
 		$curr = $this->deduplicate($current);
@@ -249,10 +278,15 @@ class Tags extends BaseService {
 
 
 	/**
-	 * Create a slug for a label via Slugger (no uniqueness check).
+	 * Make the slug of a label after normalizeLabel().
 	 *
-	 * @param string $label Raw label.
-	 * @return string Slug (may be empty if label normalizes to nothing).
+	 * Behavior:
+	 * - Returns '' when the label normalizes to '' or yields no slug.
+	 * - Does not check whether the slug is taken.
+	 *
+	 * @param  string  $label
+	 * @return string
+	 * @see \CitOmni\Http\Service\Slugger::slugify()  How the slug is made.
 	 */
 	public function toSlug(string $label): string {
 		$norm = $this->normalizeLabel($label);
@@ -266,10 +300,14 @@ class Tags extends BaseService {
 
 
 	/**
-	 * Batch map labels to slugs.
+	 * Map labels to their slugs.
 	 *
-	 * @param array<int, string> $labels
-	 * @return array<string, string> label => slug (only non-empty labels included).
+	 * Behavior:
+	 * - Deduplicates the labels first and leaves out a label without a slug.
+	 *
+	 * @param  array<string>  $labels
+	 * @return array<array-key,string>  Normalized label => slug; PHP turns a numeric label into an int key.
+	 * @see \CitOmni\Http\Service\Tags::toSlug()  How each slug is made.
 	 */
 	public function mapLabelsToSlugs(array $labels): array {
 		$map = [];
@@ -284,11 +322,23 @@ class Tags extends BaseService {
 
 
 	/**
-	 * Resolve label list to tag IDs using a user callback that performs get-or-create.
+	 * Return the tag ids of labels, through the caller's get-or-create callback.
 	 *
-	 * @param array<int, string> $labels Raw labels.
-	 * @param callable $getOrCreate fn(string $label, string $slug): int  Returns tag id.
-	 * @return array<int, int> Stable-ordered list of tag IDs (deduplicated).
+	 * The callback finds or creates the stored tag; this method decides which labels reach it
+	 * and with which slug.
+	 *
+	 * Behavior:
+	 * - Calls $getOrCreate once per label left by deduplicate(), in that order, with the
+	 *   normalized label and its slug from toSlug().
+	 * - Returns the ids in the same order, cast to int. Two labels can share an id when the
+	 *   callback returns the same one for both.
+	 * - Checks each label just before its call, so the callback has already run for the labels
+	 *   before one that fails.
+	 *
+	 * @param  array<string>  $labels
+	 * @param  callable(string,string):int  $getOrCreate  Takes label and slug, returns the tag id.
+	 * @return list<int>
+	 * @throws \InvalidArgumentException  When a label fails validateLabel() or yields no slug.
 	 */
 	public function resolveTagIds(array $labels, callable $getOrCreate): array {
 		$labels = $this->deduplicate($labels);
@@ -296,7 +346,6 @@ class Tags extends BaseService {
 		foreach ($labels as $label) {
 			$this->validateLabel($label);
 			$slug = $this->toSlug($label);
-			// Best effort validate slug shape (won't enforce uniqueness here)
 			if ($slug === '') {
 				throw new \InvalidArgumentException('Unable to create slug for tag label.');
 			}
@@ -307,11 +356,16 @@ class Tags extends BaseService {
 
 
 	/**
-	 * Compute attach/detach sets for a many-to-many pivot.
+	 * Plan which tag ids to attach to and detach from an entity.
 	 *
-	 * @param array<int, int> $currentTagIds Current IDs in pivot.
-	 * @param array<int, int> $desiredTagIds Desired IDs to have in pivot.
-	 * @return array{attach: array<int, int>, detach: array<int, int>}
+	 * Behavior:
+	 * - Casts the ids to int and ignores duplicates.
+	 * - attach holds the desired ids missing from current, in desired order; detach the current
+	 *   ids missing from desired, in current order.
+	 *
+	 * @param  array<int|numeric-string>  $currentTagIds  Ids the entity has.
+	 * @param  array<int|numeric-string>  $desiredTagIds  Ids the entity should have.
+	 * @return array{attach:list<int>,detach:list<int>}
 	 */
 	public function planPivotChanges(array $currentTagIds, array $desiredTagIds): array {
 		$curr = \array_values(\array_unique(\array_map('intval', $currentTagIds)));
@@ -339,9 +393,12 @@ class Tags extends BaseService {
 
 
 	/**
-	 * Apply the configured case policy.
+	 * Apply caseMode to a label.
 	 *
-	 * @param string $s
+	 * Behavior:
+	 * - lower lowercases, title uses toTitleCase(), preserve returns the label unchanged.
+	 *
+	 * @param  string  $s
 	 * @return string
 	 */
 	private function applyCaseMode(string $s): string {
@@ -354,9 +411,13 @@ class Tags extends BaseService {
 
 
 	/**
-	 * Lightweight title case: ucfirst each whitespace-separated token.
+	 * Uppercase the first character of each word and lowercase the rest.
 	 *
-	 * @param string $s
+	 * Behavior:
+	 * - Words are separated by whitespace, which is kept as it is.
+	 * - Returns the text unchanged when it is not valid UTF-8.
+	 *
+	 * @param  string  $s
 	 * @return string
 	 */
 	private function toTitleCase(string $s): string {
@@ -365,7 +426,6 @@ class Tags extends BaseService {
 			return $s;
 		}
 		foreach ($parts as $i => $p) {
-			// Skip pure whitespace tokens
 			if ($p !== '' && \preg_match('/\S/u', $p) === 1) {
 				$first = \mb_substr($p, 0, 1, 'UTF-8');
 				$rest  = \mb_substr($p, 1, null, 'UTF-8');
