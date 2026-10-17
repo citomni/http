@@ -58,7 +58,7 @@ use CitOmni\Kernel\Cfg;
  *       $app->errorHandler->httpError(403, [...]);
  *   }
  */
-final class FetchMetadataPolicy {
+class FetchMetadataPolicy {
 
 	/**
 	 * @param App $app Booted HTTP application.

@@ -99,7 +99,7 @@ use CitOmni\Kernel\Service\BaseService;
  * @throws WebhooksAuthConfigException        On invalid config at init time.
  * @throws WebhooksAuthVerificationException  On verification failure (requireValid only).
  */
-final class WebhooksAuth extends BaseService {
+class WebhooksAuth extends BaseService {
 
 	/** Nonce namespace passed to the Nonce service. */
 	private const NONCE_NAMESPACE = 'webhooks';

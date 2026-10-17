@@ -148,7 +148,7 @@ use CitOmni\Kernel\Runtime;
  *     - When the query parameter ?_perf is present, Kernel emits a harmless HTML comment footer with timing,
  *       memory, and included file counts-useful for local diagnostics.
  */
-final class Kernel {	
+class Kernel {
 	
 
 	/**

@@ -72,14 +72,14 @@ foreach (['Boot/Registry', 'Service/Maintenance'] as $file) {
 const BACKUP_NAME = '/^maintenance\.php\.\d{8}_\d{6}_\d{6}_[0-9a-f]{12}\.bak$/D';
 
 /** Request double: enable() asks only for the client IP. */
-final class RequestDouble {
+class RequestDouble {
 	public function ip(): ?string {
 		return '203.0.113.7';
 	}
 }
 
 /** Maintenance with resolveBackupPolicy() exposed; the probe writes nothing itself. */
-final class MaintenanceProbe extends Maintenance {
+class MaintenanceProbe extends Maintenance {
 	public function backupPolicy(): array {
 		return $this->resolveBackupPolicy();
 	}

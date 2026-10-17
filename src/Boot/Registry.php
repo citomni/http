@@ -15,7 +15,7 @@ declare(strict_types=1);
 
 namespace CitOmni\Http\Boot;
 
-final class Registry {
+class Registry {
 	
 
 	/**

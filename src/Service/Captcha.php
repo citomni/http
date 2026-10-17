@@ -70,7 +70,7 @@ use CitOmni\Kernel\Service\BaseService;
  *       // Wrong, expired or missing: show the form again with a new challenge.
  *   }
  */
-final class Captcha extends BaseService {
+class Captcha extends BaseService {
 
 	// Challenge ids: 8 random bytes as lowercase hex.
 	private const ID_PATTERN = '/^[0-9a-f]{16}$/D';

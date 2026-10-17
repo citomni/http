@@ -102,7 +102,7 @@ use CitOmni\Kernel\Service\BaseService;
  * @throws \InvalidArgumentException On an invalid template reference or layer definition.
  * @throws \RuntimeException On invalid template structure, inaccessible source or cache failure.
  */
-final class TemplateEngine extends BaseService {
+class TemplateEngine extends BaseService {
 
 	// ----------------------------------------------------------------
 	// Compiler contract and state

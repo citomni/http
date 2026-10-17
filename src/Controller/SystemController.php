@@ -62,7 +62,7 @@ use CitOmni\Kernel\Support\AppInfo;
  * Failure:
  * - Unauthorized protected calls return 404 via ErrorHandler->httpError(404) to hide presence.
  */
-final class SystemController extends BaseController {
+class SystemController extends BaseController {
 
 	/**
 	 * Chosen, consistent failure status for protected endpoints.

@@ -43,7 +43,7 @@ use CitOmni\Kernel\Service\BaseService;
  *
  * @throws \InvalidArgumentException On invalid config or label inputs.
  */
-final class Tags extends BaseService {
+class Tags extends BaseService {
 	
 	/** @var string[] */
 	private array $delimiters = [',',';'];

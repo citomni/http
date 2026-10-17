@@ -32,5 +32,5 @@ namespace CitOmni\Http\Exception;
  * Typical usage:
  *   throw new IconNotFoundException('Icon "home" not found.');
  */
-final class IconNotFoundException extends \RuntimeException {
+class IconNotFoundException extends \RuntimeException {
 }

@@ -32,5 +32,5 @@ namespace CitOmni\Http\Exception;
  * Typical usage:
  *   throw new IconConfigException('Icon file must return an array.');
  */
-final class IconConfigException extends \RuntimeException {
+class IconConfigException extends \RuntimeException {
 }

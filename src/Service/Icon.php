@@ -46,7 +46,7 @@ use CitOmni\Kernel\Service\BaseService;
  *
  * @see \CitOmni\Kernel\Service\BaseService
  */
-final class Icon extends BaseService {
+class Icon extends BaseService {
 
 	private const DEFAULT_FILE = 'icons';
 	private const DEFAULT_LAYER = 'citomni/http';

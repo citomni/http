@@ -60,7 +60,7 @@ require \dirname(__DIR__, 2) . '/src/Boot/Registry.php';
 require \dirname(__DIR__, 2) . '/src/Service/ErrorHandler.php';
 
 /** Exception with a string code, as a PDOException carries its SQLSTATE. */
-final class StringCodeException extends \RuntimeException {
+class StringCodeException extends \RuntimeException {
 	public function __construct(string $message, string $code, ?\Throwable $previous = null) {
 		parent::__construct($message, 0, $previous);
 		$this->code = $code;

@@ -57,7 +57,7 @@ function report(array $data): void {
 }
 
 /** Controller double: reports the action, its arguments and the route hints it was built with. */
-final class ProbeController {
+class ProbeController {
 	public function __construct(private object $app, private array $options = []) {}
 
 	public function index(string ...$params): void {
@@ -78,7 +78,7 @@ final class ProbeController {
 }
 
 /** ErrorHandler double: sets the status and reports the error instead of rendering it. */
-final class ErrorHandlerProbe {
+class ErrorHandlerProbe {
 	public function httpError(int $status, array $context = []): void {
 		\http_response_code($status);
 		report(['error' => $status, 'reason' => $context['reason'] ?? null, 'allowed' => $context['allowed'] ?? null]);

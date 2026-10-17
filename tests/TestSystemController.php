@@ -34,7 +34,7 @@ declare(strict_types=1);
  * - Adjust BASE_URL/SECRET/BIND_CONTEXT/ALGO below to match your server cfg.
  */
 
-final class TestSystemController {
+class TestSystemController {
 
 	// -----------------------------
 	// Config (adjust to your setup)

@@ -31,7 +31,7 @@ namespace CitOmni\Http\Util;
  * - Framework- or app-specific URL assembly belongs elsewhere unless it can be
  *   implemented without App, config, or mutable runtime state.
  */
-final class Url {
+class Url {
 
 
 	/**

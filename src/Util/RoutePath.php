@@ -34,7 +34,7 @@ namespace CitOmni\Http\Util;
  * Typical usage:
  *   $path = RoutePath::resolve($_SERVER['REQUEST_URI'] ?? '/', \CITOMNI_PUBLIC_ROOT_URL, $_SERVER['SCRIPT_NAME'] ?? '/index.php', false);
  */
-final class RoutePath {
+class RoutePath {
 
 	/**
 	 * Resolve the app-relative route path of a request.

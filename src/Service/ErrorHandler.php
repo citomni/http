@@ -42,7 +42,7 @@ use CitOmni\Kernel\Service\BaseService;
  *
  * @see \CitOmni\Http\Boot\Registry::CFG_HTTP  Meaning of the error_handler cfg keys.
  */
-final class ErrorHandler extends BaseService {
+class ErrorHandler extends BaseService {
 	
 	/** JSON encoding flags: Readable slashes and Unicode; invalid input degrades instead of failing the encode. */
 	private const JSON_FLAGS = \JSON_UNESCAPED_SLASHES | \JSON_UNESCAPED_UNICODE | \JSON_PARTIAL_OUTPUT_ON_ERROR | \JSON_INVALID_UTF8_SUBSTITUTE;
@@ -118,7 +118,7 @@ final class ErrorHandler extends BaseService {
 	private string $ellipsis    = '...';
 
 	/** True once install() has completed. */
-	protected bool $installed = false;
+	private bool $installed = false;
 
 
 

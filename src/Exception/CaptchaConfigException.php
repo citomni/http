@@ -28,5 +28,5 @@ namespace CitOmni\Http\Exception;
  * - Wrong, expired or missing answers are not exceptions; verify() returns
  *   false for them.
  */
-final class CaptchaConfigException extends \RuntimeException {
+class CaptchaConfigException extends \RuntimeException {
 }

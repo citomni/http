@@ -88,7 +88,7 @@ use CitOmni\Kernel\Service\BaseService;
  * @throws CsrfException On invalid config at init time, or internal invariant violation.
  * @throws CsrfVerificationException On verification failure (requireValid() only).
  */
-final class Csrf extends BaseService {
+class Csrf extends BaseService {
 
 	/** @var bool Whether CSRF protection is globally enabled. */
 	private bool $enabled;

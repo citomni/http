@@ -40,7 +40,7 @@ php tests/template-engine/run.php [engine] [--baseline=<file>]
 
 - `engine`, the first argument when it does not start with `--`, is the TemplateEngine.php under test. Default: `src/Service/TemplateEngine.php`.
 - `--baseline` is the earlier TemplateEngine.php for the differential cases. Default: `tests/fixtures/TemplateEngine.literal-fixed.php.txt`, a copy of `src/Service/TemplateEngine.php` at 41a1fa0, the last engine before the rewrite in 8dd9722. The suite renames its class to `BaselineTemplateEngine` and loads it from the temporary root.
-- A baseline file that does not exist stops the suite with exit code 2 before anything is created; an existing file without `final class TemplateEngine` ends it with a `RuntimeException`.
+- A baseline file that does not exist stops the suite with exit code 2 before anything is created; an existing file without a `class TemplateEngine` declaration, final or not, ends it with a `RuntimeException`.
 
 ## Notes
 

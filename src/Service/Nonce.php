@@ -63,7 +63,7 @@ use CitOmni\Kernel\Service\BaseService;
  *
  * @throws NonceConfigException On invalid config at init time.
  */
-final class Nonce extends BaseService {
+class Nonce extends BaseService {
 
 	/** Hash algorithm used to derive the on-disk filename from the nonce string. */
 	private const HASH_ALGO = 'sha256';

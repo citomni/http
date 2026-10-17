@@ -41,7 +41,7 @@ use CitOmni\Kernel\Service\BaseService;
  *
  * @throws \InvalidArgumentException On invalid inputs or config.
  */
-final class Slugger extends BaseService {
+class Slugger extends BaseService {
 	
 	/** @var string */
 	private string $separator = '-';

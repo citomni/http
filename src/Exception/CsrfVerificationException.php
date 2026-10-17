@@ -32,7 +32,7 @@ use CitOmni\Http\Enum\CsrfFailureReason;
  *       $reason = $e->reason; // CsrfFailureReason::TokenMismatch etc.
  *   }
  */
-final class CsrfVerificationException extends CsrfException {
+class CsrfVerificationException extends CsrfException {
 
 	public function __construct(public readonly CsrfFailureReason $reason, string $message = '', int $code = 0,	?\Throwable $previous = null) {
 		parent::__construct(

@@ -139,7 +139,7 @@ return [
 	// Exact routes (match first)
 	// -----------------------------------------------------------------
 
-	/* 
+	/*
 	'/' => [
 		'controller'     => \App\Http\Controller\AppController::class,
 		'action'         => 'index',

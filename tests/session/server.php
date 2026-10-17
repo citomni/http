@@ -63,7 +63,7 @@ foreach (['Boot/Registry', 'Enum/CsrfFailureReason', 'Exception/CsrfException', 
 \define('CITOMNI_APP_PATH', $_SERVER['DOCUMENT_ROOT']);
 
 /** Storage handler whose destroy() fails, as a failing unlink() in the files handler would. */
-final class FailingDestroy extends \SessionHandler {
+class FailingDestroy extends \SessionHandler {
 	public function destroy(string $id): bool {
 		return false;
 	}

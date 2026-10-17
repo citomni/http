@@ -109,7 +109,7 @@ function thrown(callable $fn): \Throwable {
  * Follows the Session contract: start() and set() create the session when there is
  * none; get() and remove() never do. $exists records whether it was created.
  */
-final class SessionStore {
+class SessionStore {
 	public array $data = [];
 	public bool $exists = false;
 
@@ -136,7 +136,7 @@ final class SessionStore {
 }
 
 /** Log service double that records write() calls. */
-final class LogSpy {
+class LogSpy {
 	/** @var list<array{channel: string, category: string, message: string, context: array}> */
 	public array $entries = [];
 

@@ -38,7 +38,7 @@ use CitOmni\Kernel\Service\BaseService;
  *   $res = $this->app->upload->saveColumnUpload('cover_path', $cfg['columns']['cover_path']['upload'] ?? [], $payload, $row, $id);
  *   // On success, $res['path'] and $res['thumbs'] can be persisted by caller.
  */
-final class Upload extends BaseService {
+class Upload extends BaseService {
 
 	/** @var \finfo|null */
 	private ?\finfo $finfo = null;

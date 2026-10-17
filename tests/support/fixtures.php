@@ -47,7 +47,7 @@ namespace CitOmni\Http\Tests\Support;
  *       $server->stop();
  *   }
  */
-final class FixtureServer {
+class FixtureServer {
 	public readonly string $baseUrl;
 
 	/** @var resource|null */

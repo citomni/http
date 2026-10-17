@@ -139,7 +139,7 @@ namespace CitOmni\Kernel {
 }
 
 namespace CitOmni\Http\Tests\FetchMetadata {
-	final class ProbeController {
+	class ProbeController {
 		public function __construct(object $app, array $config) {
 			\header('X-Fixture-Controller: yes');
 		}
@@ -149,7 +149,7 @@ namespace CitOmni\Http\Tests\FetchMetadata {
 			echo \json_encode(['params' => $params, 'post' => $_POST, 'body' => \file_get_contents('php://input')], \JSON_THROW_ON_ERROR);
 		}
 	}
-	final class ReturningErrorHandler {
+	class ReturningErrorHandler {
 		public function __construct(private object $app) {}
 		public function install(): void {
 			(new \CitOmni\Http\Service\ErrorHandler($this->app))->install();

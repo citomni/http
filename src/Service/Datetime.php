@@ -52,7 +52,7 @@ use CitOmni\Kernel\Service\BaseService;
  *   helpers (with optional per-call locale/timezone overrides).
  *
  */
-final class Datetime extends BaseService {
+class Datetime extends BaseService {
 	
 	/** @var string Default ICU locale, e.g. "da_DK" */
 	private string $defaultLocale = 'en_US';

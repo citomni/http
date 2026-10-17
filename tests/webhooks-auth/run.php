@@ -105,7 +105,7 @@ function thrown(callable $fn): \Throwable {
 }
 
 /** Request service double: the client IP as Request::ip() resolved it. */
-final class RequestStub {
+class RequestStub {
 	public function __construct(private string $ip) {}
 
 	public function ip(): string {
@@ -114,7 +114,7 @@ final class RequestStub {
 }
 
 /** Log service double that records write() calls. */
-final class LogSpy {
+class LogSpy {
 	/** @var list<array{file: string, category: string, message: string, context: array}> */
 	public array $entries = [];
 
@@ -124,7 +124,7 @@ final class LogSpy {
 }
 
 /** ErrorHandler double that records httpError() calls instead of terminating. */
-final class ErrorHandlerSpy {
+class ErrorHandlerSpy {
 	/** @var list<array{status: int, context: array}> */
 	public array $calls = [];
 

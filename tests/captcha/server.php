@@ -57,7 +57,7 @@ foreach (['Boot/Registry', 'Exception/CaptchaConfigException', 'Service/Request'
 }
 
 /** Stand-in for the captchaImage service of citomni/image. */
-final class FakeCaptchaImage {
+class FakeCaptchaImage {
 	public ?string $lastCode = null;
 
 	public function code(): string {

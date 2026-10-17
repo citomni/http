@@ -91,7 +91,7 @@ use CitOmni\Kernel\Service\BaseService;
  *   $old   = $flash['old'] ?? [];
  *   $err   = $flash['err'] ?? [];
  */
-final class Flash extends BaseService {
+class Flash extends BaseService {
 	
 	/** @var string Session key for message buckets. */
 	private const KEY_MSG  = '_flash.msg';

@@ -31,7 +31,7 @@ namespace CitOmni\Http\Tests {
 		public function toArray(): array { return $this->data; }
 	}
 
-	final class Request {
+	class Request {
 		public string $path = '/admin/users.html';
 		public array $query = [];
 		public int $pathCalls = 0;
@@ -61,7 +61,7 @@ namespace CitOmni\Http\Tests {
 		}
 	}
 
-	final class CountingProvider {
+	class CountingProvider {
 		public static int $staticCalls = 0;
 		public static int $constructions = 0;
 		public int $calls = 0;
@@ -99,10 +99,12 @@ namespace CitOmni\Http\Tests {
 
 	function loadBaseline(string $path, string $root): string {
 		$source = \file_get_contents($path);
-		if ($source === false || !\str_contains($source, 'final class TemplateEngine')) {
+		// Accept the declaration with or without final, so every earlier engine can serve as baseline.
+		$declaration = '/^(final )?class TemplateEngine\b/m';
+		if ($source === false || \preg_match($declaration, $source) !== 1) {
 			throw new \RuntimeException('Invalid baseline file.');
 		}
-		$source = \str_replace('final class TemplateEngine', 'final class BaselineTemplateEngine', $source);
+		$source = \preg_replace($declaration, '$1class BaselineTemplateEngine', $source, 1);
 		$target = $root . '/BaselineTemplateEngine.php';
 		\file_put_contents($target, $source);
 		require $target;

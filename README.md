@@ -277,7 +277,7 @@ namespace App\Http\Controller;
 
 use CitOmni\Kernel\Controller\BaseController;
 
-final class HelloController extends BaseController {
+class HelloController extends BaseController {
 	public function index(): void {
 		$this->app->tplEngine->render('public/hello.html@app', [
 			'title' => 'Hello from CitOmni',
@@ -542,7 +542,7 @@ namespace App\Http\Controller;
 
 use CitOmni\Kernel\Controller\BaseController;
 
-final class StatusController extends BaseController {
+class StatusController extends BaseController {
 	public function index(): void {
 		$this->app->response->jsonStatus([
 			'up' => true,

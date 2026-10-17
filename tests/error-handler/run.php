@@ -92,7 +92,7 @@ final class ArrDouble {
  *   as PHP's mkdir() does when the directory already exists.
  * - Files below the directory are kept in memory and open only once it exists.
  */
-final class MkdirRaceWrapper {
+class MkdirRaceWrapper {
 	public const DIR = 'mkdirrace://logs';
 
 	/** @var resource|null Set by PHP on every wrapper instance. */
@@ -157,7 +157,7 @@ final class MkdirRaceWrapper {
  *     - lock: flock() fails.
  * - flock() never locks the real file; the cases run in one process.
  */
-final class FaultWrapper {
+class FaultWrapper {
 	public const DIR = 'faulty://logs';
 
 	/** @var resource|null Set by PHP on every wrapper instance. */

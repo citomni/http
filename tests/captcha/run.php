@@ -109,7 +109,7 @@ function thrown(callable $fn): \Throwable {
 }
 
 /** Session service double: one browser's server-side session. get(), set() and remove() start it, as the real service does. */
-final class SessionStore {
+class SessionStore {
 	public array $data = [];
 	public int $reads = 0;
 	public int $writes = 0;
@@ -148,7 +148,7 @@ final class SessionStore {
 }
 
 /** Stand-in for the captchaImage service: numbered codes, recorded renders, case-insensitive comparison. */
-final class FakeImages {
+class FakeImages {
 	/** @var list<array{0:string, 1:mixed}> */
 	public array $renders = [];
 	private int $codes = 0;
