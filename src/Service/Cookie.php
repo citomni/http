@@ -349,7 +349,7 @@ class Cookie extends BaseService {
 	 * - Checks no combination of attributes: Assumes that attributes() has checked them.
 	 *
 	 * @param  array<string,mixed>  $opts  Normalized attributes.
-	 * @return array{expires:int,path:string,secure:bool,httponly:bool,samesite:string,domain?:string}
+	 * @return array{expires:int,path:string,secure:bool,httponly:bool,samesite:'Lax'|'Strict'|'None',domain?:string}
 	 */
 	private function buildCookieOptions(array $opts): array {
 

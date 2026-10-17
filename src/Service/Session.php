@@ -121,7 +121,7 @@ class Session extends BaseService {
 	 * Typical usage:
 	 *   $userId = $this->app->session->get('user_id');
 	 *
-	 * @param  string  $key
+	 * @param  string  $key  Case-sensitive.
 	 * @return mixed  The stored value, or null.
 	 * @throws \RuntimeException  When an existing session cannot be resumed.
 	 * @throws \InvalidArgumentException  When a session.cookie_* value is invalid.
@@ -138,10 +138,15 @@ class Session extends BaseService {
 	 * A write creates the session when the request has none. The value replaces any value under
 	 * the same key.
 	 *
+	 * Notes:
+	 * - Under session.serialize_handler php, PHP's default, a key that PHP turns into an integer,
+	 *   such as '42', is not saved with the session (PHP warns), and a key that contains "|" makes
+	 *   PHP save the session with no data at all.
+	 *
 	 * Typical usage:
 	 *   $this->app->session->set('cart_id', $cartId);
 	 *
-	 * @param  string  $key
+	 * @param  string  $key  Case-sensitive.
 	 * @param  mixed  $value  Must be serializable by the session serializer.
 	 * @return void
 	 * @throws \RuntimeException  When headers were already sent, the session settings cannot be applied, or session_start() fails.
@@ -160,7 +165,7 @@ class Session extends BaseService {
 	 * - Resumes the session when the request has one; never starts one otherwise.
 	 * - False without a session.
 	 *
-	 * @param  string  $key
+	 * @param  string  $key  Case-sensitive.
 	 * @return bool
 	 * @throws \RuntimeException  When an existing session cannot be resumed.
 	 * @throws \InvalidArgumentException  When a session.cookie_* value is invalid.
@@ -180,7 +185,7 @@ class Session extends BaseService {
 	 * Typical usage:
 	 *   $this->app->session->remove('cart_id');
 	 *
-	 * @param  string  $key
+	 * @param  string  $key  Case-sensitive.
 	 * @return void
 	 * @throws \RuntimeException  When an existing session cannot be resumed.
 	 * @throws \InvalidArgumentException  When a session.cookie_* value is invalid.
@@ -511,8 +516,8 @@ class Session extends BaseService {
 	 */
 	private function ini(string $key, bool|int|string $value): void {
 		$v = \is_bool($value) ? ($value ? '1' : '0') : (string)$value;
-		// ini_set() returns false when PHP rejects the value or cannot change the directive here,
-		// as when the server locks it with php_admin_value.
+		// ini_set() returns false when PHP rejects the value, such as gc_divisor 0, or cannot change
+		// the directive here, as when the server locks it with php_admin_value.
 		if (@\ini_set($key, $v) === false && \ini_get($key) !== $v) {
 			throw new \RuntimeException("PHP refused {$key} = {$v}: The value is invalid, or the server configuration locks the setting.");
 		}

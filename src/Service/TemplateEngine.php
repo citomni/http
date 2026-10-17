@@ -246,6 +246,8 @@ class TemplateEngine extends BaseService {
 	 * - $data wins over a matching cfg view.vars entry, which wins over the globals and helpers.
 	 * - When the query string has _viewvars, prints the variables as an HTML comment before the
 	 *   template, in the dev and stage environments only.
+	 * - Writes nothing but its output and the template cache. The template, its helpers and the
+	 *   dynamic cfg view.vars sources may have side effects of their own.
 	 * - Exceptions from the template and its helpers pass through.
 	 *
 	 * Typical usage:
@@ -401,6 +403,9 @@ class TemplateEngine extends BaseService {
 				'dev'	=> \defined('CITOMNI_ENVIRONMENT') ? (\CITOMNI_ENVIRONMENT === 'dev') : false,
 			],
 
+
+			// The helpers are closures bound to this engine, so they reach the App through
+			// $this->app and need no service of their own.
 
 			/**
 			 * $txt: Return a translated text.
@@ -1132,6 +1137,8 @@ class TemplateEngine extends BaseService {
 					'generation' => $generation,
 					'dependencies' => $dependencies,
 				];
+				// The manifest is JSON, not PHP, so OPcache never serves a stale copy of it, also
+				// when OPcache skips timestamp checks.
 				$json = \json_encode($manifest, \JSON_UNESCAPED_SLASHES | \JSON_THROW_ON_ERROR);
 				$this->writeCacheFile($base . '.meta.json', $json);
 				if ($this->cacheEnabled) {
@@ -1155,9 +1162,11 @@ class TemplateEngine extends BaseService {
 	 *   COMPILER_VERSION, its generation 64 lowercase hex characters, and its dependencies a
 	 *   non-empty array of [path, layer, canonical path, five integers].
 	 * - Decodes the manifest as JSON and never runs it.
+	 * - Checks the shape only, not whether the generation exists or the sources changed.
 	 *
 	 * @param  string  $base  Cache prefix.
 	 * @return array{format:string,generation:string,dependencies:array<array{string,string,string,list<int>}>}|null  The manifest, or null when it must be rebuilt.
+	 * @see \CitOmni\Http\Service\TemplateEngine::manifestIsFresh()  Whether the manifest can be reused.
 	 */
 	private function readManifest(string $base): ?array {
 
@@ -1176,6 +1185,8 @@ class TemplateEngine extends BaseService {
 
 
 		// -- 2. Validate the complete manifest shape ---------------------
+		// The generation id becomes part of a file path, so it must be a SHA-256 hex digest
+		// before any path is built from it.
 
 		$data = \json_decode($json, true);
 		if (!\is_array($data)
@@ -1605,7 +1616,9 @@ class TemplateEngine extends BaseService {
 
 
 			// -- 3. Extract and validate child blocks ------------------------
-			// Duplicate block names fail on purpose; there is no "last wins".
+			// The followed extends is removed, so one inside a block never reaches the merged
+			// layout, where it would be followed again. Duplicate block names fail on purpose;
+			// there is no "last wins".
 			$child = \preg_replace(self::EXTENDS_PATTERN, '', $code, 1);
 			if ($child === null || \preg_match_all(self::BLOCK_PATTERN, $child, $matches, \PREG_SET_ORDER) === false) {
 				throw new \RuntimeException('TemplateEngine: PCRE error while extracting child blocks.');
@@ -1793,6 +1806,7 @@ class TemplateEngine extends BaseService {
 	 *   without it, both compile to nothing.
 	 * - Removes block, endblock, yield and extends directives that are left after inheritance.
 	 * - Leaves native PHP tags in the source as they are, whatever allow_php_tags says.
+	 * - Reads and writes no file.
 	 *
 	 * Notes:
 	 * - An if, elseif or foreach expression must fit on one line; output, set and inline PHP

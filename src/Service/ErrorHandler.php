@@ -131,7 +131,8 @@ class ErrorHandler extends BaseService {
 	 *
 	 * Behavior:
 	 * - Service options win over cfg; the options are cleared after the merge.
-	 * - A cfg read that throws counts as an empty error_handler node.
+	 * - A cfg read that throws, or an error_handler value that is neither a Cfg node nor an
+	 *   array, counts as an empty error_handler node.
 	 * - Sends no headers, changes no INI settings and registers no handlers; install() does that.
 	 *
 	 * @return void

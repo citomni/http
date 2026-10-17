@@ -23,7 +23,8 @@ namespace CitOmni\Http\Exception;
  * Rules:
  * - Throw a subclass: Each kind of failure has its own.
  * - Never use it for the outcome of a nonce check: A replayed or malformed nonce and a failed
- *   write are a negative answer, not an exception.
+ *   write are a negative answer, not an exception, so a caller handles every outcome with one
+ *   bool check.
  */
 class NonceException extends \RuntimeException {
 }

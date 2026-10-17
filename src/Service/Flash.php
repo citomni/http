@@ -26,7 +26,8 @@ use CitOmni\Kernel\Service\BaseService;
  * Session; what a message says, and how it is shown, belong to the callers.
  *
  * Rules:
- * - Reach session state only through the Session service, under the KEY_* keys.
+ * - Depend on nothing but the Session service: No cfg, no routes and no other service. Reach
+ *   session state only through it, under the KEY_* keys.
  * - Create no session on a read or on a call that changes nothing: Only a call that stores
  *   something may create one.
  * - Cap the keys of every bag by MAX_MSG_KEYS or MAX_OLD_KEYS, and throw when a call would

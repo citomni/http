@@ -223,6 +223,7 @@ class Maintenance extends BaseService {
 	 * - allowed_ips keeps only valid IP addresses, plus "unknown" where allowUnknownToken()
 	 *   allows it; trimmed, unique and sorted. retry_after is at least 0.
 	 * - Later calls return the same array until enable() or disable() writes the flag.
+	 * - Writes no file.
 	 *
 	 * Typical usage:
 	 *   $state = $this->app->maintenance->snapshot();
@@ -280,6 +281,10 @@ class Maintenance extends BaseService {
 	 * - Writes also when maintenance is already on.
 	 * - Then clears the snapshot and the setRetryAfter() value, and logs the toggle.
 	 *
+	 * Notes:
+	 * - Logging is not best effort: An exception from the log service escapes after the flag
+	 *   is written, so the change is already in effect for later requests.
+	 *
 	 * Typical usage:
 	 *   $this->app->maintenance->setRetryAfter(600)->enable(['203.0.113.10']);
 	 *
@@ -327,6 +332,10 @@ class Maintenance extends BaseService {
 	 *   at least 0.
 	 * - Writes also when maintenance is already off.
 	 * - Then logs the toggle, and clears the snapshot and the setRetryAfter() value.
+	 *
+	 * Notes:
+	 * - Logging is not best effort: A log exception escapes after the flag is written, before
+	 *   the snapshot and the setRetryAfter() value are cleared.
 	 *
 	 * Typical usage:
 	 *   $this->app->maintenance->disable();
@@ -571,6 +580,8 @@ class Maintenance extends BaseService {
 	 * @throws \UnexpectedValueException  When cfg maintenance.backup.dir is not a non-empty string.
 	 */
 	protected function resolveBackupPolicy(): array {
+		// Read the keys directly: Cfg serves them through __get() and __isset(), so
+		// property_exists() never finds one.
 		$backup  = $this->app->cfg->maintenance->backup;
 		$enabled = (bool)$backup->enabled;
 		$keep    = \max(0, (int)$backup->keep);

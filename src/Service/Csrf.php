@@ -33,7 +33,8 @@ use CitOmni\Kernel\Service\BaseService;
  * - Read cfg security.csrf only in init(). Report a wrong value there with CsrfException,
  *   never by switching a check off.
  * - Never create a session while verifying: A request without one has no token and fails.
- * - Never put a token in a log record.
+ * - Never put a token in a log record, and write records only through the log service, never
+ *   to a file of its own.
  * - Report every rejected request as exactly one CsrfFailureReason.
  */
 class Csrf extends BaseService {
@@ -391,7 +392,8 @@ class Csrf extends BaseService {
 	/**
 	 * Replace the session token with a new one and return it.
 	 *
-	 * Call it at a privilege change, such as login or logout.
+	 * Call it at a privilege change, such as login or logout, so that a token known before the
+	 * change, for example through a fixated session, is useless after it.
 	 *
 	 * Behavior:
 	 * - Every token issued before the call fails verification afterwards, also in forms

@@ -95,6 +95,8 @@ class Kernel {
 		// Reject disallowed browser contexts before maintenance or controller work.
 		self::guardFetchMetadata($app);
 
+		// Deliberately forwards nothing from the entry point or $opts, so that no deployment
+		// parameter can override the maintenance flag or drift from it.
 		$app->maintenance->guard();		
 
 		$app->router->run();

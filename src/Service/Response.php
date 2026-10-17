@@ -178,7 +178,8 @@ class Response extends BaseService {
 	 *
 	 * Behavior:
 	 * - Sends X-Robots-Tag "noindex, noarchive", Cache-Control "no-store, no-cache,
-	 *   must-revalidate, max-age=0", Pragma "no-cache" and Expires "0".
+	 *   must-revalidate, max-age=0", Pragma "no-cache" and Expires "0", each replacing an
+	 *   earlier header of the same name.
 	 * - Sends each header through setHeader(), so with headers already sent each one is
 	 *   logged.
 	 *
@@ -211,6 +212,7 @@ class Response extends BaseService {
 	 *   script-src and connect-src allow 'self', and object-src is 'none'. img-src also allows
 	 *   data: and blob:; style-src and script-src also allow 'unsafe-inline'. With
 	 *   $allowExternal, img-src, style-src, script-src and connect-src also allow https:.
+	 * - Each header replaces an earlier header of the same name.
 	 * - When headers are already sent, sends nothing and logs it through the log service,
 	 *   when registered.
 	 *
@@ -609,7 +611,7 @@ class Response extends BaseService {
 		if (\is_int($size) && $size >= 0) {
 			\header('Content-Length: ' . $size);
 		}
-		\header('Cache-Control: private');
+		\header('Cache-Control: private');  // A download is typically meant for one user: No shared cache may store it.
 		\header('Accept-Ranges: none');
 
 		$fh = \fopen($path, 'rb');

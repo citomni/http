@@ -56,12 +56,19 @@ class Router extends BaseService {
 	 *   "index"), methods (list of HTTP methods), template_file and template_layer.
 	 *
 	 * Behavior:
-	 * - Matches the path that RoutePath::resolve() returns for REQUEST_URI. With cfg
+	 * - Matches the path that RoutePath::resolve() returns for REQUEST_URI, with
+	 *   CITOMNI_PUBLIC_ROOT_URL as the public root URL ('' when it is undefined) and
+	 *   SCRIPT_NAME, else PHP_SELF, else "/index.php" as the script name. With cfg
 	 *   http.router_case_insensitive true, paths match in any letter case, and placeholder
 	 *   captures arrive lowercased.
+	 * - The request method is REQUEST_METHOD, uppercased; GET when it is missing.
 	 * - An exact route wins over placeholder routes. Placeholder routes are tried in table
 	 *   order, and the first match wins.
 	 * - 404 through httpError() when the path contains a non-ASCII byte or no route matches.
+	 *
+	 * Notes:
+	 * - Compiles each placeholder path anew on every call, in table order until one matches,
+	 *   so a long 'regex' table costs time on every request that no exact route serves.
 	 *
 	 * @return void
 	 * @see \CitOmni\Http\Service\Router::dispatch()  What happens with the matched route.
@@ -248,7 +255,7 @@ class Router extends BaseService {
 			$this->app->errorHandler->httpError(405, [
 				'method'  => $method,
 				'allowed' => $allowed,
-				'route'   => $route,
+				'route'   => $route, // The matched route that refused the method, for diagnosing the 405 from the log.
 				'reason'  => 'method_not_allowed',
 			]);
 			return;

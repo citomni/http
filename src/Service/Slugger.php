@@ -256,7 +256,7 @@ class Slugger extends BaseService {
 
 
 	/**
-	 * Normalize a slug-like string without transliterating or shortening it.
+	 * Normalize a slug-like string for comparison, without transliterating or shortening it.
 	 *
 	 * Behavior:
 	 * - Replaces disallowed characters in the trimmed string with the separator, collapses

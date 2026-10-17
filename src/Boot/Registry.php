@@ -253,7 +253,7 @@ class Registry {
 
 				'origin_check'                 => true,                              // true also checks Origin, or Referer, against the request's own origin and trusted_origins.
 				'referer_fallback_on_https'    => true,                              // true checks the Referer like Origin when an HTTPS request has no Origin; false rejects such a request.
-				'allow_missing_origin_on_http' => true,                              // true lets a plain HTTP request without Origin pass the origin check.
+				'allow_missing_origin_on_http' => true,                              // true lets a plain HTTP request without Origin pass the origin check; meant for local development over plain HTTP.
 
 				// Other sites whose requests pass the origin check and csrf.fetch_metadata: A
 				// full origin such as 'https://app.example.com' matches exactly; a bare
@@ -301,8 +301,8 @@ class Registry {
 		'view' => [
 
 			// Template roots by layer, referenced as "path/file.html@layer": 'app' or a
-			// 'vendor/package' slug, each mapped to an absolute directory. A package that ships
-			// templates adds its own layer.
+			// 'vendor/package' slug, each mapped to an absolute directory, with or without a
+			// trailing slash. A package that ships templates adds its own layer.
 			'template_layers' => [			
 				'app' 			=> \CITOMNI_APP_PATH . '/templates',  // The app's own templates, referenced as file@app.
 				'citomni/http'	=> \CITOMNI_APP_PATH . '/vendor/citomni/http/templates',  // This package's templates, referenced as file@citomni/http.
@@ -326,7 +326,8 @@ class Registry {
 
 			// Template variables for the pages of the app, keyed by variable name, so each
 			// package and the app add their own; a later layer overrides the keys of an entry
-			// by its name. An entry:
+			// by its name. A list in place of the map, [] included, replaces the entries of the
+			// earlier layers, and list entries give no template variables. An entry:
 			//   'header' => [
 			//       'type'    => 'dynamic',      // 'static' or 'dynamic'.
 			//       'source'  => ['service' => 'sitewide', 'method' => 'header'],
@@ -334,12 +335,12 @@ class Registry {
 			//       'exclude' => ['/admin/*'],   // Optional.
 			//   ],
 			// A static source is the value itself. A dynamic source is called on every render
-			// of a page that the entry covers: "FQCN::method" with the App, ['class' => FQCN,
-			// 'method' => 'm'] on a new FQCN($app), or ['service' => 'id', 'method' => 'm'] on
-			// a registered service. include and exclude are path patterns: '*' for every page,
-			// '/' for the front page, '/admin/*' or '/admin' for a prefix, '~regex~' for a
-			// regular expression. An entry covers a page that include matches, unless exclude
-			// matches it.
+			// of a page that the entry covers, so keep it cheap and free of side effects:
+			// "FQCN::method" with the App, ['class' => FQCN, 'method' => 'm'] on a new
+			// FQCN($app), or ['service' => 'id', 'method' => 'm'] on a registered service.
+			// include and exclude are path patterns: '*' for every page, '/' for the front page,
+			// '/admin/*' or '/admin' for a prefix, '~regex~' for a regular expression. An entry
+			// covers a page that include matches, unless exclude matches it.
 			'vars' => [
 			],
 
@@ -433,7 +434,8 @@ class Registry {
 			'max_len' => 128,
 
 			// Chance of a purge of expired entries after a stored nonce, as 1 in this number;
-			// at least 1. For a busy or long-lived ledger, purge from a scheduled job as well.
+			// at least 1. Keep it above 1 on a busy ledger: 1 purges after every stored nonce.
+			// Purge a busy or long-lived ledger from a scheduled job as well.
 			'purge_probability' => 50,
 
 			// Maximum number of entries that the purge after a stored nonce scans, at least 1.

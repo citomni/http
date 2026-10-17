@@ -31,6 +31,7 @@ use CitOmni\Kernel\Service\BaseService;
  * - Build formatters only in format(), so every formatter is cached by locale, timezone
  *   and pattern.
  * - Set the defaults only in init().
+ * - Do no I/O of its own: No files, logs or other services.
  */
 class Datetime extends BaseService {
 	

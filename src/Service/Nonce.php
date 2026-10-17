@@ -43,7 +43,7 @@ class Nonce extends BaseService {
 	/** Maximum length of a namespace name, in characters. */
 	private const NAMESPACE_MAX_LEN = 64;
 
-	/** Pattern of a valid namespace name: ASCII letters, digits, _ and -. */
+	/** Pattern of a valid namespace name, which is also its directory name: ASCII letters, digits, _ and -. */
 	private const NAMESPACE_PATTERN = '/^[A-Za-z0-9_-]{1,' . self::NAMESPACE_MAX_LEN . '}$/';
 
 	/** Root directory of all namespaces, without a trailing separator. */
@@ -167,7 +167,7 @@ class Nonce extends BaseService {
 	 *   patterns end in $ without the D modifier.
 	 *
 	 * Typical usage:
-	 *   if (!$this->app->nonce->checkAndStore('webhooks', $nonce, 300)) {
+	 *   if (!$this->app->nonce->checkAndStore('password-link', $token, 900)) {
 	 *       // Replay or storage failure: Reject the request.
 	 *   }
 	 *
@@ -245,7 +245,7 @@ class Nonce extends BaseService {
 	 *   namespace without a readable directory.
 	 *
 	 * Typical usage:
-	 *   $removed = $this->app->nonce->purgeExpired('webhooks', 300);
+	 *   $removed = $this->app->nonce->purgeExpired('password-link', 900);
 	 *
 	 * @param  string  $namespace  Ledger name, such as webhooks.
 	 * @param  int  $ttlSeconds  Age from which an entry has expired, in seconds; use the TTL of the claims.
@@ -390,6 +390,7 @@ class Nonce extends BaseService {
 	 * @return bool
 	 */
 	private function hasNonceExt(string $name): bool {
+		// A plain suffix compare: pathinfo() would parse the whole name for nothing.
 		$len = \strlen(self::EXT);
 		return \strlen($name) >= $len && \substr($name, -$len) === self::EXT;
 	}

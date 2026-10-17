@@ -615,7 +615,8 @@ class SystemController extends BaseController {
 	 *       lengths of the signature and the nonce, and the timestamp with its age in seconds.
 	 *     - webhooks: Whether verification is enabled, bind_context, ttl_seconds,
 	 *       ttl_clock_skew_tolerance, and whether cfg webhooks.allowed_ips has a non-empty entry.
-	 * - Never contains the body, the signature, the secret or the computed HMAC.
+	 * - Never contains the body, the signed base string, the signature, the secret or the
+	 *   computed HMAC.
 	 * - A request that WebhooksAuth accepts uses up its nonce, like any accepted request.
 	 *
 	 * @return void

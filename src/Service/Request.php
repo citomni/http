@@ -973,7 +973,8 @@ class Request extends BaseService {
 	 *
 	 * Notes:
 	 * - Each proxy appends the address it received the request from, so the entries to the
-	 *   left of the last untrusted one may be forged by the client.
+	 *   left of the last untrusted one may be forged by the client. Proxies pass Client-Ip and
+	 *   similar headers on from the client unchanged, which is why they never count.
 	 * - Every proxy in the chain, such as a load balancer and a CDN, must be in the trusted
 	 *   proxy list. The first one missing from it is taken as the client, and a private
 	 *   address there gives "unknown".

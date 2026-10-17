@@ -228,6 +228,7 @@ class WebhooksAuth extends BaseService {
 	 *
 	 * Behavior:
 	 * - Passes only when every check passes; the last check claims the request's nonce.
+	 * - Turns only a failed check into false; any other exception passes through.
 	 * - A failure sets the last failure reason, and a pass clears it.
 	 * - Logs a failure when cfg webhooks.log_failures is true, and a pass when
 	 *   log_successes is true, through the log service when it is registered.
@@ -535,7 +536,7 @@ class WebhooksAuth extends BaseService {
 		}
 		$query = \trim($query);
 
-		// SHA-256 whatever the HMAC algo, so senders have one rule to follow.
+		// SHA-256 whatever the HMAC algo, like common public signing schemes, so senders have one rule to follow.
 		$bodySha = \hash('sha256', $rawBody);
 
 		return \implode("\n", [

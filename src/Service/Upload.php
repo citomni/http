@@ -78,8 +78,9 @@ class Upload extends BaseService {
 	 *     - exifOrient: Rotate a JPEG by its EXIF orientation, when the exif extension is loaded
 	 *       (false).
 	 *     - thumbnails: List of thumbnails, each with w and h (set one to keep the aspect ratio),
-	 *       fit (crop), format (the stored image's), quality (82), suffix ("_WxH") and column,
-	 *       the key under which thumbs returns its public path (none).
+	 *       fit as above (crop), format and quality as in encoding (the stored image's format,
+	 *       82), suffix ("_WxH") and column, the key under which thumbs returns its public path
+	 *       (none).
 	 *
 	 * Behavior:
 	 * - Fails with status false, path null, no thumbs and no deletions, the reasons in error, when:
@@ -93,10 +94,12 @@ class Upload extends BaseService {
 	 *     - A thumbnail's size resolves to 0 in a dimension, as with neither w nor h set, or the
 	 *       thumbnail cannot be made or written. The stored image and every thumbnail written
 	 *       are then deleted again.
-	 * - An image is stored resized, re-encoded or rotated as $uploadCfg says, else unchanged;
-	 *   every thumbnail is made from the uploaded image, not from the resized one. Any other
-	 *   file is stored unchanged, with an extension from its MIME type (bin when unknown) and
-	 *   without suffix or thumbnails.
+	 * - An image is resampled and re-encoded whenever w or h gives a target size, also one equal
+	 *   to the upload's. Without one it is re-encoded only when encoding is set or exifOrient
+	 *   rotated it, and is otherwise stored unchanged. Every thumbnail is made from the uploaded
+	 *   image, not from the resized one.
+	 * - Any other file is stored unchanged, with an extension from its MIME type (bin when
+	 *   unknown) and without suffix or thumbnails.
 	 * - On success: status true, path the public path of the stored file, thumbs the public
 	 *   path of each thumbnail with a column, and deleted the absolute paths of the old files
 	 *   deleted.
@@ -1491,6 +1494,7 @@ class Upload extends BaseService {
 	private function makeThumbnails(string $srcPath, array $thumbsCfg): array {
 		$out = ['_errors' => [], '_paths' => []];
 
+		// Decoded once for all thumbnails, not once per thumbnail.
 		$srcImg = $this->imageLoad($srcPath);
 		if (!$srcImg) {
 			$out['_errors'][] = $this->t('err_thumb_load', 'Failed to load image for thumbnail.');
