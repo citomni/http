@@ -215,6 +215,64 @@ TPL,
 		raises(fn() => engine()->renderToString('include-depth-0.html@app'), 'Include depth exceeded');
 		same('leaf', engine()->renderToString('include-depth-1.html@app'));
 	});
+	test('Runtime include renders the reference an expression yields, with shared scope', function () use ($root) {
+		writeTemplate($root, 'runtime-partial.html', '{{ $v }}{% set $w = 2 %}', 'provider');
+		same('[7]2', renderSource('[{% include $ref %}]{{ $w }}', ['ref' => 'runtime-partial.html@test/provider', 'v' => 7]));
+	});
+	test('Runtime include in a loop picks each template when it runs', function () use ($root) {
+		writeTemplate($root, 'runtime-a.html', 'A:{{ $block["text"] }}');
+		writeTemplate($root, 'runtime-b.html', 'B:{{ $block["text"] }}', 'provider');
+		$blocks = [['tpl' => 'runtime-a.html@app', 'text' => 'x'], ['tpl' => 'runtime-b.html@test/provider', 'text' => 'y'], ['tpl' => 'runtime-a.html@app', 'text' => 'z']];
+		same('[A:x][B:y][A:z]', renderSource('{% foreach ($blocks as $block) %}[{% include $block["tpl"] %}]{% endforeach %}', ['blocks' => $blocks]));
+	});
+	test('Parenthesized runtime include expression may start with a string literal', function () use ($root) {
+		writeTemplate($root, 'runtime-hero.html', 'HERO');
+		same('HERO', renderSource('{% include ("runtime-" . $type . ".html@app") %}', ['type' => 'hero']));
+	});
+	test('Runtime include sees a changed partial on a warm render and stays out of the caller manifest', function () use ($root) {
+		$path = writeTemplate($root, 'runtime-fresh.html', 'one');
+		writeTemplate($root, 'runtime-caller.html', '[{% include $ref %}]');
+		$e = engine(); $data = ['ref' => 'runtime-fresh.html@app'];
+		same('[one]', $e->renderToString('runtime-caller.html@app', $data));
+		file_put_contents($path, 'two updated'); same('[two updated]', $e->renderToString('runtime-caller.html@app', $data));
+		$manifest = json_decode(file_get_contents(callPrivate($e, 'cacheFileName', 'runtime-caller.html', 'app') . '.meta.json'), true);
+		same(1, count($manifest['dependencies']));
+	});
+	test('Runtime partial sees a changed quoted include of its own on a warm render', function () use ($root) {
+		$inner = writeTemplate($root, 'runtime-inner.html', 'one', 'provider');
+		writeTemplate($root, 'runtime-outer.html', '<{% include "runtime-inner.html@test/provider" %}>');
+		writeTemplate($root, 'runtime-outer-caller.html', '[{% include $ref %}]');
+		$e = engine(); $data = ['ref' => 'runtime-outer.html@app'];
+		same('[<one>]', $e->renderToString('runtime-outer-caller.html@app', $data));
+		file_put_contents($inner, 'two updated'); same('[<two updated>]', $e->renderToString('runtime-outer-caller.html@app', $data));
+		$manifest = json_decode(file_get_contents(callPrivate($e, 'cacheFileName', 'runtime-outer.html', 'app') . '.meta.json'), true);
+		same(2, count($manifest['dependencies']));
+	});
+	test('Dynamic view variables run once per render however many runtime includes run', function () use ($root, $layers) {
+		CountingProvider::$staticCalls = 0;
+		$app = new App($layers, ['vars' => ['counter' => ['type' => 'dynamic', 'source' => CountingProvider::class . '::value']]]);
+		writeTemplate($root, 'runtime-counter.html', '{{ $counter }}');
+		writeTemplate($root, 'runtime-counter-caller.html', '{% foreach ([1, 2, 3] as $i) %}[{% include $ref %}]{% endforeach %}');
+		ob_start(); engine(app: $app)->render('runtime-counter-caller.html@app', ['ref' => 'runtime-counter.html@app']);
+		same('[1][1][1]', ob_get_clean()); same(1, CountingProvider::$staticCalls);
+	});
+	test('Runtime include of an invalid reference fails when it runs, not when it compiles', function () use ($root) {
+		writeTemplate($root, 'runtime-bad.html', '{% if $go %}{% include $ref %}{% endif %}ok');
+		$e = engine(); same('ok', $e->renderToString('runtime-bad.html@app', ['go' => false, 'ref' => 'absent.html@app']));
+		raises(fn() => $e->renderToString('runtime-bad.html@app', ['go' => true, 'ref' => 'absent.html@app']), 'not found');
+		raises(fn() => $e->renderToString('runtime-bad.html@app', ['go' => true, 'ref' => 'no-layer.html']), 'must contain', InvalidArgumentException::class);
+	});
+	test('Runtime partial may extend a layout', function () use ($root) {
+		writeTemplate($root, 'runtime-child.html', '{% extends "layout.html@test/provider" %}{% block content %}P{% endblock %}');
+		same('[BEGINPEND]', renderSource('[{% include $ref %}]', ['ref' => 'runtime-child.html@app']));
+	});
+	test('Runtime include may include its own template', function () use ($root) {
+		// foreach iterates the children it read first, so reassigning $node in the shared scope is safe.
+		writeTemplate($root, 'runtime-tree.html', '{% foreach ($node["children"] as $node) %}({{ $node["name"] }}{% include $tree %}){% endforeach %}');
+		$node = ['children' => [['name' => 'a', 'children' => [['name' => 'c', 'children' => []]]], ['name' => 'b', 'children' => []]]];
+		same('(a(c))(b)', engine()->renderToString('runtime-tree.html@app', ['node' => $node, 'tree' => 'runtime-tree.html@app']));
+	});
+	test('Include with an unclosed quote stays literal', fn() => same('{% include "absent.html@app %}{% include  "absent.html@app %}', renderSource('{% include "absent.html@app %}{% include  "absent.html@app %}')));
 
 	$badRefs = [
 		'Missing layer separator' => ['file.html', 'must contain', InvalidArgumentException::class],

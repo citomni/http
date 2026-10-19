@@ -46,9 +46,9 @@ class TemplateEngine extends BaseService {
 	// ----------------------------------------------------------------
 
 	/** Format version of compiled generations and manifests; raise it when the compiler emits other PHP for the same source or the manifest changes. */
-	private const string COMPILER_VERSION = '3';
+	private const string COMPILER_VERSION = '4';
 
-	/** Maximum nesting depth of includes. */
+	/** Maximum nesting depth of includes with a quoted reference, which expand at compile time. */
 	private const int MAX_INCLUDE_DEPTH = 16;
 
 	/** Maximum number of parent layouts in one inheritance chain. */
@@ -57,7 +57,7 @@ class TemplateEngine extends BaseService {
 	/** Pattern of an extends directive; group 1 is the parent reference. */
 	private const string EXTENDS_PATTERN = '/{%\s*extends\s+["\'](.+?)["\']\s*%}/';
 
-	/** Pattern of an include directive, case-insensitive; group 1 is the reference. */
+	/** Pattern of an include directive with a quoted reference, case-insensitive; group 1 is the reference. */
 	private const string INCLUDE_PATTERN = '/{%\s*include\s+["\'](.+?)["\']\s*%}/i';
 
 	/** Pattern of a block with its body, which ends at the first endblock; group 1 is the name, group 2 the body. */
@@ -1024,8 +1024,8 @@ class TemplateEngine extends BaseService {
 	 * - Compiles in this order, so a later step sees the result of the earlier ones:
 	 *     1) Remove "{# ... #}" comments from each source as it is read.
 	 *     2) Resolve "{% extends %}", "{% block %}" and "{% yield %}".
-	 *     3) Expand "{% include %}".
-	 *     4) Compile output, assignment, control flow and inline PHP.
+	 *     3) Expand "{% include %}" with a quoted reference.
+	 *     4) Compile output, assignment, control flow, runtime includes and inline PHP.
 	 *     5) Remove HTML comments and collapse whitespace, when remove_html_comments or
 	 *        trim_whitespace is on.
 	 * - Compiles again when a source changed after it was read, and throws after three attempts.
@@ -1717,6 +1717,8 @@ class TemplateEngine extends BaseService {
 	 * - Inserts the source literally, so it becomes part of the including template and shares
 	 *   its variables.
 	 * - A template may be included several times, but never inside itself.
+	 * - Expands only quoted references; an include directive with any other reference stays in
+	 *   place.
 	 *
 	 * Notes:
 	 * - Includes are expanded after inheritance: An included template cannot extend a layout.
@@ -1729,6 +1731,7 @@ class TemplateEngine extends BaseService {
 	 * @return string
 	 * @throws \InvalidArgumentException  When an include reference has no "@", an empty path or layer, or a NUL byte in the path.
 	 * @throws \RuntimeException  When an included source cannot be loaded, includes are circular or too deep, or a regular expression fails.
+	 * @see \CitOmni\Http\Service\TemplateEngine::compileSyntax()  Includes whose reference is an expression.
 	 */
 	private function processIncludes(string $code, int $depth, array &$context): string {
 
@@ -1786,7 +1789,7 @@ class TemplateEngine extends BaseService {
 	// ----------------------------------------------------------------
 
 	/**
-	 * Compile output, assignment, control flow and inline PHP to PHP.
+	 * Compile output, assignment, control flow, runtime includes and inline PHP to PHP.
 	 *
 	 * Expressions are native PHP expressions; the template language has no expression syntax of
 	 * its own.
@@ -1797,6 +1800,11 @@ class TemplateEngine extends BaseService {
 	 *   undefined variable, key or property as the whole expr, echoes nothing.
 	 * - "{{{ expr }}}" echoes expr unescaped; use it only for trusted markup.
 	 * - "{% set $name = expr %}" assigns a local variable; the "$" is required.
+	 * - "{% include expr %}", where expr does not start with a quote, is a runtime include:
+	 *   Whenever the directive runs, the "path@layer" reference that expr yields goes through
+	 *   compile(), and the generation it returns runs in the template's own scope, so the two
+	 *   share their variables as with a quoted include. An expr that starts with a string
+	 *   literal goes in parentheses, such as {% include ("blocks/" . $type . ".html@app") %}.
 	 * - "{% if expr %}", "{% elseif expr %}", "{% else %}", "{% endif %}", "{% foreach (expr) %}"
 	 *   and "{% endforeach %}" compile to the alternative PHP syntax; foreach needs the
 	 *   parentheses.
@@ -1809,12 +1817,19 @@ class TemplateEngine extends BaseService {
 	 * - Reads and writes no file.
 	 *
 	 * Notes:
-	 * - An if, elseif or foreach expression must fit on one line; output, set and inline PHP
-	 *   expressions may span lines.
+	 * - An if, elseif, foreach or include expression must fit on one line; output, set and inline
+	 *   PHP expressions may span lines.
+	 * - A runtime include is resolved when it runs: A missing or invalid reference fails then, not
+	 *   when the including template compiles. The included template is compiled on its own, so it
+	 *   may extend a layout, it is not a dependency of the including template, and its sources are
+	 *   checked on every run as compile() checks them.
+	 * - No depth limit or circular check applies to runtime includes: A template may include
+	 *   itself, and a recursion that never ends runs until PHP stops it.
 	 *
 	 * @param  string  $code  Source after inheritance and includes.
 	 * @return string  PHP mixed with literal markup.
 	 * @throws \RuntimeException  When a regular expression fails.
+	 * @see \CitOmni\Http\Service\TemplateEngine::compile()  How a reference becomes a generation and when it is compiled again.
 	 */
 	private function compileSyntax(string $code): string {
 
@@ -1839,6 +1854,11 @@ class TemplateEngine extends BaseService {
 
 			// Local assignment. The template variable name must include the leading $.
 			'/{%\s*set\s+\$([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+?)\s*%}/s',
+
+			// Runtime include. processIncludes() has expanded every well-formed quoted reference,
+			// so an include that starts with a quote here is malformed and stays literal. \s++ is
+			// possessive, so the lookahead cannot pass by giving back a space before the quote.
+			'/{%\s*include\s++(?![\'"])(.+?)\s*%}/i',
 
 			// Conditional control flow. Expressions remain native PHP expressions.
 			'/{%\s*if\s*(.+?)\s*%}/',
@@ -1876,8 +1896,10 @@ class TemplateEngine extends BaseService {
 			'<?php echo $1; ?>',
 			'<?php echo htmlspecialchars($1 ?? "", \ENT_QUOTES | \ENT_SUBSTITUTE, ' . $charset . '); ?>',
 
-			// Assignment and control flow.
+			// Assignment, runtime include and control flow. The include runs in the scope of the
+			// template, which executeCompiled() binds to this engine, so compile() is reachable.
 			'<?php $$1 = $2; ?>',
+			'<?php require $this->compile($1); ?>',
 			'<?php if ($1): ?>',
 			'<?php elseif ($1): ?>',
 			'<?php else: ?>',

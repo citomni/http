@@ -775,10 +775,29 @@ The compiler supports explicit `{% extends %}`, `{% block %}`/`{% endblock %}`, 
 | `{{ $title }}` | HTML-escaped output |
 | `{{{ $trustedHtml }}}` | Raw output; caller is responsible for safety |
 | `{% include "file.html@app" %}` | Compile and include an explicit partial |
+| `{% include $block['template'] %}` | Include the partial whose reference the expression yields, chosen when the template runs |
 | `{% extends "layout.html@app" %}` | Inherit an explicit layout |
 | `{? ... ?}` and `{?= ... ?}` | Optional inline PHP, controlled by `view.allow_php_tags` |
 
 **Templates are trusted executable source, not a sandbox for user-provided templates.** The default `view.allow_php_tags` is `true`. Set it to `false` if inline PHP tags are not needed, and never allow an untrusted user to choose arbitrary template sources, expressions, or raw HTML.
+
+### Compile-time and runtime includes
+
+A quoted reference is a compile-time include: the partial's source is inserted into the including template when it compiles, so it becomes part of that generation and its dependencies. Circular includes and more than 16 nested levels are rejected.
+
+Any other expression is a runtime include, resolved each time the directive runs. It is meant for partials chosen by data, such as one template per content block:
+
+```html
+{% foreach ($blocks as $block) %}
+	{% include $block['template'] %}
+{% endforeach %}
+```
+
+- The expression is native PHP and must yield a `path@layer` reference. One that starts with a string literal goes in parentheses: `{% include ("blocks/" . $type . ".html@app") %}`.
+- The partial is compiled and cached on its own and runs in the including template's scope, so both share their variables, as with a compile-time include. It may extend a layout.
+- Its sources are checked on every run, and it is not a dependency of the including template. A missing or invalid reference fails when the directive runs.
+- No depth limit or circular check applies, so a partial can include itself, for example to render a tree. A recursion that never ends runs until PHP stops it.
+- Take the reference from code or cfg, never from request data or other untrusted input.
 
 ### Globals and template helpers
 

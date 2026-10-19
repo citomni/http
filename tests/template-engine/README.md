@@ -6,11 +6,11 @@ Regression checks for `CitOmni\Http\Service\TemplateEngine`: syntax, inheritance
 php tests/template-engine/run.php
 ```
 
-Expected: `131 passed, 0 failed, 4 skipped`
+Expected: `141 passed, 0 failed, 4 skipped`
 
-With `CITOMNI_TEST_PARALLEL=1` the four parallel cases run too. Expected: `135 passed, 0 failed`
+With `CITOMNI_TEST_PARALLEL=1` the four parallel cases run too. Expected: `145 passed, 0 failed`
 
-Where PHP cannot create symlinks, for example on Windows without the symlink privilege, the two symlink cases are skipped as well: `129 passed, 0 failed, 6 skipped`, or `133 passed, 0 failed, 2 skipped` with `CITOMNI_TEST_PARALLEL=1`.
+Where PHP cannot create symlinks, for example on Windows without the symlink privilege, the two symlink cases are skipped as well: `139 passed, 0 failed, 6 skipped`, or `143 passed, 0 failed, 2 skipped` with `CITOMNI_TEST_PARALLEL=1`.
 
 The suite runs the real TemplateEngine against the doubles in `tests/bootstrap.php`. Templates, provider templates and the cache live in a temporary `CITOMNI_APP_PATH`, which the suite removes afterwards.
 
@@ -21,6 +21,7 @@ The suite runs the real TemplateEngine against the doubles in `tests/bootstrap.p
 - Block content is inserted literally during inheritance: JavaScript regexes, `$1` and `\1` references, Windows and UNC paths, empty and whitespace-only blocks, binary and Unicode content.
 - Inheritance: repeated and compact yields, hyphenated and numeric block names, yield cascades and multi-level inheritance across layers. Duplicate, orphan and missing blocks, circular inheritance and a chain of 65 `extends` are rejected.
 - Includes: source inserted literally with shared scope, nested and repeated includes, references inside template comments that are never loaded, no phantom dependency from unused child source, whitespace variants of `extends` and `include`. Circular includes are rejected, and 16 nested includes render while 17 are rejected.
+- Runtime includes: an expression picks the partial when the template runs, also per item of a loop and as a parenthesized expression that starts with a string literal. The partial shares the including scope, may extend a layout and may include itself; a changed partial, or a changed quoted include inside it, is noticed on a warm render, and the partial stays out of the including template's manifest; dynamic view variables run once per render, however many runtime includes run; an invalid reference fails only when the directive runs. An include with an unclosed quote stays literal.
 - Template references: a missing layer separator, an empty path or layer, an unknown layer, a missing source, NUL, directory traversal and a directory are rejected. The last `@` separates the layer, and a leading slash is dropped.
 - Cache: warm renders notice an mtime moved backwards at an equal size, a size change at an equal mtime, changed includes and layouts, and deleted sources. Compile options, layer directories and `locale.charset` get their own cache identity, and service options override cfg. A corrupt manifest is rebuilt without being evaluated, a manifest generation outside the cache is not used, and a missing generation is rebuilt. Warm renders rewrite nothing, generations are content-addressed and reused for unchanged compiled bytes, the manifest holds one snapshot per logical dependency, a disabled cache picks up edits that keep size and mtime, the cache directory is created on first use, and a failed publication keeps the destination and removes its temporary file.
 - Symlinks: a link out of the layer is rejected, and a retargeted link is noticed on a warm render.
