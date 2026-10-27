@@ -172,6 +172,7 @@ try {
 	check('A mounted app matches exemptions relative to the app root', function () use ($server, $cross): void {
 		$query = '?root=' . \rawurlencode('https://example.test/sub');
 		response($server->request('GET', '/sub/_pdf-viewer/assets/worker.js' . $query, $cross), 200, true);
+		response($server->request('GET', '/SUB/_pdf-viewer/assets/worker.js' . $query, $cross), 200, true);
 		response($server->request('GET', '/sub/private' . $query, $cross), 403, false);
 	});
 	check('SCRIPT_NAME fallback agrees with the router in a subdirectory', function () use ($server, $cross): void {

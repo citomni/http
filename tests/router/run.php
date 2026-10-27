@@ -178,11 +178,22 @@ try {
 		same($call('index'), $route('GET', '/sub', ['root' => 'https://example.test/sub'])['report'], 'the prefix itself is /');
 	});
 
+	check('The base prefix matches in any letter case; the route path only with cfg', function () use ($route, $call, $error): void {
+		same($call('show', ['5']), $route('GET', '/SUB/user/5', ['root' => 'https://example.test/sub'])['report'], 'public root path');
+		same($call('show', ['5']), $route('GET', '/sub/user/5', ['script' => '/Sub/public/index.php'])['report'], 'script name');
+		same($call('index'), $route('GET', '/SUB/Mixed/Case', ['root' => 'https://example.test/sub'])['report'], 'route path in its own case');
+		same($error(404, 'route_not_found'), $route('GET', '/sub/MIXED/case', ['root' => 'https://example.test/sub'])['report'], 'route path in another case');
+		same($call('show', ['5']), $route('GET', '/SUB/USER/5', ['ci' => '1', 'root' => 'https://example.test/sub'])['report'], 'route path in another case with cfg');
+	});
+
+	check('The base prefix ends at a segment boundary', function () use ($route, $call): void {
+		same($call('index', options: ['template_file' => 'public/read.html', 'template_layer' => 'app']), $route('GET', '/read', ['root' => 'https://example.test/re'])['report']);
+	});
+
 	check('Case-insensitive matching is off by default and opt-in through cfg', function () use ($route, $call, $error): void {
 		same($error(404, 'route_not_found'), $route('GET', '/MIXED/case')['report']);
 		same($call('index'), $route('GET', '/MIXED/case', ['ci' => '1'])['report']);
 		same($call('show', ['intro']), $route('GET', '/DOCS/intro', ['ci' => '1'])['report'], 'regex route');
-		same($call('show', ['5']), $route('GET', '/SUB/user/5', ['ci' => '1', 'root' => 'https://example.test/sub'])['report'], 'base prefix');
 	});
 
 } finally {

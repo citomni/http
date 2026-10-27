@@ -6,7 +6,7 @@ Isolated checks for `CitOmni\Http\Service\Router`: matching, placeholders, metho
 php tests/router/run.php
 ```
 
-Expected: `11 passed, 0 failed`
+Expected: `13 passed, 0 failed`
 
 Each case sends real requests to PHP's built-in web server with `server.php` as router, so status codes and the `Allow` header are the ones a client receives. `server.php` holds the route table and the controller and error handler doubles, which report through an `X-Fixture-Report` header, so HEAD and 204 responses carry a report too.
 
@@ -30,7 +30,9 @@ Methods:
 Base prefix and case:
 
 - The base prefix comes from the path of `CITOMNI_PUBLIC_ROOT_URL`, else from the directory of `SCRIPT_NAME` without a trailing `/public`.
-- Case-insensitive matching is off by default and turned on by `http.router_case_insensitive`, for exact routes, placeholder routes and the base prefix.
+- The base prefix matches in any letter case, also without `http.router_case_insensitive`; the route path below it keeps its case.
+- The base prefix ends at a segment boundary: Under `/re`, `/read` stays `/read`.
+- Case-insensitive matching of the route path is off by default and turned on by `http.router_case_insensitive`, for exact routes and placeholder routes.
 
 ## Notes
 

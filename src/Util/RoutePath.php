@@ -33,14 +33,13 @@ class RoutePath {
 	 * - Drops the query string, then the mount path. The mount path is the path of
 	 *   $publicRootUrl without trailing slashes or, when that is empty, the directory of
 	 *   $scriptName with backslashes as slashes and without a trailing "/public".
-	 * - The mount path is removed as a plain string prefix, also where the next character is
-	 *   not "/": Mount path "/app" turns "/apple" into "le". A path that does not start with
-	 *   it is kept whole.
+	 * - Removes the mount path in any ASCII letter case, but only where the path ends or
+	 *   continues with "/" after it: Mount path "/app" turns "/APP/x" into "/x". Any other
+	 *   path, "/apple" included, is kept whole.
 	 * - Percent-decodes once (rawurldecode(), so "+" stays "+"), after the mount path is
 	 *   removed, so an encoded "%2F" becomes a slash of the route path.
 	 * - Removes trailing slashes; an empty result becomes "/".
-	 * - With $caseInsensitive, the mount path matches in any letter case and the result is
-	 *   lowercased.
+	 * - With $caseInsensitive, the result is lowercased.
 	 * - Keeps dot segments, repeated slashes, control characters and non-ASCII bytes as sent.
 	 *
 	 * Typical usage:
@@ -64,11 +63,13 @@ class RoutePath {
 			}
 		}
 
+		// On a case-insensitive file system the server maps the mount path to this script in
+		// any letter case, so the request may spell it differently than $publicRootUrl and
+		// $scriptName do. Behind a proxy that strips the mount path, a route may start with
+		// the same letters; the segment boundary keeps such a route whole.
 		if ($basePrefix !== '') {
 			$length = \strlen($basePrefix);
-			$matches = \strncmp($uri, $basePrefix, $length) === 0
-				|| ($caseInsensitive && \strncasecmp($uri, $basePrefix, $length) === 0);
-			if ($matches) {
+			if (\strncasecmp($uri, $basePrefix, $length) === 0 && (!isset($uri[$length]) || $uri[$length] === '/')) {
 				$uri = \substr($uri, $length);
 			}
 		}
