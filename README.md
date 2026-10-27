@@ -27,7 +27,7 @@ Services are registered by stable IDs and resolved lazily through the CitOmni `A
 - **Maintenance mode** backed by an atomic flag file, a client IP allowlist, and HTTP 503 responses.
 - **Structured HTTP error logging** with rotation, request correlation, and safe error-page fallbacks.
 - **HTTP diagnostics and operations endpoints** with access restrictions appropriate to their purpose.
-- **Small supporting services** for localized dates, inline icons, slugs, tags, and the package's existing HTTP upload workflows.
+- **Small supporting services** for localized dates, inline icons, and the package's existing HTTP upload workflows.
 
 ---
 
@@ -72,11 +72,9 @@ The vendor HTTP service map currently registers these IDs:
 | `maintenance` | `Service\Maintenance` | Maintenance flag management and HTTP guard |
 | `datetime` | `Service\Datetime` | Localized date/time formatting |
 | `icon` | `Service\Icon` | Layer-owned inline SVG icon lookup |
-| `slugger` | `Service\Slugger` | Slug normalization, validation and uniqueness planning |
-| `tags` | `Service\Tags` | Tag parsing, normalization and change planning |
 | `upload` | `Service\Upload` | Existing HTTP column and attachment upload workflows |
 
-These are **18** vendor baseline service IDs. Applications and providers can override registrations through the service-map merge. A different registered implementation may therefore occupy an ID in a particular application.
+These are **16** vendor baseline service IDs. Applications and providers can override registrations through the service-map merge. A different registered implementation may therefore occupy an ID in a particular application.
 
 The package also supplies `Kernel`, its vendor `Boot\Registry`, public and system controllers, the `Policy\FetchMetadataPolicy` decision class, pure `Util\Url` and `Util\RoutePath` helpers, installation scaffolds, templates, translations, and package-specific exceptions.
 
@@ -103,7 +101,7 @@ The package also supplies `Kernel`, its vendor `Boot\Registry`, public and syste
 - SQL, database schema, or persistence repositories.
 - User authentication, accounts, roles, or MFA; those belong to `citomni/authenticate`.
 - The underlying image-processing engine; captcha rendering delegates to `citomni/image`.
-- The `txt`, database, mail, and application log services from `citomni/infrastructure`.
+- The `txt`, database, mail, application log and `slugger` services from `citomni/infrastructure`.
 - Automated CSRF validation on every controller action. A controller must explicitly invoke the CSRF service where needed.
 - Webhook delivery by a remote sender. The package verifies inbound requests; the sending system must implement the signing protocol.
 - An external template language such as Twig.
@@ -428,10 +426,10 @@ Example service override in `config/services_http.php`:
 declare(strict_types=1);
 
 return [
-	'slugger' => [
-		'class' => \CitOmni\Http\Service\Slugger::class,
+	'tplEngine' => [
+		'class' => \CitOmni\Http\Service\TemplateEngine::class,
 		'options' => [
-			'maxLength' => 100,
+			'trim_whitespace' => false,
 		],
 	],
 ];
@@ -1722,52 +1720,6 @@ SVG returned by `get()` is trusted markup. In templates, render it with the `$ic
 
 Do not accept an arbitrary untrusted SVG path, icon file, or markup through this interface.
 
-### Slugs
-
-`$this->app->slugger` converts display text into a configured URL-safe slug and validates candidates:
-
-```php
-$slugger = $this->app->slugger;
-
-$slug = $slugger->slugify('A New Article');
-$slugger->validate($slug);
-$normalized = $slugger->normalize('A---New-Article');
-$shortened = $slugger->enforceLength($slug, 60);
-$reserved = $slugger->isReserved($slug);
-```
-
-For uniqueness, supply the persistence lookup as a callback:
-
-```php
-$unique = $this->app->slugger->ensureUnique(
-	fn(string $candidate): bool => $repository->slugExists($candidate),
-	$this->app->slugger->slugify($title),
-);
-```
-
-`slugExists()` is **illustrative application Repository code**, not a method provided by `citomni/http`. `ensureUnique()` tests the base and numeric suffixes deterministically; it does not lock a database row or guarantee race-free uniqueness. Enforce a unique index at the persistence boundary.
-
-The policy lives under `http.slug` in the baseline: `separator`, `lowercase`, `maxLength`, `transliterate`, `reserved`, and `allowedPattern`. Options in the service-map definition of `slugger` override single keys.
-
-### Tags
-
-`$this->app->tags` parses and plans tag changes without doing SQL:
-
-```php
-$tags = $this->app->tags;
-
-$labels = $tags->deduplicate($tags->parse('Finance, Property; PHP'));
-$diff = $tags->diff(['Property'], $labels);
-$slugs = $tags->mapLabelsToSlugs($labels);
-$pivot = $tags->planPivotChanges([3, 7], [7, 9]);
-```
-
-`diff()` returns `['add' => [...], 'remove' => [...]]`; `planPivotChanges()` returns `['attach' => [...], 'detach' => [...]]`. `normalizeLabel()`, `validateLabel()`, and `toSlug()` are also public.
-
-`resolveTagIds($labels, $getOrCreate)` invokes a caller-supplied callback receiving `(string $label, string $slug): int` for persistence, keeping SQL outside the HTTP service. Use your Repository or Operation to own transactions, tag uniqueness constraints, and pivot writes.
-
-The policy lives under `http.tags` in the baseline: `delimiters`, `maxLabelLength`, `caseMode`, `collapseWhitespace`, `disallowedPattern`, and `maxTagsPerEntity`. Options in the service-map definition of `tags` override single keys. The tag service depends on `slugger` for tag slugs. It uses Unicode-aware `mb_*` functions for several operations; verify the application's relevant PHP extensions if those features are needed.
-
 ---
 
 ## Uploads
@@ -1822,8 +1774,6 @@ The baseline comes from `\CitOmni\Http\Boot\Registry::CFG_HTTP`. The table is an
 | `maintenance` | `flag`, `backup`, `log` | Atomic maintenance flag and recovery |
 | `webhooks` | `enabled`, `secret_file`, `ttl_seconds`, `ttl_clock_skew_tolerance`, `allowed_ips`, `algo`, `bind_context`, header and log keys | Signed inbound webhooks |
 | `nonce` | `dir`, `max_len`, `purge_probability`, `purge_limit`, `dir_mode`, `file_mode` | Single-use ledger |
-| `http.slug` | `separator`, `lowercase`, `maxLength`, `transliterate`, `reserved`, `allowedPattern` | Slugger policy |
-| `http.tags` | `delimiters`, `maxLabelLength`, `caseMode`, `collapseWhitespace`, `disallowedPattern`, `maxTagsPerEntity` | Tags policy |
 
 Config keys are read-only when accessed through `$this->app->cfg`. A direct read of a missing key throws `\OutOfBoundsException`; `??` and `isset()` check every node on the path and never throw on a missing key. Choose the form by who owns the key:
 
@@ -1860,8 +1810,15 @@ These older configuration names are not the current contracts:
 | `view.view_vars` | `view.vars`, keyed by variable name |
 | `webhooks.nonce_dir` | `nonce.dir` |
 | `WebhooksAuth::setOptions()` and `assertAuthorized()` | `verify()`, `requireValid()`, `requireOrAbort()` |
+| `slugger` of citomni/http and `http.slug` | `slugger` of citomni/infrastructure and `slug` |
+| `tags` of citomni/http and `http.tags` | No successor in this package |
 
 The distinction matters when debugging a configuration that appears to be loaded but has no effect. Do not add a compatibility shim merely to preserve outdated documentation examples.
+
+The package no longer registers `slugger` and `tags`, and its baseline no longer has `http.slug` and `http.tags`:
+
+- `slugger` comes from citomni/infrastructure, in HTTP and CLI, with the same public methods. An app that calls it lists `\CitOmni\Infrastructure\Boot\Registry::class` in `config/providers.php` and moves an override of `http.slug` to `slug`, with the renamed keys that the README of citomni/infrastructure lists.
+- The tag helpers of `tags` are gone without a successor. citomni/findability registers a `tags` service of its own, for a sitewide taxonomy with its own tables and methods.
 
 ---
 
@@ -2062,8 +2019,6 @@ src/
 │   ├── Response.php
 │   ├── Router.php
 │   ├── Session.php
-│   ├── Slugger.php
-│   ├── Tags.php
 │   ├── TemplateEngine.php
 │   ├── Upload.php
 │   └── WebhooksAuth.php

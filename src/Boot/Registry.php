@@ -47,8 +47,6 @@ class Registry {
 		'nonce'			=> \CitOmni\Http\Service\Nonce::class,
 		'maintenance'	=> \CitOmni\Http\Service\Maintenance::class,
 		'webhooksAuth'	=> \CitOmni\Http\Service\WebhooksAuth::class,
-		'slugger'		=> \CitOmni\Http\Service\Slugger::class,
-		'tags'			=> \CitOmni\Http\Service\Tags::class,
 		'upload' 		=> \CitOmni\Http\Service\Upload::class,
 		'icon'			=> \CitOmni\Http\Service\Icon::class,
 
@@ -83,26 +81,6 @@ class Registry {
 			// true matches request paths in any letter case, for routes and fetch_metadata
 			// exemptions alike. A local development convenience; keep false in stage and prod.
 			'router_case_insensitive' => false,
-
-			// Slugger policy. Service-map options of the slugger service override each key.
-			'slug' => [
-				'separator'      => '-',               // Text that replaces disallowed characters and joins words; not empty.
-				'lowercase'      => true,              // Lowercase slugs; validate() then rejects uppercase.
-				'maxLength'      => 140,               // Maximum slug length in bytes, at least 1; slugify() shortens longer slugs, validate() rejects them.
-				'transliterate'  => true,              // Transliterate to ASCII before disallowed characters are replaced.
-				'reserved'       => [],                // Slugs that validate() rejects, compared case-insensitively.
-				'allowedPattern' => '/[^a-z0-9\-]+/i', // PCRE that matches the disallowed characters slugify() replaces with the separator.
-			],
-
-			// Tags policy. Service-map options of the tags service override each key.
-			'tags' => [
-				'delimiters'         => [',', ';'],    // Label separators for parse(), at least one: One entry splits on that string, several split on each of their characters.
-				'maxLabelLength'     => 80,            // Maximum label length in characters, at least 1; validateLabel() rejects longer labels.
-				'caseMode'           => 'preserve',    // Label casing: preserve, title (each word capitalized, the rest lowercased) or lower.
-				'collapseWhitespace' => true,          // Replace runs of whitespace in a label with one space.
-				'disallowedPattern'  => null,          // PCRE that makes validateLabel() reject a label when it matches; null for none.
-				'maxTagsPerEntity'   => null,          // Maximum labels parse() returns, at least 1; null for no limit.
-			],
 		],
 
 
