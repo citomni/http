@@ -57,9 +57,13 @@ declare(strict_types=1);
  *   - EMPTY ARRAYS ARE SKIPPED:
  *     If this file returns [], the app does NOT treat that as
  *     "wipe all routes". It simply means "no overrides from app base".
- *     Same for providers with ROUTES_HTTP = [] and for the {ENV} file.
- *     This applies to whole layers only: 'regex' => [] inside a layer
- *     replaces the regex routes of all earlier layers.
+ *     Same for providers with ROUTES_HTTP = [] and for the {ENV} file,
+ *     and for an empty 'regex' => [] inside a layer.
+ *
+ *   - NULL REMOVES A ROUTE:
+ *     '/path' => null removes a literal route of an earlier layer, and a
+ *     pattern under 'regex' set to null removes one regex route.
+ *     'regex' => null removes every regex route.
  *
  * RUNTIME ACCESS:
  *   - After merge, the final route table lives on the App instance:
@@ -154,8 +158,6 @@ return [
 	// -----------------------------------------------------------------
 	// Regex / placeholder routes (evaluated in array order)
 	// Placeholders supported only here. Built-ins: {id}, {email}, {slug}, {code}
-	// Keep at least one pattern when you enable this key: an empty
-	// 'regex' => [] replaces the regex routes of vendor and providers.
 	// -----------------------------------------------------------------
 
 	/*

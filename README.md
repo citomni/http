@@ -446,7 +446,7 @@ Routes are assembled separately from configuration:
 3. `config/citomni_http_routes.php`.
 4. `config/citomni_http_routes.{ENV}.php`.
 
-The merged route array is exposed as `$this->app->routes`, **not** `$this->app->cfg->routes`. Routes with the same key merge their associative fields, with later values winning; the `methods` list is replaced as one value. A wholly empty route layer contributes nothing, while an explicit nested `'regex' => []` can replace the earlier regex bucket.
+The merged route array is exposed as `$this->app->routes`, **not** `$this->app->cfg->routes`. Routes with the same key merge their associative fields, with later values winning; the `methods` list is replaced as one value. A wholly empty route layer contributes nothing, and neither does an empty nested `'regex' => []`. A route set to `null` is removed, also under `'regex'`, and `'regex' => null` removes every placeholder route.
 
 `config/citomni_http_routes.dev.php` can supply development-only routes without modifying production routing. Route errors are handled by `ErrorHandler`, not by numeric `403`, `404`, or `500` entries in the route table.
 
@@ -1556,7 +1556,7 @@ Date and time are in the app's timezone, the six-digit microseconds come from th
 - `enabled => false`, or a `keep` of 0 or less, writes no backup. Existing backups are left in place.
 - `dir` must be a non-empty string and is used as configured. A trailing separator is fine, and a filesystem root stays a root.
 - Pruning deletes only names in the form above, plus the `<Ymd_His>_<6 digits>.bak` form written by earlier versions. Other files in the directory are never deleted, even when they start with the flag file name.
-- The backup policy is read before anything is written, also while backups are disabled. A `dir` that is not a non-empty string throws `UnexpectedValueException`, and a removed key, for example when a configuration layer replaces `backup` with `[]`, throws `OutOfBoundsException`. In both cases the flag and its directories are left unchanged.
+- The backup policy is read before anything is written, also while backups are disabled. A `dir` that is not a non-empty string throws `UnexpectedValueException`, and a missing key throws `OutOfBoundsException`. In both cases the flag and its directories are left unchanged.
 
 ---
 

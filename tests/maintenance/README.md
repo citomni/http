@@ -30,7 +30,7 @@ Names and pruning:
 
 Missing keys:
 
-- A `backup` node that a cfg layer replaces with `[]` makes `disable()` throw `OutOfBoundsException` for `enabled` before the flag is replaced, and no backup is written.
+- A `backup` node without its keys makes `disable()` throw `OutOfBoundsException` for `enabled` before the flag is replaced, and no backup is written.
 
 ## Regression proof
 

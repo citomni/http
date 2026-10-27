@@ -285,15 +285,18 @@ try {
 
 	// -- 4. Missing policy keys -------------------------------------------------
 
-	check('A backup node emptied by a cfg layer throws before the flag is replaced', function (): void {
+	check('A backup node without its keys throws before the flag is replaced', function (): void {
 		resetVar();
 		writeFlags(maintenanceFor(), 1);
 		$before = (string)\file_get_contents(flagPath());
 
-		// The kernel merge replaces an associative node with an empty array.
+		// Built without mergeLastWins(), which, like the kernel merge, keeps the keys of a
+		// node that a layer sets to [].
+		$app = new App(['maintenance' => ['backup' => []] + Registry::CFG_HTTP['maintenance']]);
+		$app->set('request', new RequestDouble());
 		$message = null;
 		try {
-			maintenanceFor(['backup' => []])->setRetryAfter(900)->disable();
+			(new MaintenanceProbe($app))->setRetryAfter(900)->disable();
 		} catch (\OutOfBoundsException $e) {
 			$message = $e->getMessage();
 		}

@@ -37,7 +37,8 @@ declare(strict_types=1);
  * MERGE RULES:
  *   - Associative arrays merge recursively; per-key, the last source wins.
  *   - Numeric arrays (lists) are replaced wholesale by the last source.
- *   - Empty values ('', 0, false, null, []) are still valid overrides and they win.
+ *   - Empty values ('', 0, false, null, []) are still valid overrides and they win,
+ *     except that [] leaves an associative array unchanged.
  *
  * ACCESS IN CODE:
  *   - $this->app->cfg->identity->app_name

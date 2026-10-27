@@ -304,8 +304,9 @@ class Registry {
 
 			// Template variables for the pages of the app, keyed by variable name, so each
 			// package and the app add their own; a later layer overrides the keys of an entry
-			// by its name. A list in place of the map, [] included, replaces the entries of the
-			// earlier layers, and list entries give no template variables. An entry:
+			// by its name. A list with entries in place of the map replaces the entries of the
+			// earlier layers, and list entries give no template variables; [] leaves them as
+			// they are. An entry:
 			//   'header' => [
 			//       'type'    => 'dynamic',      // 'static' or 'dynamic'.
 			//       'source'  => ['service' => 'sitewide', 'method' => 'header'],
