@@ -144,6 +144,7 @@ Depending on the selected features:
 
 - PHP `ext-opcache` is recommended for production performance and supports the OPcache administration actions when available.
 - PHP `ext-fileinfo` improves MIME detection for downloads and is used by the existing upload service when available.
+- PHP `ext-curl` is needed by `GET /_system/outbound-ip.json`; without it, the endpoint answers that the extension is not available.
 - GD and `citomni/image` are needed for image-backed captcha rendering; the image package has its own runtime requirements.
 - PHP `ext-mbstring` is useful for Unicode-sensitive operations but is not a declared package requirement.
 
@@ -1659,11 +1660,14 @@ These are part of the vendor baseline and are not automatically secured by HMAC.
 | `POST /_system/reset-cache` | Reset application compiled caches and relevant runtime caches |
 | `POST /_system/warmup-cache` | Warm supported compiled application caches |
 | `GET /_system/upload-limits.json` | Report current upload constraints |
+| `GET /_system/outbound-ip.json` | Report the server's outbound IPv4 and IPv6 addresses |
 | `GET /_system/maintenance` | Inspect maintenance state |
 | `POST /_system/maintenance/enable` | Enable maintenance mode |
 | `POST /_system/maintenance/disable` | Disable maintenance mode |
 
 These actions call `webhooksAuth->requireOrAbort()` and return an inconspicuous **404** on invalid/missing authentication. They require a configured secret and valid signed request when webhooks are enabled, including for GET operations. A request method alone does not grant access.
+
+`GET /_system/outbound-ip.json` asks the echo services in cfg `system.outbound_ip` (ipify by default), once over IPv4 and once over IPv6, and reports the address each one saw, or why the lookup failed. That is the address other services see this server's requests come from, such as for an IP allow-list; behind NAT or a load balancer it can differ from the address clients connect to.
 
 `POST /_system/_debug/webhook` is a diagnostic endpoint that runs verification and reports controlled results. Unlike the protected operations above, it is not an invisible 404-only administrative action; avoid exposing it unnecessarily. A successful verification can consume a nonce, just like a normal webhook request.
 
@@ -1774,6 +1778,7 @@ The baseline comes from `\CitOmni\Http\Boot\Registry::CFG_HTTP`. The table is an
 | `maintenance` | `flag`, `backup`, `log` | Atomic maintenance flag and recovery |
 | `webhooks` | `enabled`, `secret_file`, `ttl_seconds`, `ttl_clock_skew_tolerance`, `allowed_ips`, `algo`, `bind_context`, header and log keys | Signed inbound webhooks |
 | `nonce` | `dir`, `max_len`, `purge_probability`, `purge_limit`, `dir_mode`, `file_mode` | Single-use ledger |
+| `system.outbound_ip` | `ipv4_url`, `ipv6_url`, `timeout` | Echo services for `/_system/outbound-ip.json` |
 
 Config keys are read-only when accessed through `$this->app->cfg`. A direct read of a missing key throws `\OutOfBoundsException`; `??` and `isset()` check every node on the path and never throw on a missing key. Choose the form by who owns the key:
 

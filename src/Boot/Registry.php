@@ -426,6 +426,20 @@ class Registry {
 			'file_mode' => 0660,
 		],
 
+
+		// The /_system/ endpoints of SystemController.
+		'system' => [
+			// The lookup of the server's outbound addresses at /_system/outbound-ip.json: Echo
+			// services that answer with status 200 and, as the body, the bare address that a
+			// request comes from; surrounding whitespace is ignored. Each lookup connects only
+			// over its own family, so ipv4_url must be reachable over IPv4 and ipv6_url over IPv6.
+			'outbound_ip' => [
+				'ipv4_url' => 'https://api.ipify.org',  // URL of the echo service asked over IPv4.
+				'ipv6_url' => 'https://api6.ipify.org', // URL of the echo service asked over IPv6.
+				'timeout'  => 5,                        // Maximum seconds per lookup, the connection included; at least 1.
+			],
+		],
+
 	];
 
 
@@ -504,6 +518,11 @@ class Registry {
 		'/_system/upload-limits.json' => [
 			'controller' => \CitOmni\Http\Controller\SystemController::class,
 			'action' => 'uploadLimitsJson',
+			'methods' => ['GET'],
+		],
+		'/_system/outbound-ip.json' => [
+			'controller' => \CitOmni\Http\Controller\SystemController::class,
+			'action' => 'outboundIpJson',
 			'methods' => ['GET'],
 		],
 		'/_system/maintenance' => [

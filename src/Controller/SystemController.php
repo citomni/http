@@ -28,9 +28,10 @@ use CitOmni\Kernel\Support\AppInfo;
  *
  * Rules:
  * - Send no-cache headers with every answer.
- * - Change the App's cache files, maintenance mode or other application state only after
- *   WebhooksAuth::requireOrAbort(PROTECTED_FAIL_STATUS) has accepted the request. What
- *   verification itself records, such as a used nonce, belongs to WebhooksAuth.
+ * - Change the App's cache files, maintenance mode or other application state, or make an
+ *   outbound request, only after WebhooksAuth::requireOrAbort(PROTECTED_FAIL_STATUS) has
+ *   accepted the request. What verification itself records, such as a used nonce, belongs to
+ *   WebhooksAuth.
  * - Answer a request that a guard rejects with 404, as for a missing route, so the endpoint
  *   is not disclosed.
  * - An action without a guard answers every client: Never put filesystem paths, secrets or
@@ -485,6 +486,101 @@ class SystemController extends BaseController {
 			'post_max_size'       => (string)\ini_get('post_max_size'),
 			'max_file_uploads'    => (int)\ini_get('max_file_uploads'),
 		], 200);
+	}
+
+
+	/**
+	 * Answer the server's outbound IPv4 and IPv6 addresses as JSON.
+	 *
+	 * Helps to find the addresses that another service must allow, such as an API with an IP
+	 * allow-list or cfg webhooks.allowed_ips of another app. Each address is the one that an
+	 * external echo service saw, so it is the address after NAT and any outbound proxy, which
+	 * can differ from the address that clients connect to.
+	 *
+	 * Behavior:
+	 * - PROTECTED_FAIL_STATUS through WebhooksAuth::requireOrAbort() when the request is not
+	 *   accepted. No lookup is made.
+	 * - Otherwise 200 with ipv4 and ipv6, each {"ip": ..., "error": ...}:
+	 *     - ip: An address of that family, or null when the lookup failed.
+	 *     - error: The reason when ip is null, as a message for a human, such as the cURL error
+	 *       or the HTTP status of the echo service; null when ip is set.
+	 *     - Without ext-curl, no lookup is made, and both errors say that it is not available.
+	 *
+	 * Notes:
+	 * - The two lookups run one after the other, so the answer can take up to twice cfg
+	 *   system.outbound_ip.timeout.
+	 *
+	 * @return void
+	 * @see \CitOmni\Http\Service\WebhooksAuth::requireOrAbort()  Which requests are accepted.
+	 */
+	public function outboundIpJson(): void {
+		$this->app->response->noCache();
+
+		// Guarded: The answer can reveal an origin address that a CDN hides, and every answer
+		// costs two outbound requests.
+		$this->app->webhooksAuth->requireOrAbort(self::PROTECTED_FAIL_STATUS);
+
+		// ext-curl may be missing, and the CURL_* constants below with it. Answer in the same
+		// shape, so a caller handles one format.
+		if (!\function_exists('curl_init')) {
+			$missing = ['ip' => null, 'error' => 'ext-curl is not available.'];
+			$this->app->response->jsonStatus(['ipv4' => $missing, 'ipv6' => $missing], 200);
+		}
+
+		$cfg = $this->app->cfg->system->outbound_ip;
+		$timeout = (int)$cfg->timeout;
+
+		$this->app->response->jsonStatus([
+			'ipv4' => $this->lookupOutboundIp((string)$cfg->ipv4_url, \CURL_IPRESOLVE_V4, \FILTER_FLAG_IPV4, $timeout),
+			'ipv6' => $this->lookupOutboundIp((string)$cfg->ipv6_url, \CURL_IPRESOLVE_V6, \FILTER_FLAG_IPV6, $timeout),
+		], 200);
+	}
+
+
+	/**
+	 * Ask a plain text echo service which address a request over one IP family comes from.
+	 *
+	 * Forcing the family makes the echo service see the server's address of that family, not
+	 * the address of whichever family the connection would prefer.
+	 *
+	 * Behavior:
+	 * - ip is the answer body, trimmed, when the status is 200 and the body is an address of
+	 *   the family of $familyFlag.
+	 * - Otherwise ip is null, and error holds the cURL error, the HTTP status, or that the
+	 *   answer is not an address of the family.
+	 *
+	 * @param  string  $url  URL of the echo service.
+	 * @param  int  $resolve  CURL_IPRESOLVE_V4 or CURL_IPRESOLVE_V6.
+	 * @param  int  $familyFlag  FILTER_FLAG_IPV4 or FILTER_FLAG_IPV6, for the family of $resolve.
+	 * @param  int  $timeout  Maximum seconds for the request, the connection included.
+	 * @return array{ip:?string,error:?string}
+	 */
+	private function lookupOutboundIp(string $url, int $resolve, int $familyFlag, int $timeout): array {
+		$ch = \curl_init();
+		\curl_setopt_array($ch, [
+			\CURLOPT_URL            => $url,
+			\CURLOPT_RETURNTRANSFER => true,
+			\CURLOPT_TIMEOUT        => $timeout,
+			\CURLOPT_IPRESOLVE      => $resolve,
+		]);
+
+		$body = \curl_exec($ch);
+		if (!\is_string($body)) {
+			// curl_error() can be empty, such as for an IP literal of the other family.
+			return ['ip' => null, 'error' => \curl_error($ch) ?: (string)\curl_strerror(\curl_errno($ch))];
+		}
+
+		$status = (int)\curl_getinfo($ch, \CURLINFO_RESPONSE_CODE);
+		if ($status !== 200) {
+			return ['ip' => null, 'error' => 'The echo service answered with HTTP status ' . $status . '.'];
+		}
+
+		$ip = \trim($body);
+		if (\filter_var($ip, \FILTER_VALIDATE_IP, $familyFlag) === false) {
+			return ['ip' => null, 'error' => 'The answer of the echo service is not an address of this family.'];
+		}
+
+		return ['ip' => $ip, 'error' => null];
 	}
 
 

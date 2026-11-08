@@ -26,6 +26,7 @@
 		}
 	},
 	"suggest": {
+		"ext-curl": "Outbound IP lookup at /_system/outbound-ip.json",
 		"ext-json": "Faster JSON handling for Response/ErrorHandler",
 		"ext-fileinfo": "Accurate MIME detection for Response::download()",
 		"ext-opcache": "Better performance and cache invalidation",
